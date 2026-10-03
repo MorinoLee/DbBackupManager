@@ -1,0 +1,49 @@
+<div class="auth-form-field">
+    <label class="auth-form-field__label" for="@Id">@Label</label>
+    <input id="@Id"
+           class="auth-form-field__input"
+           name="@Name"
+           type="@Type"
+           autocomplete="@Autocomplete"
+           autocapitalize="@Autocapitalize"
+           spellcheck="@Spellcheck"
+           required="@Required"
+           minlength="@MinLength"
+           maxlength="@MaxLength"
+           data-testid="@TestId" />
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Id { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired]
+    public string Label { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired]
+    public string Name { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired]
+    public string Type { get; set; } = "text";
+
+    [Parameter, EditorRequired]
+    public string Autocomplete { get; set; } = string.Empty;
+
+    [Parameter]
+    public string? Autocapitalize { get; set; }
+
+    [Parameter]
+    public string? Spellcheck { get; set; }
+
+    [Parameter]
+    public bool Required { get; set; } = true;
+
+    [Parameter]
+    public int? MinLength { get; set; }
+
+    [Parameter]
+    public int? MaxLength { get; set; }
+
+    [Parameter, EditorRequired]
+    public string TestId { get; set; } = string.Empty;
+}

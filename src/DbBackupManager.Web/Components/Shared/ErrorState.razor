@@ -1,0 +1,57 @@
+@*
+    失败态只接收调用方准备好的中文提示，不接收也不显示原始异常、堆栈或连接串；
+    详细技术信息只能进入服务端日志。重试期间按钮保持禁用，避免重复触发同一次请求。
+*@
+<div class="app-state" data-testid="error-state">
+    <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="app-state-alert">
+        <MudText Typo="Typo.subtitle1">@Title</MudText>
+        @if (!string.IsNullOrWhiteSpace(Description))
+        {
+            <MudText Typo="Typo.body2" data-testid="error-state-description">@Description</MudText>
+        }
+    </MudAlert>
+    @if (OnRetry.HasDelegate)
+    {
+        <div class="app-state-actions">
+            <MudButton Variant="Variant.Filled"
+                       Color="Color.Primary"
+                       StartIcon="@Icons.Material.Outlined.Refresh"
+                       Disabled="_isRetrying"
+                       OnClick="RetryAsync"
+                       data-testid="error-state-retry">
+                @(_isRetrying ? "正在重试…" : "重试")
+            </MudButton>
+        </div>
+    }
+</div>
+
+@code {
+    private bool _isRetrying;
+
+    [Parameter]
+    public string Title { get; set; } = "加载失败";
+
+    [Parameter]
+    public string? Description { get; set; } = "请稍后重试；如果持续失败，请联系管理员查看服务端日志。";
+
+    [Parameter]
+    public EventCallback OnRetry { get; set; }
+
+    private async Task RetryAsync()
+    {
+        if (_isRetrying)
+        {
+            return;
+        }
+
+        _isRetrying = true;
+        try
+        {
+            await OnRetry.InvokeAsync();
+        }
+        finally
+        {
+            _isRetrying = false;
+        }
+    }
+}

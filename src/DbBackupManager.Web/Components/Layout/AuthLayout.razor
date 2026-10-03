@@ -1,0 +1,26 @@
+@*
+    登录、首次设置与拒绝访问等认证流程页使用的独立布局。
+    只呈现品牌、简短说明和表单内容，不显示后台侧栏、用户菜单或后台工具按钮。
+    认证页均为 Static SSR，本布局不得依赖交互式服务。
+*@
+@inherits LayoutComponentBase
+
+<MudThemeProvider Theme="AppTheme.Default" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<div class="auth-shell">
+    <main class="auth-shell__main">
+        <header class="auth-shell__brand">
+            <p class="auth-shell__brand-name">DbBackupManager</p>
+            <p class="auth-shell__brand-description">SQL Server 备份管理平台</p>
+        </header>
+        <div class="auth-shell__content">
+            @Body
+        </div>
+        <footer class="auth-shell__footer">
+            本地账号认证 · 密码与凭据不会回显到页面或日志
+        </footer>
+    </main>
+</div>

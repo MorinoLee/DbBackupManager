@@ -1,0 +1,241 @@
+@*
+    计划备份配置：创建、编辑、启用和禁用 Daily/Weekly 策略，并显示下一次计划时隙。
+    不提供立即运行；手动备份仍走独立页面。
+*@
+@page "/scheduled-backup-policies"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@implements IDisposable
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Application.Servers
+@using DbBackupManager.Application.StorageTargets
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.SqlCredentials
+@using DbBackupManager.Web.BackupTasks
+@using Microsoft.AspNetCore.Authorization
+@inject IScheduledBackupPolicyService Management
+@inject IStorageTargetManagementService StorageTargets
+@inject AuthenticationStateProvider Authentication
+@inject IDialogService Dialogs
+
+<PageTitle>计划备份 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="计划备份"
+                        Description="创建、编辑、启用或禁用按策略时区运行的 Daily/Weekly 计划。Worker 按生效基线生成任务；本页不提供立即运行。">
+                <Actions>
+                    @if (!_login)
+                    {
+                        <MudButton OnClick="RefreshAsync"
+                                   Disabled="_busy"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Refresh"
+                                   data-testid="refresh-scheduled-policies">
+                            刷新
+                        </MudButton>
+                        <MudButton OnClick="@(() => OpenEditorAsync(null))"
+                                   Disabled="_busy"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Outlined.Add"
+                                   data-testid="new-scheduled-policy">
+                            添加计划备份
+                        </MudButton>
+                    }
+                </Actions>
+            </PageHeader>
+            @if (_error is not null) { <MudAlert Severity="Severity.Error" role="alert">@_error</MudAlert> }
+            @if (_message is not null) { <MudAlert Severity="Severity.Success" role="status">@_message</MudAlert> }
+            @if (_login) { <MudButton Href="/login?returnUrl=/scheduled-backup-policies" Color="Color.Primary">重新登录</MudButton> }
+            else if (_dashboard.Policies.Count == 0 && _dashboard.Databases.Count == 0)
+            {
+                <EmptyState Title="暂无可备份的数据库"
+                            Icon="@Icons.Material.Outlined.Schedule"
+                            Description="先在“数据库清单”中纳管需要备份的数据库，再回来创建计划备份。">
+                    <Actions>
+                        <MudButton Href="/databases" Variant="Variant.Filled" Color="Color.Primary">前往数据库清单</MudButton>
+                    </Actions>
+                </EmptyState>
+            }
+            else
+            {
+                <MudTable T="ScheduledBackupPolicy" Items="_dashboard.Policies" Loading="_busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1">
+                    <HeaderContent>
+                        <MudTh>配置名称</MudTh><MudTh>数据库</MudTh><MudTh>调度</MudTh><MudTh>下次运行</MudTh><MudTh>状态</MudTh><MudTh>操作</MudTh>
+                    </HeaderContent>
+                    <RowTemplate Context="policy">
+                        <MudTd DataLabel="配置名称">@policy.Settings.Name</MudTd>
+                        <MudTd DataLabel="数据库">@DatabaseLabel(policy.Settings.DatabaseId)</MudTd>
+                        <MudTd DataLabel="调度">@ScheduleLabel(policy)</MudTd>
+                        <MudTd DataLabel="下次运行">@NextRunLabel(policy)</MudTd>
+                        <MudTd DataLabel="状态">
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                     Color="@(policy.Settings.IsEnabled ? Color.Success : Color.Default)">
+                                @(policy.Settings.IsEnabled ? "已启用" : "已停用")
+                            </MudChip>
+                        </MudTd>
+                        <MudTd DataLabel="操作">
+                            <MudButton Size="Size.Small" OnClick="@(() => OpenEditorAsync(policy))" Disabled="_busy" data-testid="edit-scheduled-policy">编辑</MudButton>
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText Class="pa-4">暂无计划备份配置，点击“添加计划备份”创建。</MudText></NoRecordsContent>
+                </MudTable>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private static readonly DialogOptions EditorOptions = new() { MaxWidth = MaxWidth.Small, FullWidth = true };
+    private readonly CancellationTokenSource _lifetime = new();
+    private ScheduledBackupDashboard _dashboard = new([], []);
+    private IReadOnlyList<StorageTargetItem> _targets = [];
+    private bool _busy, _disposed, _login;
+    private string? _error, _message;
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    private string DatabaseLabel(Guid databaseId) =>
+        _dashboard.Databases.FirstOrDefault(x => x.Id == databaseId)?.Label ?? "原数据库（当前不可用）";
+
+    private static string ScheduleLabel(ScheduledBackupPolicy policy) =>
+        policy.Settings.ScheduleType == 2
+            ? $"每周 {policy.Settings.LocalTime:HH\\:mm} ({policy.Settings.TimeZoneId})"
+            : $"每天 {policy.Settings.LocalTime:HH\\:mm} ({policy.Settings.TimeZoneId})";
+
+    private static string NextRunLabel(ScheduledBackupPolicy policy)
+    {
+        if (!policy.Settings.IsEnabled) return "已停用";
+        if (policy.NextSlotUtc is not { } utc || policy.NextSlotLocal is not { } local)
+        {
+            return "暂无即将到来的时隙";
+        }
+
+        return $"{local:yyyy-MM-dd HH:mm} / {utc.UtcDateTime:yyyy-MM-dd HH:mm} UTC";
+    }
+
+    private async Task RunAsync(Func<AdminSession, Task> action)
+    {
+        if (_busy || _disposed) return;
+        _busy = true; _error = null; _message = null;
+        try
+        {
+            var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+            if (actor is null) { Failure(BackupManagementCode.AuthenticationRequired); return; }
+            await action(actor);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception) { Failure(BackupManagementCode.Unavailable); }
+        finally { _busy = false; }
+    }
+
+    private Task RefreshAsync() => RunAsync(LoadAsync);
+
+    private async Task LoadAsync(AdminSession actor)
+    {
+        var result = await Management.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
+        var targets = await StorageTargets.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (targets.Code == ManagementCode.AuthenticationRequired) { Failure(BackupManagementCode.AuthenticationRequired); return; }
+        _dashboard = result.Value!;
+        _targets = targets.Value ?? [];
+        if (targets.Code != ManagementCode.Succeeded) Failure(BackupManagementCode.Unavailable);
+    }
+
+    private async Task OpenEditorAsync(ScheduledBackupPolicy? policy)
+    {
+        if (_busy || _disposed) return;
+        var model = policy is null ? new ScheduledPolicyFormModel() : new ScheduledPolicyFormModel
+        {
+            Name = policy.Settings.Name,
+            DatabaseId = policy.Settings.DatabaseId,
+            ScheduleType = (int)policy.Settings.ScheduleType,
+            LocalTime = policy.Settings.LocalTime.ToTimeSpan(),
+            TimeZoneId = policy.Settings.TimeZoneId,
+            StorageMode = policy.Settings.StorageMode,
+            StorageTargetId = policy.Settings.StorageTargetId ?? Guid.Empty,
+            RetentionDays = policy.Settings.LocalRetentionDays ?? 7,
+            RemoteRetentionDays = policy.Settings.RemoteRetentionDays ?? 7,
+            BackupMinutes = policy.Settings.BackupTimeoutMinutes,
+            VerifyMinutes = policy.Settings.VerifyTimeoutMinutes,
+            TransferMinutes = policy.Settings.TransferTimeoutMinutes,
+            Compression = policy.Settings.UseCompression,
+            Enabled = policy.Settings.IsEnabled
+        };
+        if (policy is not null) model.SetDays(policy.Settings.DaysOfWeek);
+        var parameters = new DialogParameters<ScheduledBackupPolicyEditDialog>
+        {
+            { dialog => dialog.Title, policy is null ? "添加计划备份" : "编辑计划备份" },
+            { dialog => dialog.Model, model },
+            { dialog => dialog.Databases, _dashboard.Databases },
+            { dialog => dialog.Targets, _targets },
+            { dialog => dialog.IsEdit, policy is not null },
+            { dialog => dialog.OnSave, (ScheduledPolicyFormModel input) => SaveAsync(policy?.Id, policy?.Version, input) },
+        };
+        var dialog = await Dialogs.ShowAsync<ScheduledBackupPolicyEditDialog>(
+            policy is null ? "添加计划备份" : "编辑计划备份", parameters, EditorOptions);
+        await dialog.Result;
+    }
+
+    private async Task<string?> SaveAsync(Guid? id, string? version, ScheduledPolicyFormModel input)
+    {
+        _error = null;
+        _message = null;
+        var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+        if (actor is null)
+        {
+            Failure(BackupManagementCode.AuthenticationRequired);
+            return null;
+        }
+
+        var result = await Management.SaveAsync(actor, id, version, new ScheduledBackupPolicyInput(
+            input.DatabaseId,
+            input.Name,
+            input.ScheduleType,
+            TimeOnly.FromTimeSpan(input.LocalTime ?? TimeSpan.FromHours(2)),
+            input.ScheduleType == 2 ? input.DaysOfWeek() : 0,
+            input.TimeZoneId,
+            input.StorageMode,
+            input.StorageMode == 1 ? null : input.StorageTargetId,
+            input.StorageMode == 3 ? null : input.RetentionDays,
+            input.StorageMode == 1 ? null : input.RemoteRetentionDays,
+            input.BackupMinutes,
+            input.VerifyMinutes,
+            input.TransferMinutes,
+            input.Compression,
+            input.Enabled), _lifetime.Token);
+        if (_disposed) return null;
+        if (result.Code == BackupManagementCode.AuthenticationRequired)
+        {
+            Failure(result.Code);
+            return null;
+        }
+
+        if (result.Code != BackupManagementCode.Succeeded)
+        {
+            return BackupPresentation.Error(result.Code).Message;
+        }
+
+        _message = "计划备份配置已保存。";
+        await LoadAsync(actor);
+        return null;
+    }
+
+    private void Failure(BackupManagementCode code)
+    {
+        if (_disposed) return;
+        _error = BackupPresentation.Error(code).Message;
+        if (code == BackupManagementCode.AuthenticationRequired)
+        {
+            _login = true;
+            _dashboard = new([], []);
+            _targets = [];
+        }
+    }
+
+    public void Dispose() { _disposed = true; _lifetime.Cancel(); _lifetime.Dispose(); }
+}

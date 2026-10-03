@@ -1,0 +1,104 @@
+@page "/backup-tasks"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@inherits SearchMonitoringPageBase
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.BackupTasks
+@using DbBackupManager.Web.SqlCredentials
+@using Microsoft.AspNetCore.Authorization
+@inject IBackupManagementService Management
+@inject AuthenticationStateProvider Authentication
+
+<PageTitle>任务记录 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized>
+        <MudStack Spacing="3">
+            <PageHeader Title="任务记录" Description="查询全部任务；日期按创建时间筛选。">
+                <Actions><MudButton OnClick="RefreshAsync" Disabled="Disabled" Variant="Variant.Outlined" data-testid="refresh-tasks">刷新</MudButton><MudButton Href="/backup-policies" Variant="Variant.Outlined">备份配置</MudButton></Actions>
+            </PageHeader>
+            @if (Error is not null) { <MudAlert Severity="Severity.Error" role="alert">@Error</MudAlert> }
+            @if (_commandError is not null) { <MudAlert Severity="Severity.Error" role="alert">@_commandError</MudAlert> }
+            @if (_message is not null) { <MudAlert Severity="Severity.Success" role="status">@_message</MudAlert> }
+            @if (RequiresLogin) { <MudButton Href="/login?returnUrl=/backup-tasks">重新登录</MudButton> }
+            else
+            {
+                <MudPaper Class="pa-4" Elevation="1">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" md="4"><MudTextField T="string" Immediate="true" @bind-Value="SearchInput" Label="数据库 / 配置名称" MaxLength="200" Disabled="Disabled" Variant="Variant.Outlined" Margin="Margin.Dense" data-testid="search-text" /></MudItem>
+        <MudItem xs="12" md="2"><MudSelect T="string" @bind-Value="StatusInput" Label="任务状态" Disabled="Disabled" Variant="Variant.Outlined" Margin="Margin.Dense" data-testid="search-status"><MudSelectItem T="string" Value="@string.Empty">全部状态</MudSelectItem>@foreach (var state in new[] { "Pending", "Running", "NeedsAttention", "Succeeded", "Failed", "Cancelled" }) { <MudSelectItem T="string" Value="@state">@BackupPresentation.State(state)</MudSelectItem> }</MudSelect></MudItem>
+        <MudItem xs="6" md="2"><MudTextField T="string" Immediate="true" @bind-Value="FromInput" InputType="InputType.Date" Label="起始日期" Disabled="Disabled" Variant="Variant.Outlined" Margin="Margin.Dense" /></MudItem>
+        <MudItem xs="6" md="2"><MudTextField T="string" Immediate="true" @bind-Value="UntilInput" InputType="InputType.Date" Label="结束日期（含）" Disabled="Disabled" Variant="Variant.Outlined" Margin="Margin.Dense" /></MudItem>
+        <MudItem xs="12" md="2"><MudCheckBox T="bool" @bind-Value="OldestInput" Label="最早优先" Disabled="Disabled" /></MudItem>
+    </MudGrid>
+    <MudStack Row="true" Class="mt-3" Wrap="Wrap.Wrap">
+        <MudButton OnClick="ApplySearch" Disabled="Disabled" Variant="Variant.Filled" Color="Color.Primary" data-testid="apply-search">查询</MudButton>
+        <MudButton OnClick="ResetSearch" Disabled="Disabled" data-testid="reset-search">重置</MudButton>
+    </MudStack>
+</MudPaper>
+                <MudTable T="BackupTaskSummary" Items="_data.Items" Loading="Busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1">
+                    <HeaderContent><MudTh>数据库 / 配置</MudTh><MudTh>状态与阶段</MudTh><MudTh>创建时间</MudTh><MudTh>副本大小</MudTh><MudTh>操作</MudTh></HeaderContent>
+                    <RowTemplate Context="task">
+                        <MudTd DataLabel="数据库 / 配置">@task.DatabaseName / @task.PolicyName</MudTd>
+                        <MudTd DataLabel="状态与阶段"><div><TaskStatusChip Status="@task.Status" /> <span>@BackupPresentation.Stage(task.Stage)</span>
+                            @if (task.ErrorCode is not null) { <MudText Typo="Typo.caption">@BackupPresentation.FailureReason(task.ErrorCode)</MudText> }
+                            @if (task.CancellationRequested && task.Status is "Pending" or "Running") { <MudText Typo="Typo.caption">已请求取消，等待安全边界。</MudText> }
+                        </div></MudTd>
+                        <MudTd DataLabel="创建时间">@Formatters.LocalDateTime(task.CreatedAtUtc)</MudTd>
+                        <MudTd DataLabel="副本大小">@Formatters.Bytes(task.FileLength)</MudTd>
+                        <MudTd DataLabel="操作">
+                            <MudButton Size="Size.Small" Href="@($"/backup-tasks/{task.Id}?page={Page}&back={Uri.EscapeDataString(ListUrl)}")" Disabled="Disabled" data-testid="task-detail">详情</MudButton>
+                            @if (task.Status is "Pending" or "Running") { <MudButton Size="Size.Small" OnClick="@(() => MutateAsync(task.Id, false))" Disabled="@(Disabled || task.CancellationRequested)" data-testid="cancel-task">请求取消</MudButton> }
+                            @if (task.Status == "Failed") { <MudButton Size="Size.Small" OnClick="@(() => MutateAsync(task.Id, true))" Disabled="Disabled" data-testid="retry-task">重试</MudButton> }
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText Class="pa-4">暂无符合条件的任务。可调整筛选，或从备份配置发起一次备份。</MudText></NoRecordsContent>
+                </MudTable>
+                <MudStack Row="true" AlignItems="AlignItems.Center" Wrap="Wrap.Wrap" data-testid="task-pager">
+                    <MudButton OnClick="Previous" Disabled="@(Disabled || Page <= 0)" Variant="Variant.Outlined" data-testid="previous-page">上一页</MudButton>
+                    <MudText>第 @(Page + 1) 页 · 共 @_data.TotalCount 条</MudText>
+                    <MudButton OnClick="Next" Disabled="@(Disabled || !_data.HasMore)" Variant="Variant.Outlined" data-testid="next-page">下一页</MudButton>
+                </MudStack>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+@code {
+    private BackupPage<BackupTaskSummary> _data = new([], 0, 0);
+    private readonly Dictionary<(Guid, bool), Guid> _requests = new();
+    private bool _mutating;
+    private string? _commandError, _message;
+    private bool Disabled => Busy || _mutating;
+    protected override string ListRoute => "/backup-tasks";
+    protected override async Task<Action> FetchAsync(AdminSession actor, CancellationToken token)
+    {
+        var result = Require(await Monitoring.TasksAsync(actor, Query(), token));
+        return () => _data = result;
+    }
+    protected override void ClearData() => _data = new([], 0, 0);
+    private async Task MutateAsync(Guid id, bool retry)
+    {
+        if (Disabled || IsDisposed) return;
+        _mutating = true; _commandError = null; _message = null;
+        try
+        {
+            var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+            if (actor is null) { ClearData(); await RefreshAsync(); return; }
+            if (!_requests.TryGetValue((id, retry), out var request)) _requests[(id, retry)] = request = Guid.NewGuid();
+            var result = retry ? await Management.RetryAsync(actor, id, request, LifetimeToken) : await Management.CancelAsync(actor, id, request, LifetimeToken);
+            if (IsDisposed) return;
+            if (result.Code != BackupManagementCode.Succeeded)
+            {
+                _commandError = BackupPresentation.Error(result.Code).Message;
+                if (result.Code == BackupManagementCode.AuthenticationRequired) { ClearData(); await RefreshAsync(); }
+                return;
+            }
+            _requests.Remove((id, retry));
+            _message = retry ? "已提交重试。" : "已提交取消请求。";
+            await RefreshAsync();
+        }
+        catch (Exception) { _commandError = "操作暂未得到确认，请重试；会保留同一请求标识。"; }
+        finally { _mutating = false; }
+    }
+}

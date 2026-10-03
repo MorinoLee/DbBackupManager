@@ -1,0 +1,288 @@
+name: 持续集成
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  changes:
+    name: 分析改动范围
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      infrastructure: ${{ steps.filter.outputs.infrastructure }}
+      web: ${{ steps.filter.outputs.web }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 判断需要执行的测试层级
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # 手动运行始终执行完整回归。
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "infrastructure=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 无法可靠计算 diff 时宁可全跑，避免漏测。
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "infrastructure=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # core.quotepath=false：避免中文等非 ASCII 路径被 C 引号转义（"docs/\xxx.md"），否则路径分类失效。
+          if ! git -c core.quotepath=false diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "infrastructure=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t files < changed-files.txt
+          printf 'Changed files:\n%s\n' "${files[*]}"
+
+          code=false
+          infrastructure=false
+          web=false
+
+          for file in "${files[@]}"; do
+            case "$file" in
+              docs/*|*.md)
+                # 纯文档修改只运行本改动检测 Job，避免完整 CI。
+                ;;
+
+              .github/workflows/*|*.sln|*.slnx|*.props|*.targets|global.json|NuGet.Config)
+                # 构建/依赖/CI 基础设施变化可能影响所有测试层。
+                code=true
+                infrastructure=true
+                web=true
+                ;;
+
+              src/DbBackupManager.Domain/*|src/DbBackupManager.Application/*)
+                # Infrastructure 和 Web 均依赖核心层。
+                code=true
+                infrastructure=true
+                web=true
+                ;;
+
+              src/DbBackupManager.Contracts/*)
+                # Web 直接依赖 Contracts。
+                code=true
+                web=true
+                ;;
+
+              src/DbBackupManager.Infrastructure/*)
+                # Web 直接依赖 Infrastructure，因此两组重测试都需要执行。
+                code=true
+                infrastructure=true
+                web=true
+                ;;
+
+              src/DbBackupManager.Web/*|tests/DbBackupManager.Web.Tests/*)
+                code=true
+                web=true
+                ;;
+
+              tests/DbBackupManager.Infrastructure.Tests/*)
+                code=true
+                infrastructure=true
+                ;;
+
+              src/DbBackupManager.Worker/*|tests/DbBackupManager.Domain.Tests/*|tests/DbBackupManager.Application.Tests/*|tests/DbBackupManager.ArchitectureTests/*|tests/DbBackupManager.Worker.Tests/*)
+                # 已知只需要快速层覆盖的生产/测试路径。
+                code=true
+                ;;
+
+              *)
+                # 新增项目、工具或其他无法识别的路径默认执行完整回归。
+                # 这是安全兜底：新增路径未同步分类规则时宁可多跑，不能漏跑。
+                code=true
+                infrastructure=true
+                web=true
+                ;;
+            esac
+          done
+
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "infrastructure=$infrastructure" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+
+  quick:
+    name: 快速构建与测试
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: 缓存 NuGet 包
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'NuGet.Config', 'global.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: 还原依赖
+        run: dotnet restore DbBackupManager.slnx
+
+      - name: 检查代码格式
+        run: dotnet format DbBackupManager.slnx --verify-no-changes --no-restore
+
+      - name: Release 构建
+        run: dotnet build DbBackupManager.slnx --configuration Release --no-restore
+
+      - name: 发布与部署脚本边界回归
+        shell: pwsh
+        run: ./scripts/ci/Test-DeploymentScripts.ps1 -PublishSmoke -EventLogSmoke
+
+      - name: 运行快速测试
+        shell: pwsh
+        run: |
+          $projects = @(
+            'tests/DbBackupManager.Domain.Tests/DbBackupManager.Domain.Tests.csproj',
+            'tests/DbBackupManager.Application.Tests/DbBackupManager.Application.Tests.csproj',
+            'tests/DbBackupManager.ArchitectureTests/DbBackupManager.ArchitectureTests.csproj',
+            'tests/DbBackupManager.Worker.Tests/DbBackupManager.Worker.Tests.csproj'
+          )
+          foreach ($project in $projects) {
+            Write-Host "运行 $project"
+            dotnet test $project --configuration Release --no-build
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+  infrastructure:
+    name: Infrastructure 重测试
+    needs: changes
+    if: needs.changes.outputs.infrastructure == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: 缓存 NuGet 包
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'NuGet.Config', 'global.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: 还原 Infrastructure 测试依赖
+        run: dotnet restore tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj
+
+      - name: 运行 Infrastructure 测试
+        run: dotnet test tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj --configuration Release --no-restore
+
+  web:
+    name: Web 重测试
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: 缓存 NuGet 包
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'NuGet.Config', 'global.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: 还原 Web 测试依赖
+        run: dotnet restore tests/DbBackupManager.Web.Tests/DbBackupManager.Web.Tests.csproj
+
+      - name: 运行 Web 测试
+        run: dotnet test tests/DbBackupManager.Web.Tests/DbBackupManager.Web.Tests.csproj --configuration Release --no-restore
+
+  gate:
+    # 保留原有检查名称，便于继续作为 main 的合并门禁。
+    name: 构建与测试
+    needs:
+      - changes
+      - quick
+      - infrastructure
+      - web
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: 汇总 CI 结果
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          QUICK_RESULT: ${{ needs.quick.result }}
+          INFRA_RESULT: ${{ needs.infrastructure.result }}
+          WEB_RESULT: ${{ needs.web.result }}
+        run: |
+          echo "changes=$CHANGES_RESULT"
+          echo "quick=$QUICK_RESULT"
+          echo "infrastructure=$INFRA_RESULT"
+          echo "web=$WEB_RESULT"
+
+          for result in "$CHANGES_RESULT" "$QUICK_RESULT" "$INFRA_RESULT" "$WEB_RESULT"; do
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              exit 1
+            fi
+          done

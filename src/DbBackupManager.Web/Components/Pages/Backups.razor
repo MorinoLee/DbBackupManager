@@ -1,0 +1,15 @@
+@*
+    旧版兼容入口：/backups 已拆分为 /backup-policies 与 /backup-tasks。
+    保留本路由仅用于跳转到任务记录，不承载业务内容。
+*@
+@page "/backups"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@using DbBackupManager.Web.Authentication
+@using Microsoft.AspNetCore.Authorization
+@inject NavigationManager Navigation
+
+<PageTitle>任务记录 · DbBackupManager</PageTitle>
+
+@code {
+    protected override void OnInitialized() => Navigation.NavigateTo("/backup-tasks", replace: true);
+}

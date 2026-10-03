@@ -1,0 +1,217 @@
+@inherits LayoutComponentBase
+@implements IBrowserViewportObserver
+@implements IAsyncDisposable
+@using DbBackupManager.Web.Authentication
+@inject IBrowserViewportService BrowserViewportService
+@inject NavigationManager NavigationManager
+
+<MudThemeProvider @ref="_themeProvider" Theme="AppTheme.Default" @bind-IsDarkMode="_isDarkMode" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<MudLayout>
+    <MudAppBar Elevation="1">
+        @if (AcceptsInteractiveRouting)
+        {
+            <MudIconButton Icon="@Icons.Material.Outlined.Menu"
+                           Color="Color.Inherit"
+                           Edge="Edge.Start"
+                           OnClick="ToggleDrawer"
+                           aria-label="@DrawerToggleLabel"
+                           aria-expanded="@(_isDrawerOpen ? "true" : "false")"
+                           data-testid="drawer-toggle" />
+        }
+        <MudText Typo="Typo.h6" Class="ml-2 appbar-brand">DbBackupManager</MudText>
+        <MudSpacer />
+        <AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+            <Authorized Context="authState">
+                @if (AcceptsInteractiveRouting)
+                {
+                    <MudMenu AnchorOrigin="Origin.BottomRight"
+                             TransformOrigin="Origin.TopRight"
+                             data-testid="user-menu">
+                        @* 自定义 ActivatorContent 时，点击激活必须由内容本身调用 MenuContext.ToggleAsync。 *@
+                        <ActivatorContent Context="menuContext">
+                            <MudButton Variant="Variant.Text"
+                                       Color="Color.Inherit"
+                                       StartIcon="@Icons.Material.Outlined.AccountCircle"
+                                       EndIcon="@Icons.Material.Outlined.KeyboardArrowDown"
+                                       OnClick="@menuContext.ToggleAsync"
+                                       data-testid="user-menu-button">
+                                <span data-testid="current-username">@authState.User.Identity?.Name</span>
+                            </MudButton>
+                        </ActivatorContent>
+                        <ChildContent>
+                            <MudMenuItem Href="/change-password"
+                                         Icon="@Icons.Material.Outlined.LockReset"
+                                         data-testid="nav-link-change-password">
+                                修改密码
+                            </MudMenuItem>
+                            <MudDivider Class="my-1" />
+                            <LogoutForm />
+                        </ChildContent>
+                    </MudMenu>
+                }
+                else
+                {
+                    @* Static SSR 页面（如修改密码）没有交互事件处理器，账号操作必须是纯链接与普通 POST 表单。 *@
+                    <details class="appbar-account-static" data-testid="user-menu-static">
+                        <summary><span data-testid="current-username">@authState.User.Identity?.Name</span></summary>
+                        <div class="appbar-account-static__actions">
+                            <MudButton Href="/change-password"
+                                       Variant="Variant.Text"
+                                       Color="Color.Inherit"
+                                       StartIcon="@Icons.Material.Outlined.LockReset"
+                                       data-testid="nav-link-change-password">
+                                修改密码
+                            </MudButton>
+                            <LogoutForm />
+                        </div>
+                    </details>
+                }
+            </Authorized>
+            <NotAuthorized>
+                <MudButton Href="/login"
+                           Variant="Variant.Text"
+                           Color="Color.Inherit"
+                           StartIcon="@Icons.Material.Outlined.Login"
+                           data-testid="nav-link-login">
+                    登录
+                </MudButton>
+            </NotAuthorized>
+        </AuthorizeView>
+        @if (AcceptsInteractiveRouting)
+        {
+            <MudIconButton Icon="@(_isDarkMode ? Icons.Material.Outlined.LightMode : Icons.Material.Outlined.DarkMode)"
+                           Color="Color.Inherit"
+                           OnClick="ToggleDarkMode"
+                           aria-label="@ThemeToggleLabel"
+                           data-testid="theme-toggle" />
+        }
+    </MudAppBar>
+
+    <MudDrawer @bind-Open="_isDrawerOpen"
+               Variant="DrawerVariant.Responsive"
+               Breakpoint="Breakpoint.Lg"
+               ClipMode="DrawerClipMode.Always"
+               Elevation="1">
+        <NavMenu />
+    </MudDrawer>
+
+    <MudMainContent>
+        <MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="app-content">
+            @if (!AcceptsInteractiveRouting)
+            {
+                <details class="static-mobile-navigation" data-testid="static-mobile-navigation">
+                    <summary>导航菜单</summary>
+                    <NavMenu />
+                </details>
+            }
+            @Body
+        </MudContainer>
+    </MudMainContent>
+</MudLayout>
+
+@code {
+    private readonly Guid _viewportObserverId = Guid.NewGuid();
+
+    private MudThemeProvider _themeProvider = default!;
+    private bool _isDrawerOpen = true;
+    private bool _isDarkMode;
+    private bool _isDarkModeChosenByUser;
+    private bool _isCompactViewport;
+
+    [CascadingParameter]
+    private HttpContext? PageHttpContext { get; set; }
+
+    Guid IBrowserViewportObserver.Id => _viewportObserverId;
+
+    private string DrawerToggleLabel => _isDrawerOpen ? "收起导航菜单" : "展开导航菜单";
+
+    private string ThemeToggleLabel => _isDarkMode ? "切换到浅色主题" : "切换到深色主题";
+
+    private bool AcceptsInteractiveRouting =>
+        HttpContextAccess.TryGetActive(PageHttpContext, out var httpContext)
+            ? httpContext.AcceptsInteractiveRouting()
+            : true;
+
+    protected override void OnInitialized()
+    {
+        NavigationManager.LocationChanged += OnLocationChanged;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        await BrowserViewportService.SubscribeAsync(this, fireImmediately: true);
+
+        if (!_isDarkModeChosenByUser)
+        {
+            _isDarkMode = await _themeProvider.GetSystemDarkModeAsync();
+            StateHasChanged();
+        }
+
+        await _themeProvider.WatchSystemDarkModeAsync(OnSystemDarkModeChangedAsync);
+    }
+
+    async Task IBrowserViewportObserver.NotifyBrowserViewportChangeAsync(BrowserViewportEventArgs browserViewportEventArgs)
+    {
+        var isCompactViewport = await BrowserViewportService.IsBreakpointWithinReferenceSizeAsync(
+            Breakpoint.MdAndDown,
+            browserViewportEventArgs.Breakpoint);
+
+        if (isCompactViewport == _isCompactViewport)
+        {
+            return;
+        }
+
+        _isCompactViewport = isCompactViewport;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        NavigationManager.LocationChanged -= OnLocationChanged;
+        await BrowserViewportService.UnsubscribeAsync(this);
+    }
+
+    private void ToggleDrawer()
+    {
+        _isDrawerOpen = !_isDrawerOpen;
+    }
+
+    private void ToggleDarkMode()
+    {
+        // 用户显式选择后不再跟随系统深色模式，避免手动切换被系统事件覆盖。
+        _isDarkModeChosenByUser = true;
+        _isDarkMode = !_isDarkMode;
+    }
+
+    private Task OnSystemDarkModeChangedAsync(bool isDarkMode)
+    {
+        if (_isDarkModeChosenByUser)
+        {
+            return Task.CompletedTask;
+        }
+
+        _isDarkMode = isDarkMode;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs eventArgs)
+    {
+        // 抽屉在窄屏是覆盖层，导航后必须收起；宽屏保持常驻，不受导航影响。
+        if (!_isCompactViewport || !_isDrawerOpen)
+        {
+            return;
+        }
+
+        _isDrawerOpen = false;
+        StateHasChanged();
+    }
+}

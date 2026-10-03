@@ -1,0 +1,434 @@
+@*
+    任务详情：独立路由呈现摘要、阶段历史、尝试记录与已验证文件，便于刷新与分享本机链接。
+    实时通知只触发重新查询；取消、重试与重新核对各自持有 RequestId，互不混用。
+*@
+@page "/backup-tasks/{Id:guid}"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@implements IDisposable
+@using DbBackupManager.Application.BackupTasks
+@using TaskDetailModel = DbBackupManager.Application.BackupTasks.BackupTaskDetail
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.SqlCredentials
+@using DbBackupManager.Web.BackupTasks
+@using Microsoft.AspNetCore.Authorization
+@inject IBackupManagementService Management
+@inject AuthenticationStateProvider Authentication
+@inject TaskRefreshNotifier Notifications
+@inject CircuitReconnectNotifier Reconnect
+
+<PageTitle>任务详情 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="任务详情"
+                        Description="备份任务的摘要、阶段历史与尝试记录。">
+                <Breadcrumbs>
+                    <MudBreadcrumbs Items="_breadcrumbs" />
+                </Breadcrumbs>
+                <Actions>
+                    @if (!_login)
+                    {
+                        <MudButton OnClick="RefreshAsync"
+                                   Disabled="_busy"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Refresh"
+                                   data-testid="refresh-detail">
+                            刷新
+                        </MudButton>
+                        <MudButton Href="@BackHref"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.ArrowBack"
+                                   data-testid="back-to-tasks">
+                            返回列表
+                        </MudButton>
+                    }
+                </Actions>
+            </PageHeader>
+            @if (_error is not null) { <MudAlert Severity="Severity.Error" role="alert">@_error</MudAlert> }
+            @if (_message is not null) { <MudAlert Severity="Severity.Success" role="status">@_message</MudAlert> }
+            @if (_login) { <MudButton Href="@($"/login?returnUrl=/backup-tasks/{Id}")" Color="Color.Primary">重新登录</MudButton> }
+            else if (_detail is null)
+            {
+                if (_busy)
+                {
+                    <LoadingState />
+                }
+                else
+                {
+                    <EmptyState Title="任务不存在或已不可见"
+                                Icon="@Icons.Material.Outlined.SearchOff"
+                                Description="任务可能已被清理或不属于当前账号可见范围。">
+                        <Actions>
+                            <MudButton Href="@BackHref" Variant="Variant.Outlined" data-testid="empty-back-to-tasks">返回任务记录</MudButton>
+                        </Actions>
+                    </EmptyState>
+                }
+            }
+            else if (_detail is not null)
+            {
+                <MudPaper Outlined="true" Class="pa-4" data-testid="task-summary">
+                    <MudStack Spacing="2">
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap">
+                            <TaskStatusChip Status="@_detail.Task.Status" />
+                            <MudText Typo="Typo.h6" HtmlTag="h2">@_detail.Task.DatabaseName / @_detail.Task.PolicyName</MudText>
+                        </MudStack>
+                        <MudText Typo="Typo.body2">当前阶段：@BackupPresentation.Stage(_detail.Task.Stage)</MudText>
+                        <MudText Typo="Typo.body2">创建时间：@Formatters.LocalDateTime(_detail.Task.CreatedAtUtc) · 完成时间：@Formatters.LocalDateTime(_detail.Task.CompletedAtUtc) · 副本大小：@Formatters.Bytes(_detail.Task.FileLength)</MudText>
+                        @if (_detail.Task.CancellationRequested && _detail.Task.Status is "Pending" or "Running")
+                        {
+                            <MudText Typo="Typo.caption">已请求取消，等待安全边界。</MudText>
+                        }
+                        @if (_detail.Task.Status == "NeedsAttention")
+                        {
+                            <MudAlert Severity="Severity.Warning">外部执行结果尚未确定。请保留文件与任务记录，核对完成前不要重复发起同一备份。</MudAlert>
+                            <section data-testid="reconciliation-panel">
+                                <MudStack Spacing="2">
+                                    <MudText Typo="Typo.body2">最近核对原因：@BackupPresentation.ReconciliationReason(_detail.Reconciliation.ReasonCode)</MudText>
+                                    <MudText Typo="Typo.body2">已完成核对次数：@_detail.Reconciliation.AttemptCount</MudText>
+                                    <MudText Typo="Typo.body2">下次核对时间：@Formatters.LocalDateTime(_detail.Reconciliation.NextAtUtc)</MudText>
+                                    <MudAlert Severity="Severity.Info">重新核对不会重新备份。</MudAlert>
+                                    @if (_detail.Reconciliation.CanRequest)
+                                    {
+                                        <MudButton OnClick="ReconcileAsync"
+                                                   Disabled="_busy"
+                                                   Color="Color.Primary"
+                                                   data-testid="reconcile-task">
+                                            重新核对
+                                        </MudButton>
+                                        <MudDivider />
+                                        <MudText Typo="Typo.body2">人工确认前，请检查本次尝试对应的外部执行、文件及完成记录。证据不足时继续核对。</MudText>
+                                        <MudCheckBox T="bool" @bind-Value="_failureEvidenceReviewed"
+                                                     Disabled="_busy" data-testid="confirm-failed-evidence"
+                                                     Label="我已确认本次外部执行已结束，并核对文件及完成记录，确认本阶段失败。" />
+                                        <MudText Typo="Typo.caption">确认失败只更新任务结论，保留文件和记录；如需重试，确认后单独操作。</MudText>
+                                        <MudButton OnClick="ConfirmFailedAsync"
+                                                   Disabled="@(_busy || !_failureEvidenceReviewed)"
+                                                   Color="Color.Warning" Variant="Variant.Outlined"
+                                                   data-testid="confirm-failed-task">
+                                            确认失败
+                                        </MudButton>
+                                    }
+                                </MudStack>
+                            </section>
+                        }
+                        @if (_detail.VerifiedSqlPath is not null)
+                        {
+                            <MudText Typo="Typo.body2">已验证本地副本：@_detail.VerifiedSqlPath</MudText>
+                            <MudText Typo="Typo.caption">本地校验通过不等于已完成恢复演练。</MudText>
+                        }
+                        @if (_detail.Task.ErrorCode is not null)
+                        {
+                            <MudAlert Severity="Severity.Warning">@BackupPresentation.FailureReason(_detail.Task.ErrorCode)</MudAlert>
+                        }
+                        <MudExpansionPanels Elevation="0">
+                            <MudExpansionPanel Text="技术详情" data-testid="technical-details">
+                                <MudText Typo="Typo.body2">任务标识：@_detail.Task.Id</MudText>
+                                <MudText Typo="Typo.body2">错误码：@(_detail.Task.ErrorCode ?? "—")</MudText>
+                            </MudExpansionPanel>
+                        </MudExpansionPanels>
+                        <MudStack Row="true" Spacing="2">
+                            @if (_detail.Task.Status is "Pending" or "Running")
+                            {
+                                <MudButton OnClick="@(() => MutateAsync(false))" Disabled="@(_busy || _detail.Task.CancellationRequested)" data-testid="cancel-task">请求取消</MudButton>
+                            }
+                            @if (_detail.Task.Status == "Failed")
+                            {
+                                <MudButton OnClick="@(() => MutateAsync(true))" Disabled="_busy" Color="Color.Primary" data-testid="retry-task">重试</MudButton>
+                            }
+                        </MudStack>
+                    </MudStack>
+                </MudPaper>
+
+                <section data-testid="task-attempts">
+                    <MudText Typo="Typo.h6" HtmlTag="h2" Class="mb-2">尝试记录</MudText>
+                    <MudTable T="BackupAttemptSummary" Items="_detail.Attempts" Dense="true" Breakpoint="Breakpoint.Sm" Elevation="1">
+                        <HeaderContent><MudTh>尝试</MudTh><MudTh>调用结果</MudTh><MudTh>文件大小</MudTh><MudTh>校验时间</MudTh></HeaderContent>
+                        <RowTemplate Context="attempt">
+                            <MudTd DataLabel="尝试">@attempt.Number</MudTd>
+                            <MudTd DataLabel="调用结果">@BackupPresentation.Invocation(attempt.InvocationStatus)</MudTd>
+                            <MudTd DataLabel="文件大小">@Formatters.Bytes(attempt.Length)</MudTd>
+                            <MudTd DataLabel="校验时间">@Formatters.LocalDateTime(attempt.VerifiedAtUtc)</MudTd>
+                        </RowTemplate>
+                        <NoRecordsContent><MudText Class="pa-4">暂无尝试记录。</MudText></NoRecordsContent>
+                    </MudTable>
+                </section>
+
+                <section data-testid="task-files">
+                    <MudText Typo="Typo.h6" HtmlTag="h2" Class="mb-2">登记副本</MudText>
+                    <MudTable T="BackupFileSummary" Items="_detail.Files" Dense="true" Breakpoint="Breakpoint.Sm" Elevation="1">
+                        <HeaderContent><MudTh>位置</MudTh><MudTh>协议 / 目标</MudTh><MudTh>状态</MudTh><MudTh>大小</MudTh><MudTh>验证时间</MudTh><MudTh>保留天数</MudTh></HeaderContent>
+                        <RowTemplate Context="file">
+                            <MudTd DataLabel="位置">@BackupFilePresentation.Location(file.Location)</MudTd>
+                            <MudTd DataLabel="协议 / 目标">
+                                @BackupFilePresentation.Protocol(file.Protocol) · @(file.TargetDisplayName ?? "—")
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@file.Path</MudText>
+                            </MudTd>
+                            <MudTd DataLabel="状态">
+                                @BackupFilePresentation.Status(file.Status)
+                                @if (BackupFilePresentation.StatusNote(file.Status, file.ErrorCode) is { } note)
+                                {
+                                    <MudText Typo="Typo.caption" Class="mud-text-secondary">@note</MudText>
+                                }
+                                @if (file.DeletedAtUtc is not null)
+                                {
+                                    <MudText Typo="Typo.caption" Class="mud-text-secondary">删除时间：@Formatters.LocalDateTime(file.DeletedAtUtc)</MudText>
+                                }
+                            </MudTd>
+                            <MudTd DataLabel="大小">@Formatters.Bytes(file.LengthBytes)</MudTd>
+                            <MudTd DataLabel="验证时间">@Formatters.LocalDateTime(file.VerifiedAtUtc)</MudTd>
+                            <MudTd DataLabel="保留天数">@file.RetentionDays</MudTd>
+                        </RowTemplate>
+                        <NoRecordsContent><MudText Class="pa-4">暂无登记副本。</MudText></NoRecordsContent>
+                    </MudTable>
+                </section>
+
+                <section data-testid="task-history">
+                    <MudText Typo="Typo.h6" HtmlTag="h2" Class="mb-2">状态记录（最近 200 条）</MudText>
+                    @if (_detail.History.Count == 0)
+                    {
+                        <MudText Typo="Typo.body2" Class="mud-text-secondary">暂无状态记录。</MudText>
+                    }
+                    else
+                    {
+                        <MudTimeline TimelineOrientation="TimelineOrientation.Vertical" TimelinePosition="TimelinePosition.Start">
+                            @foreach (var entry in _detail.History)
+                            {
+                                <MudTimelineItem Color="Color.Default" Size="Size.Small">
+                                    <MudText Typo="Typo.body2">
+                                        @Formatters.LocalDateTime(entry.AtUtc) · @BackupPresentation.State(entry.Status) · @BackupPresentation.Stage(entry.Stage)
+                                    </MudText>
+                                    <MudText Typo="Typo.caption" Class="mud-text-secondary">@BackupPresentation.HistoryReason(entry.Reason)</MudText>
+                                </MudTimelineItem>
+                            }
+                        </MudTimeline>
+                    }
+                </section>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+
+@code {
+    /// <summary>周期校准间隔；测试中可缩短以覆盖通知漏送的补偿路径。</summary>
+    internal static TimeSpan CalibrationInterval = TimeSpan.FromSeconds(60);
+
+    private readonly CancellationTokenSource _lifetime = new();
+    private enum MutationKind
+    {
+        Cancel,
+        Retry,
+        Reconcile,
+        ConfirmFailed,
+    }
+
+    private readonly Dictionary<MutationKind, Guid> _mutationRequests = new();
+    private TaskDetailModel? _detail;
+    private IDisposable? _notifications;
+    private IDisposable? _reconnect;
+    private bool _busy, _disposed, _login, _initialized, _refreshPending;
+    private bool _failureEvidenceReviewed;
+    private Guid _loadedId;
+    private int _routeVersion;
+    private string? _error, _message;
+
+    [Parameter]
+    public Guid Id { get; set; }
+
+    /// <summary>从列表进入时携带的页码，返回列表时保持。</summary>
+    [SupplyParameterFromQuery(Name = "page")]
+    public int? Page { get; set; }
+
+    [SupplyParameterFromQuery(Name = "back")]
+    public string? Back { get; set; }
+
+    private string BackHref => Back is "/backup-tasks" or "/backup-files"
+        || Back?.StartsWith("/backup-tasks?", StringComparison.Ordinal) == true
+        || Back?.StartsWith("/backup-files?", StringComparison.Ordinal) == true
+        ? Back! : Page is null or 0 ? "/backup-tasks" : $"/backup-tasks?page={Page}";
+
+    private IReadOnlyList<BreadcrumbItem> _breadcrumbs =>
+    [
+        new(BackHref.StartsWith("/backup-files", StringComparison.Ordinal) ? "备份文件" : "任务记录", BackHref),
+        new("任务详情", null, true),
+    ];
+
+    protected override async Task OnInitializedAsync()
+    {
+        _notifications = Notifications.Subscribe(() => { _ = RefreshFromNoticeAsync(); });
+        _reconnect = Reconnect.Subscribe(() => { _ = RefreshFromNoticeAsync(); });
+        _initialized = true;
+        _loadedId = Id;
+        await RefreshAsync();
+        _ = CalibrateAsync();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // 组件复用切换到另一任务：清空旧任务状态与命令 RequestId，不把其他任务结果写回当前详情。
+        if (!_initialized || Id == _loadedId)
+        {
+            return;
+        }
+
+        // 版本递增使旧任务的所有在途查询与命令在 await 返回后失效，其响应、错误与消息一律不得写回。
+        _routeVersion++;
+        _loadedId = Id;
+        _detail = null;
+        _error = null;
+        _message = null;
+        _refreshPending = false;
+        _mutationRequests.Clear();
+        _failureEvidenceReviewed = false;
+        await RefreshAsync();
+    }
+
+    private async Task RefreshFromNoticeAsync()
+    {
+        try { if (!_disposed) await InvokeAsync(async () => { await RefreshAsync(); StateHasChanged(); }); }
+        catch (ObjectDisposedException) { }
+    }
+
+    private async Task CalibrateAsync()
+    {
+        // 通知只是提示：周期校准补偿漏送或忙碌期间丢失的刷新，断线恢复后也能自行对齐 Platform DB。
+        try
+        {
+            while (!_lifetime.IsCancellationRequested)
+            {
+                await Task.Delay(CalibrationInterval, _lifetime.Token);
+                await RefreshFromNoticeAsync();
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+    }
+
+    private async Task RunAsync(Func<AdminSession, Task> action)
+    {
+        if (_busy || _disposed) return;
+        _busy = true; _error = null;
+        var version = _routeVersion;
+        try
+        {
+            var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+            if (actor is null) { if (version == _routeVersion) { Failure(BackupManagementCode.AuthenticationRequired); } return; }
+            await action(actor);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception) when (version == _routeVersion) { Failure(BackupManagementCode.Unavailable); }
+        catch (Exception) { /* 路由已切换：旧任务操作的异常不得写回新页面。 */ }
+        finally
+        {
+            _busy = false;
+            if (_refreshPending && !_disposed)
+            {
+                // 查询进行期间到达的刷新提示已记录，查询可能读到旧状态，完成后补偿一次重新查询。
+                _refreshPending = false;
+                _ = RefreshFromNoticeAsync();
+            }
+        }
+    }
+
+    private Task RefreshAsync()
+    {
+        if (_busy)
+        {
+            _refreshPending = true;
+            return Task.CompletedTask;
+        }
+
+        return RunAsync(LoadAsync);
+    }
+
+    private async Task LoadAsync(AdminSession actor)
+    {
+        var version = _routeVersion;
+        var taskId = Id;
+        var result = await Management.DetailAsync(actor, taskId, _lifetime.Token);
+        // await 返回后路由可能已切换：过期响应连同错误一并丢弃，新任务查询由切换时的补偿负责。
+        if (_disposed || version != _routeVersion) return;
+        if (result.Code == BackupManagementCode.Succeeded)
+        {
+            _detail = result.Value;
+            if (_detail?.Task.Status != "NeedsAttention" || !_detail.Reconciliation.CanRequest)
+                _failureEvidenceReviewed = false;
+            return;
+        }
+        if (result.Code == BackupManagementCode.NotFound) { _detail = null; return; }
+        Failure(result.Code);
+    }
+
+    private Task MutateAsync(bool retry) => RunAsync(async actor =>
+    {
+        var version = _routeVersion;
+        var taskId = Id;
+        var kind = retry ? MutationKind.Retry : MutationKind.Cancel;
+        if (!_mutationRequests.TryGetValue(kind, out var request)) _mutationRequests[kind] = request = Guid.NewGuid();
+        var result = retry
+            ? await Management.RetryAsync(actor, taskId, request, _lifetime.Token)
+            : await Management.CancelAsync(actor, taskId, request, _lifetime.Token);
+        // 命令执行中切换了任务：不写成功消息或错误、不清理新任务的 RequestId、不把旧任务查询写回。
+        if (_disposed || version != _routeVersion) return;
+        if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
+        _mutationRequests.Remove(kind);
+        _message = retry ? "已提交重试。" : "已提交取消请求。";
+        await LoadAsync(actor);
+    });
+
+    private Task ReconcileAsync() => RunAsync(async actor =>
+    {
+        var version = _routeVersion;
+        var taskId = Id;
+        if (!_mutationRequests.TryGetValue(MutationKind.Reconcile, out var request)) _mutationRequests[MutationKind.Reconcile] = request = Guid.NewGuid();
+        var result = await Management.RequestReconciliationAsync(actor, taskId, request, _lifetime.Token);
+        // 命令执行中切换了任务：不写成功消息或错误、不清理新任务的 RequestId、不把旧任务查询写回。
+        if (_disposed || version != _routeVersion) return;
+        if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
+        _mutationRequests.Remove(MutationKind.Reconcile);
+        _message = "已提交重新核对，等待 Worker 处理";
+        await LoadAsync(actor);
+    });
+
+    private Task ConfirmFailedAsync()
+    {
+        if (!_failureEvidenceReviewed || _detail?.Task.Status != "NeedsAttention" || !_detail.Reconciliation.CanRequest)
+            return Task.CompletedTask;
+        return RunAsync(async actor =>
+        {
+            var version = _routeVersion;
+            var taskId = Id;
+            if (!_mutationRequests.TryGetValue(MutationKind.ConfirmFailed, out var request))
+                _mutationRequests[MutationKind.ConfirmFailed] = request = Guid.NewGuid();
+            var result = await Management.ConfirmFailedAsync(actor, taskId, request, true, _lifetime.Token);
+            if (_disposed || version != _routeVersion) return;
+            if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
+            _mutationRequests.Remove(MutationKind.ConfirmFailed);
+            _failureEvidenceReviewed = false;
+            _message = "已确认本阶段失败，未发起重试。";
+            await LoadAsync(actor);
+        });
+    }
+
+    private void Failure(BackupManagementCode code)
+    {
+        if (_disposed) return;
+        _error = BackupPresentation.Error(code).Message;
+        if (code == BackupManagementCode.AuthenticationRequired)
+        { _login = true; _detail = null; }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _notifications?.Dispose();
+        _reconnect?.Dispose();
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

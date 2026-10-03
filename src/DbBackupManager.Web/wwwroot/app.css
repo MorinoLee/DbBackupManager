@@ -1,0 +1,244 @@
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+/* 路由切换后 h1 会被程序化聚焦；只隐藏这一种轮廓，保留键盘操作时的可见焦点。 */
+h1:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.app-nav {
+  display: flex;
+  flex-direction: column;
+  padding-top: 0.5rem;
+}
+
+/* 认证流程独立布局：品牌与表单居中，桌面与窄屏共用同一卡片宽度。 */
+.auth-shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  background: var(--mud-palette-background);
+}
+
+.auth-shell__main {
+  width: 100%;
+  max-width: 26rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.auth-shell__brand {
+  text-align: center;
+}
+
+.auth-shell__brand-name {
+  margin: 0;
+  color: var(--mud-palette-primary);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.auth-shell__brand-description {
+  margin: 0.25rem 0 0;
+  color: var(--mud-palette-text-secondary);
+  font-size: 0.875rem;
+}
+
+.auth-shell__content {
+  display: flex;
+  flex-direction: column;
+}
+
+.auth-shell__footer {
+  color: var(--mud-palette-text-secondary);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.app-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2.5rem 1rem;
+  text-align: center;
+}
+
+.app-state-alert {
+  width: 100%;
+  max-width: 40rem;
+  text-align: start;
+}
+
+.app-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+@media (max-width: 599.98px) {
+  .app-state {
+    padding: 1.5rem 0.75rem;
+  }
+}
+
+/* 内容区间距：桌面 24px，窄屏 16px，全站一致。 */
+.app-content {
+  padding-top: 1.5rem;
+  padding-bottom: 1.5rem;
+}
+
+@media (max-width: 959.98px) {
+  .app-content {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+}
+
+/* 退出登录在用户菜单中呈现为整行菜单项；表单语义保持不变。 */
+.logout-form {
+  width: 100%;
+}
+
+.logout-form__button {
+  justify-content: flex-start;
+  text-transform: none;
+}
+
+/* Static SSR 页面顶栏账号区：纯链接与 POST 登出表单横向排列。 */
+.appbar-account {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.appbar-account .logout-form {
+  width: auto;
+}
+
+/* 页面顶部统一模式：标题与说明在左，主要操作在右，窄屏自动折行。 */
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.page-header__text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.page-header__title {
+  overflow-wrap: anywhere;
+}
+
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+/* 服务器卡片：服务器标题与操作一行，窄屏自动折行；实例表格跟随卡片宽度。 */
+.server-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  flex-wrap: wrap;
+}
+
+.server-card__title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.server-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* 静态认证管理页使用原生 details，窄屏导航和账号操作无需 Circuit 事件。 */
+.appbar-brand {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.appbar-account-static { position: relative; }
+.appbar-account-static summary { cursor: pointer; white-space: nowrap; }
+.appbar-account-static__actions {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.75rem);
+  min-width: 10rem;
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  background: var(--mud-palette-surface);
+  color: var(--mud-palette-text-primary);
+  box-shadow: var(--mud-elevation-8);
+}
+.static-mobile-navigation { display: none; }
+
+@media (max-width: 1279.98px) {
+  .static-mobile-navigation {
+    display: block;
+    margin-bottom: 1rem;
+    padding: 0.75rem;
+    border: 1px solid var(--mud-palette-lines-default);
+    border-radius: 0.5rem;
+    background: var(--mud-palette-surface);
+  }
+  .static-mobile-navigation summary { cursor: pointer; }
+}
+
+@media (max-width: 599.98px) {
+  .appbar-brand { font-size: 1rem; }
+  [data-testid="user-menu-button"] { min-width: 0; padding-inline: 4px; }
+  [data-testid="user-menu-button"] .mud-button-icon-start { display: none; }
+  [data-testid="current-username"] {
+    display: inline-block;
+    max-width: 5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
+}
+
+/* 合成超长数据库名也应在单元格内换行，不能把窄屏标签挤成竖排。 */
+.mud-table-cell { overflow-wrap: anywhere; }
+.mud-table-head .mud-table-cell { white-space: nowrap; }
+@media (max-width: 599.98px) {
+  .mud-table-cell::before {
+    white-space: nowrap;
+    min-width: 6rem;
+    flex-shrink: 0;
+  }
+}

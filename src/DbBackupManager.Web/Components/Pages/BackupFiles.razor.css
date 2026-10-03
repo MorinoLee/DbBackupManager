@@ -1,0 +1,9 @@
+.backup-file-path {
+    display: inline-block;
+    max-width: 26rem;
+    overflow-wrap: anywhere;
+}
+
+.file-meta {
+    white-space: nowrap;
+}

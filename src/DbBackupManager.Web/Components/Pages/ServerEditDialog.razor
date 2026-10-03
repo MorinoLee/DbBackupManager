@@ -1,0 +1,124 @@
+@*
+    服务器编辑弹窗。长表单按基本信息与暂存访问分组；保存失败时弹窗保持打开并保留用户输入。
+    只负责呈现与字段级校验，保存语义由页面通过 OnSave 委托完成。
+*@
+@using DbBackupManager.Application.FileCredentials
+
+<EditForm Model="Model" OnValidSubmit="SubmitAsync">
+    <DataAnnotationsValidator />
+    <MudDialog>
+        <TitleContent>
+            <MudText Typo="Typo.h6">@Title</MudText>
+        </TitleContent>
+        <DialogContent>
+            <MudStack Spacing="3">
+                @if (_error is not null)
+                {
+                    <MudAlert Severity="Severity.Error" role="alert" data-testid="dialog-error">@_error</MudAlert>
+                }
+                <section data-testid="server-section-basic">
+                    <MudText Typo="Typo.subtitle2" Class="mb-2">基本信息</MudText>
+                    <MudStack Spacing="2">
+                        <MudTextField T="string" Label="服务器名称" @bind-Value="Model.Name" For="@(() => Model.Name)" InputId="server-name" Disabled="_saving" />
+                        <MudTextField T="string" Label="SQL 本地备份目录" @bind-Value="Model.LocalPath" For="@(() => Model.LocalPath)" InputId="server-local-path" HelperText="目标 SQL Server 上的盘符绝对目录，例如 D:\BackupStaging" Disabled="_saving" />
+                        <MudTextField T="string" Label="说明" @bind-Value="Model.Description" Disabled="_saving" MaxLength="1000" />
+                        <MudCheckBox T="bool" Label="启用服务器" @bind-Value="Model.Enabled" Disabled="_saving" />
+                    </MudStack>
+                </section>
+                <section data-testid="server-section-access">
+                    <MudText Typo="Typo.subtitle2" Class="mb-2">暂存访问</MudText>
+                    <MudStack Spacing="2">
+                        <MudSelect T="int" Label="Worker 暂存访问协议" @bind-Value="Model.Protocol" Disabled="_saving">
+                            <MudSelectItem Value="1">SMB</MudSelectItem>
+                            <MudSelectItem Value="2">SFTP</MudSelectItem>
+                        </MudSelect>
+                        <MudTextField T="string" Label="暂存访问主机" @bind-Value="Model.Host" For="@(() => Model.Host)" InputId="server-host" Disabled="_saving" />
+                        <MudTextField T="string" Label="暂存访问根路径" @bind-Value="Model.BasePath" For="@(() => Model.BasePath)" InputId="server-base-path" Disabled="_saving" />
+                        <MudText Typo="Typo.caption">此路径与 SQL 本地目录必须指向同一批文件；本页保存映射，文件访问能力将在 Worker 联调时验证。</MudText>
+                        @if (Model.Protocol == 2)
+                        {
+                            <MudNumericField T="int" Label="SFTP 端口" @bind-Value="Model.Port" Min="1" Max="65535" Disabled="_saving" />
+                            <MudTextField T="string" Label="SFTP 主机密钥指纹" @bind-Value="Model.Fingerprint" Disabled="_saving" />
+                        }
+                        <MudSelect T="Guid" Label="暂存访问凭据" @bind-Value="Model.CredentialId" Disabled="_saving">
+                            <MudSelectItem Value="Guid.Empty" Disabled="true">请选择暂存访问凭据</MudSelectItem>
+                            @foreach (var credential in FileCredentials.Where(x => MatchesProtocol(x.Kind)))
+                            {
+                                <MudSelectItem Value="credential.Id">@credential.Name @(credential.IsEnabled ? "" : "（已停用）")</MudSelectItem>
+                            }
+                        </MudSelect>
+                        @if (FileCredentials.Count == 0)
+                        {
+                            <MudAlert Severity="Severity.Info">
+                                请先到<MudLink Href="/file-credentials">“暂存访问凭据”</MudLink>添加 SMB 密码、SFTP 密码或 SFTP 私钥。
+                            </MudAlert>
+                        }
+                    </MudStack>
+                </section>
+            </MudStack>
+        </DialogContent>
+        <DialogActions>
+            <MudButton OnClick="Cancel" Disabled="_saving">取消</MudButton>
+            <MudButton ButtonType="ButtonType.Submit"
+                       Variant="Variant.Filled"
+                       Color="Color.Primary"
+                       Disabled="_saving"
+                       data-testid="dialog-save">
+                @(_saving ? "保存中…" : "保存")
+            </MudButton>
+        </DialogActions>
+    </MudDialog>
+</EditForm>
+
+@code {
+    private bool _saving;
+    private string? _error;
+
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired]
+    public ServerFormModel Model { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public IReadOnlyList<FileCredentialItem> FileCredentials { get; set; } = [];
+
+    /// <summary>保存委托；返回 <c>null</c> 表示成功，否则为显示给用户的中文错误。</summary>
+    [Parameter, EditorRequired]
+    public Func<ServerFormModel, Task<string?>> OnSave { get; set; } = default!;
+
+    private bool MatchesProtocol(FileCredentialKind kind) => Model.Protocol == 1
+        ? kind == FileCredentialKind.SmbPassword
+        : kind is FileCredentialKind.SftpPassword or FileCredentialKind.SftpPrivateKey;
+
+    private async Task SubmitAsync()
+    {
+        if (_saving)
+        {
+            return;
+        }
+
+        _saving = true;
+        _error = null;
+        try
+        {
+            var error = await OnSave(Model);
+            if (error is null)
+            {
+                MudDialog.Close(DialogResult.Ok(true));
+                return;
+            }
+
+            _error = error;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void Cancel() => MudDialog.Cancel();
+}

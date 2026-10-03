@@ -1,0 +1,22 @@
+@page "/access-denied"
+@layout AuthLayout
+@attribute [AllowAnonymous]
+@attribute [ExcludeFromInteractiveRouting]
+@using Microsoft.AspNetCore.Authorization
+
+<PageTitle>拒绝访问 - DbBackupManager</PageTitle>
+
+<MudStack Spacing="3">
+    <div>
+        <h1>拒绝访问</h1>
+        <MudText Typo="Typo.body2" Class="mud-text-secondary" data-testid="access-denied-message">
+            没有权限查看该页面。当前账号不能访问请求的页面。如需继续，请使用有权限的管理员账号登录。
+        </MudText>
+    </div>
+    <MudButton Href="/login"
+               Variant="Variant.Filled"
+               Color="Color.Primary"
+               data-testid="access-denied-login">
+        前往登录
+    </MudButton>
+</MudStack>

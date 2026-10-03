@@ -1,0 +1,146 @@
+@*
+    手动备份配置编辑弹窗。编辑已有配置时数据库不可更换；保存失败时弹窗保持打开并保留用户输入。
+    存储模式决定是否显示本地/远程保留与传输设置；只负责呈现与字段级校验，保存语义由页面通过 OnSave 委托完成。
+*@
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Application.StorageTargets
+
+<EditForm Model="Model" OnValidSubmit="SubmitAsync">
+    <DataAnnotationsValidator />
+    <MudDialog>
+        <TitleContent>
+            <MudText Typo="Typo.h6">@Title</MudText>
+        </TitleContent>
+        <DialogContent>
+            <MudStack Spacing="2">
+                @if (_error is not null)
+                {
+                    <MudAlert Severity="Severity.Error" role="alert" data-testid="dialog-error">@_error</MudAlert>
+                }
+                <MudTextField T="string" Label="配置名称" @bind-Value="Model.Name" For="@(() => Model.Name)" InputId="backup-name" Disabled="_saving" />
+                <MudSelect T="Guid" Label="数据库" @bind-Value="Model.DatabaseId" Disabled="@(_saving || IsEdit)">
+                    <MudSelectItem Value="Guid.Empty" Disabled="true">请选择数据库</MudSelectItem>
+                    @foreach (var database in Databases)
+                    {
+                        <MudSelectItem Value="database.Id">@database.Label</MudSelectItem>
+                    }
+                    @if (IsEdit && !Databases.Any(x => x.Id == Model.DatabaseId))
+                    {
+                        <MudSelectItem Value="Model.DatabaseId">原数据库（当前不可用）</MudSelectItem>
+                    }
+                </MudSelect>
+                @if (Databases.Count == 0)
+                {
+                    <MudAlert Severity="Severity.Info">
+                        请先在<MudLink Href="/databases">“数据库清单”</MudLink>发现并纳管数据库。
+                    </MudAlert>
+                }
+                <MudSelect T="int" Label="存储模式" @bind-Value="Model.StorageMode" Disabled="_saving">
+                    <MudSelectItem Value="1">仅本地</MudSelectItem>
+                    <MudSelectItem Value="2">本地加远程</MudSelectItem>
+                    <MudSelectItem Value="3">仅远程</MudSelectItem>
+                </MudSelect>
+                @if (Model.StorageMode != 1)
+                {
+                    <MudSelect T="Guid" Label="远程存储目标" @bind-Value="Model.StorageTargetId" Disabled="_saving">
+                        <MudSelectItem Value="Guid.Empty" Disabled="true">请选择存储目标</MudSelectItem>
+                        @foreach (var target in Targets)
+                        {
+                            <MudSelectItem Value="target.Id">@target.Settings.Name @(target.Settings.IsEnabled ? "" : "（已停用）")</MudSelectItem>
+                        }
+                        @if (IsEdit && Model.StorageTargetId != Guid.Empty && !Targets.Any(x => x.Id == Model.StorageTargetId))
+                        {
+                            <MudSelectItem Value="Model.StorageTargetId">原存储目标（当前不可用）</MudSelectItem>
+                        }
+                    </MudSelect>
+                    @if (Targets.Count == 0)
+                    {
+                        <MudAlert Severity="Severity.Info" data-testid="no-storage-targets">
+                            请先在<MudLink Href="/storage-targets">“存储目标”</MudLink>添加 SMB 或 SFTP 目标并完成连接测试。
+                        </MudAlert>
+                    }
+                }
+                @if (Model.StorageMode != 3)
+                {
+                    <MudNumericField T="int" Label="本地保留天数" @bind-Value="Model.RetentionDays" Min="1" Max="36500" Disabled="_saving" HelperText="仅保存保留意图，当前不会自动删除文件。" />
+                }
+                @if (Model.StorageMode != 1)
+                {
+                    <MudNumericField T="int" Label="远程保留天数" @bind-Value="Model.RemoteRetentionDays" Min="1" Max="36500" Disabled="_saving" HelperText="仅保存保留意图，当前不会自动删除文件。" />
+                    <MudNumericField T="int" Label="传输超时（分钟）" @bind-Value="Model.TransferMinutes" Min="1" Max="1440" Disabled="_saving" />
+                }
+                <MudNumericField T="int" Label="备份超时（分钟）" @bind-Value="Model.BackupMinutes" Min="1" Max="1440" Disabled="_saving" />
+                <MudNumericField T="int" Label="校验超时（分钟）" @bind-Value="Model.VerifyMinutes" Min="1" Max="1440" Disabled="_saving" />
+                <MudCheckBox T="bool" Label="启用备份压缩（目标实例需要支持）" @bind-Value="Model.Compression" Disabled="_saving" />
+                <MudCheckBox T="bool" Label="启用此手动备份配置" @bind-Value="Model.Enabled" Disabled="_saving" />
+            </MudStack>
+        </DialogContent>
+        <DialogActions>
+            <MudButton OnClick="Cancel" Disabled="_saving">取消</MudButton>
+            <MudButton ButtonType="ButtonType.Submit"
+                       Variant="Variant.Filled"
+                       Color="Color.Primary"
+                       Disabled="_saving"
+                       data-testid="dialog-save">
+                @(_saving ? "保存中…" : "保存")
+            </MudButton>
+        </DialogActions>
+    </MudDialog>
+</EditForm>
+
+@code {
+    private bool _saving;
+    private string? _error;
+
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired]
+    public PolicyFormModel Model { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public IReadOnlyList<BackupDatabaseChoice> Databases { get; set; } = [];
+
+    /// <summary>可选的远程存储目标；仅存储模式为本地加远程或仅远程时使用。</summary>
+    [Parameter]
+    public IReadOnlyList<StorageTargetItem> Targets { get; set; } = [];
+
+    /// <summary>编辑已有配置时为 <c>true</c>，数据库选择锁定。</summary>
+    [Parameter]
+    public bool IsEdit { get; set; }
+
+    /// <summary>保存委托；返回 <c>null</c> 表示成功，否则为显示给用户的中文错误。</summary>
+    [Parameter, EditorRequired]
+    public Func<PolicyFormModel, Task<string?>> OnSave { get; set; } = default!;
+
+    private async Task SubmitAsync()
+    {
+        if (_saving)
+        {
+            return;
+        }
+
+        _saving = true;
+        _error = null;
+        try
+        {
+            var error = await OnSave(Model);
+            if (error is null)
+            {
+                MudDialog.Close(DialogResult.Ok(true));
+                return;
+            }
+
+            _error = error;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void Cancel() => MudDialog.Cancel();
+}

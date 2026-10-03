@@ -1,0 +1,6 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DbBackupManager.Domain\DbBackupManager.Domain.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,11 @@
+{
+  "component": "Google Material Design Icons",
+  "license": "Apache-2.0",
+  "upstream": "https://github.com/google/material-design-icons",
+  "licenseSource": "https://raw.githubusercontent.com/google/material-design-icons/737e3324305806514d7909874fa1818ae1808232/LICENSE",
+  "licenseSha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+  "consumer": "MudBlazor/9.9.0",
+  "consumerSourceCommit": "3d85eed63a2c886d0a2e37f9f0cad78be655ad1c",
+  "generatorSource": "https://github.com/MudBlazor/MudBlazor/blob/3d85eed63a2c886d0a2e37f9f0cad78be655ad1c/tools/Icons/Update-MudIcons.ps1",
+  "scope": "Material SVG paths exposed as C# constants and used by the application; license retrieval revision does not claim to identify each original icon revision"
+}

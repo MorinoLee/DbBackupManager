@@ -1,0 +1,248 @@
+@*
+    备份配置：只承载手动配置的新建、编辑、启停和发起备份；当前没有自动调度。
+    发起备份成功后给出直达任务详情的入口；幂等 RequestId 在结果不确定时保持不变。
+*@
+@page "/backup-policies"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@implements IDisposable
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Application.Servers
+@using DbBackupManager.Application.StorageTargets
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.SqlCredentials
+@using DbBackupManager.Web.BackupTasks
+@using Microsoft.AspNetCore.Authorization
+@inject IBackupManagementService Management
+@inject IStorageTargetManagementService StorageTargets
+@inject AuthenticationStateProvider Authentication
+@inject IDialogService Dialogs
+
+<PageTitle>备份配置 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="备份配置"
+                        Description="手动备份配置的新建、编辑、启停与发起备份。支持仅本地、本地加远程、仅远程三种存储模式，没有自动调度；远程传输执行由 Worker 后续阶段提供。">
+                <Actions>
+                    @if (!_login)
+                    {
+                        <MudButton OnClick="RefreshAsync"
+                                   Disabled="_busy"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Refresh"
+                                   data-testid="refresh-policies">
+                            刷新
+                        </MudButton>
+                        <MudButton OnClick="@(() => OpenEditorAsync(null))"
+                                   Disabled="_busy"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Outlined.Add"
+                                   data-testid="new-backup-policy">
+                            添加手动备份配置
+                        </MudButton>
+                    }
+                </Actions>
+            </PageHeader>
+            @if (_error is not null) { <MudAlert Severity="Severity.Error" role="alert">@_error</MudAlert> }
+            @if (_message is not null)
+            {
+                <MudAlert Severity="Severity.Success" role="status">
+                    @_message
+                    @if (_startedTaskId is not null)
+                    {
+                        <MudLink Href="@($"/backup-tasks/{_startedTaskId}")" data-testid="started-task-link">查看任务详情</MudLink>
+                    }
+                </MudAlert>
+            }
+            @if (_login) { <MudButton Href="/login?returnUrl=/backup-policies" Color="Color.Primary">重新登录</MudButton> }
+            else if (_dashboard.Policies.Count == 0 && _dashboard.Databases.Count == 0)
+            {
+                <EmptyState Title="暂无可备份的数据库"
+                            Icon="@Icons.Material.Outlined.Backup"
+                            Description="先在“数据库清单”中纳管需要备份的数据库，再回来创建手动备份配置。">
+                    <Actions>
+                        <MudButton Href="/databases" Variant="Variant.Filled" Color="Color.Primary" data-testid="go-databases">
+                            前往数据库清单
+                        </MudButton>
+                    </Actions>
+                </EmptyState>
+            }
+            else
+            {
+                <MudTable T="ManualBackupPolicy" Items="_dashboard.Policies" Loading="_busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1">
+                    <HeaderContent>
+                        <MudTh>配置名称</MudTh><MudTh>数据库</MudTh><MudTh>存储模式</MudTh><MudTh>本地保留</MudTh><MudTh>远程保留</MudTh><MudTh>状态</MudTh><MudTh>操作</MudTh>
+                    </HeaderContent>
+                    <RowTemplate Context="policy">
+                        <MudTd DataLabel="配置名称">@policy.Settings.Name</MudTd>
+                        <MudTd DataLabel="数据库">@DatabaseLabel(policy.Settings.DatabaseId)</MudTd>
+                        <MudTd DataLabel="存储模式">
+                            @StorageModeLabel(policy.Settings.StorageMode)
+                            @if (policy.Settings.StorageMode != 1)
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@StorageTargetLabel(policy.Settings.StorageTargetId)</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="本地保留">@(policy.Settings.StorageMode == 3 ? "—" : $"{policy.Settings.RetentionDays} 天")</MudTd>
+                        <MudTd DataLabel="远程保留">@(policy.Settings.StorageMode == 1 ? "—" : $"{policy.Settings.RemoteRetentionDays} 天")</MudTd>
+                        <MudTd DataLabel="状态">
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                     Color="@(policy.Settings.IsEnabled ? Color.Success : Color.Default)">
+                                @(policy.Settings.IsEnabled ? "已启用（仅手动）" : "已停用")
+                            </MudChip>
+                        </MudTd>
+                        <MudTd DataLabel="操作">
+                            <MudButton Size="Size.Small" OnClick="@(() => OpenEditorAsync(policy))" Disabled="_busy" data-testid="edit-policy">编辑</MudButton>
+                            <MudButton Size="Size.Small" OnClick="@(() => StartAsync(policy))" Disabled="@(_busy || !policy.Settings.IsEnabled)" Color="Color.Primary" data-testid="run-backup">立即备份</MudButton>
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText Class="pa-4">暂无手动备份配置，点击“添加手动备份配置”创建。</MudText></NoRecordsContent>
+                </MudTable>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private static readonly DialogOptions EditorOptions = new() { MaxWidth = MaxWidth.Small, FullWidth = true };
+
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly Dictionary<Guid, Guid> _runRequests = new();
+    private BackupDashboard _dashboard = new([], [], [], false);
+    private IReadOnlyList<StorageTargetItem> _targets = [];
+    private bool _busy, _disposed, _login;
+    private string? _error, _message;
+    private Guid? _startedTaskId;
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    private string DatabaseLabel(Guid databaseId) =>
+        _dashboard.Databases.FirstOrDefault(x => x.Id == databaseId)?.Label ?? "原数据库（当前不可用）";
+
+    private static string StorageModeLabel(int mode) => mode switch
+    {
+        2 => "本地加远程",
+        3 => "仅远程",
+        _ => "仅本地",
+    };
+
+    private string StorageTargetLabel(Guid? targetId) =>
+        _targets.FirstOrDefault(x => x.Id == targetId)?.Settings.Name ?? "原存储目标（当前不可用）";
+
+    private async Task RunAsync(Func<AdminSession, Task> action)
+    {
+        if (_busy || _disposed) return;
+        _busy = true; _error = null; _message = null; _startedTaskId = null;
+        try
+        {
+            var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+            if (actor is null) { Failure(BackupManagementCode.AuthenticationRequired); return; }
+            await action(actor);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception) { Failure(BackupManagementCode.Unavailable); }
+        finally { _busy = false; }
+    }
+
+    private Task RefreshAsync() => RunAsync(LoadAsync);
+
+    private async Task LoadAsync(AdminSession actor)
+    {
+        var result = await Management.ListAsync(actor, 0, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
+        var targets = await StorageTargets.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (targets.Code == ManagementCode.AuthenticationRequired) { Failure(BackupManagementCode.AuthenticationRequired); return; }
+        _dashboard = result.Value!;
+        _targets = targets.Value ?? [];
+        if (targets.Code != ManagementCode.Succeeded) Failure(BackupManagementCode.Unavailable);
+    }
+
+    private async Task OpenEditorAsync(ManualBackupPolicy? policy)
+    {
+        if (_busy || _disposed) return;
+        var model = policy is null ? new PolicyFormModel() : new PolicyFormModel
+        {
+            Name = policy.Settings.Name, DatabaseId = policy.Settings.DatabaseId,
+            StorageMode = policy.Settings.StorageMode,
+            StorageTargetId = policy.Settings.StorageTargetId ?? Guid.Empty,
+            RetentionDays = policy.Settings.RetentionDays,
+            RemoteRetentionDays = policy.Settings.RemoteRetentionDays ?? 7,
+            BackupMinutes = policy.Settings.BackupTimeoutMinutes,
+            VerifyMinutes = policy.Settings.VerifyTimeoutMinutes,
+            TransferMinutes = policy.Settings.TransferTimeoutMinutes,
+            Compression = policy.Settings.UseCompression,
+            Enabled = policy.Settings.IsEnabled
+        };
+        var parameters = new DialogParameters<BackupPolicyEditDialog>
+        {
+            { dialog => dialog.Title, policy is null ? "添加手动备份配置" : "编辑手动备份配置" },
+            { dialog => dialog.Model, model },
+            { dialog => dialog.Databases, _dashboard.Databases },
+            { dialog => dialog.Targets, _targets },
+            { dialog => dialog.IsEdit, policy is not null },
+            { dialog => dialog.OnSave, (PolicyFormModel input) => SaveAsync(policy?.Id, policy?.Version, input) },
+        };
+        var dialog = await Dialogs.ShowAsync<BackupPolicyEditDialog>(policy is null ? "添加手动备份配置" : "编辑手动备份配置", parameters, EditorOptions);
+        await dialog.Result;
+    }
+
+    /// <summary>弹窗保存委托：返回 null 表示成功，否则返回中文错误并保持弹窗与输入。</summary>
+    private async Task<string?> SaveAsync(Guid? id, string? version, PolicyFormModel input)
+    {
+        _error = null;
+        _message = null;
+        var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+        if (actor is null)
+        {
+            Failure(BackupManagementCode.AuthenticationRequired);
+            return null;
+        }
+
+        var result = await Management.SavePolicyAsync(actor, id, version,
+            new(input.DatabaseId, input.Name, input.RetentionDays, input.BackupMinutes, input.VerifyMinutes,
+                input.Compression, input.Enabled, input.StorageMode,
+                input.StorageMode == 1 ? null : input.StorageTargetId,
+                input.StorageMode == 1 ? null : input.RemoteRetentionDays,
+                input.TransferMinutes), _lifetime.Token);
+        if (_disposed) return null;
+        if (result.Code == BackupManagementCode.AuthenticationRequired)
+        {
+            Failure(result.Code);
+            return null;
+        }
+
+        if (result.Code != BackupManagementCode.Succeeded)
+        {
+            return BackupPresentation.Error(result.Code).Message;
+        }
+
+        _message = "手动备份配置已保存。";
+        await LoadAsync(actor);
+        return null;
+    }
+
+    private Task StartAsync(ManualBackupPolicy policy) => RunAsync(async actor =>
+    {
+        if (!_runRequests.TryGetValue(policy.Id, out var request)) _runRequests[policy.Id] = request = Guid.NewGuid();
+        var result = await Management.StartAsync(actor, policy.Id, request, _lifetime.Token);
+        if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
+        _runRequests.Remove(policy.Id);
+        _startedTaskId = result.Value;
+        _message = "任务已提交，等待 Worker 执行。";
+    });
+
+    private void Failure(BackupManagementCode code)
+    {
+        if (_disposed) return;
+        _error = BackupPresentation.Error(code).Message;
+        if (code == BackupManagementCode.AuthenticationRequired)
+        { _login = true; _dashboard = new([], [], [], false); _targets = []; }
+    }
+
+    public void Dispose() { _disposed = true; _lifetime.Cancel(); _lifetime.Dispose(); }
+}

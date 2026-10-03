@@ -1,0 +1,12 @@
+@*
+    列表、详情和面板在等待数据时的统一占位，避免各页面自行拼装加载提示。
+*@
+<div class="app-state" role="status" aria-live="polite" data-testid="loading-state">
+    <MudProgressCircular Color="Color.Primary" Indeterminate="true" Size="Size.Medium" />
+    <MudText Typo="Typo.body1">@Message</MudText>
+</div>
+
+@code {
+    [Parameter]
+    public string Message { get; set; } = "正在加载数据…";
+}

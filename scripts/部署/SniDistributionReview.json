@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "component": "Microsoft.Data.SqlClient.SNI.runtime/6.0.3",
+  "licenseSha256": "9335e8bad875dd7be4eebd55d2335eb6433d1cea61aadb3817af7807bef8932a",
+  "termsSha256": "fa49132ff9d8ee3efbe4e9e902d64fed9fe24ea1761f85b39e8b002c5b8dc622",
+  "approved": false,
+  "approvalReference": null
+}

@@ -1,0 +1,151 @@
+@*
+    导航只列出已注册的真实路由，按业务目标分组：工作台、数据库管理、备份管理、系统管理。
+    新功能页面建立后才加入对应分组，不提供占位入口。
+    当前路由所属分组自动展开且不会自动收起用户已展开的分组；刷新或直接访问子页时选中状态保持正确。
+*@
+@using DbBackupManager.Web.Authentication
+@implements IDisposable
+@inject NavigationManager NavigationManager
+
+<nav class="app-nav" aria-label="主导航">
+    <MudNavMenu Bordered="true" Rounded="true" Margin="Margin.Dense" Class="pa-2">
+        <MudNavLink Href="/"
+                    Match="NavLinkMatch.All"
+                    Icon="@Icons.Material.Outlined.Dashboard"
+                    data-testid="nav-link-home">
+            工作台
+        </MudNavLink>
+        <AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+            <Authorized>
+                <MudNavGroup Title="数据库管理"
+                             Icon="@Icons.Material.Outlined.Storage"
+                             @bind-Expanded="_databaseGroupExpanded"
+                             data-testid="nav-group-database">
+                    <MudNavLink Href="/servers"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.Dns"
+                                data-testid="nav-link-servers">
+                        服务器与实例
+                    </MudNavLink>
+                    <MudNavLink Href="/databases"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.TableView"
+                                data-testid="nav-link-databases">
+                        数据库清单
+                    </MudNavLink>
+                </MudNavGroup>
+                <MudNavGroup Title="备份管理"
+                             Icon="@Icons.Material.Outlined.Backup"
+                             @bind-Expanded="_backupGroupExpanded"
+                             data-testid="nav-group-backup">
+                    <MudNavLink Href="/backup-policies"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.Tune"
+                                data-testid="nav-link-backup-policies">
+                        备份配置
+                    </MudNavLink>
+                    <MudNavLink Href="/scheduled-backup-policies"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.Schedule"
+                                data-testid="nav-link-scheduled-backup-policies">
+                        计划备份
+                    </MudNavLink>
+                    <MudNavLink Href="/storage-targets"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.CloudUpload"
+                                data-testid="nav-link-storage-targets">
+                        存储目标
+                    </MudNavLink>
+                    <MudNavLink Href="/backup-tasks"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.FormatListBulleted"
+                                data-testid="nav-link-backup-tasks">
+                        任务记录
+                    </MudNavLink>
+                    <MudNavLink Href="/backup-files" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Outlined.Folder" data-testid="nav-link-backup-files">
+                        备份文件
+                    </MudNavLink>
+                </MudNavGroup>
+                <MudNavGroup Title="系统管理"
+                             Icon="@Icons.Material.Outlined.Settings"
+                             @bind-Expanded="_systemGroupExpanded"
+                             data-testid="nav-group-system">
+                    <MudNavLink Href="/sql-credentials"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.Key"
+                                data-testid="nav-link-sql-credentials">
+                        SQL 凭据
+                    </MudNavLink>
+                    <MudNavLink Href="/file-credentials"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.FolderShared"
+                                data-testid="nav-link-file-credentials">
+                        暂存访问凭据
+                    </MudNavLink>
+                    <MudNavLink Href="/notifications"
+                                Match="NavLinkMatch.Prefix"
+                                Icon="@Icons.Material.Outlined.Notifications"
+                                data-testid="nav-link-notifications">
+                        通知设置
+                    </MudNavLink>
+                </MudNavGroup>
+            </Authorized>
+            <NotAuthorized>
+                <MudNavLink Href="/login"
+                            Icon="@Icons.Material.Outlined.Login"
+                            data-testid="nav-link-login-menu">
+                    登录
+                </MudNavLink>
+            </NotAuthorized>
+        </AuthorizeView>
+    </MudNavMenu>
+</nav>
+
+@code {
+    private bool _databaseGroupExpanded;
+    private bool _backupGroupExpanded;
+    private bool _systemGroupExpanded;
+
+    [CascadingParameter]
+    private HttpContext? PageHttpContext { get; set; }
+
+    protected override void OnInitialized()
+    {
+        NavigationManager.LocationChanged += OnLocationChanged;
+
+        var acceptsInteractiveRouting =
+            HttpContextAccess.TryGetActive(PageHttpContext, out var httpContext)
+                ? httpContext.AcceptsInteractiveRouting()
+                : true;
+        if (!acceptsInteractiveRouting)
+        {
+            // Static SSR 页面（如修改密码）无法响应点击展开分组，全部展开保证导航链接可达。
+            _databaseGroupExpanded = true;
+            _backupGroupExpanded = true;
+            _systemGroupExpanded = true;
+        }
+
+        ExpandGroupsFor(NavigationManager.Uri);
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs eventArgs)
+    {
+        ExpandGroupsFor(eventArgs.Location);
+        StateHasChanged();
+    }
+
+    private void ExpandGroupsFor(string uri)
+    {
+        var relativePath = NavigationManager.ToBaseRelativePath(uri).Split('?', '#')[0];
+        var path = $"/{relativePath}";
+
+        _databaseGroupExpanded |= NavigationGroups.IsDatabase(path);
+        _backupGroupExpanded |= NavigationGroups.IsBackup(path);
+        _systemGroupExpanded |= NavigationGroups.IsSystem(path);
+    }
+
+    public void Dispose()
+    {
+        NavigationManager.LocationChanged -= OnLocationChanged;
+    }
+}

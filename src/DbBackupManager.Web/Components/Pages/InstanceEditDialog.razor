@@ -1,0 +1,116 @@
+@*
+    SQL 实例编辑弹窗。证书信任例外保留醒目的持续警示与必填原因；保存失败时弹窗保持打开并保留用户输入。
+    只负责呈现与字段级校验，保存语义由页面通过 OnSave 委托完成。
+*@
+@using DbBackupManager.Application.SqlCredentials
+
+<EditForm Model="Model" OnValidSubmit="SubmitAsync">
+    <DataAnnotationsValidator />
+    <MudDialog>
+        <TitleContent>
+            <MudText Typo="Typo.h6">@Title</MudText>
+        </TitleContent>
+        <DialogContent>
+            <MudStack Spacing="2">
+                @if (_error is not null)
+                {
+                    <MudAlert Severity="Severity.Error" role="alert" data-testid="dialog-error">@_error</MudAlert>
+                }
+                <MudTextField T="string" Label="实例显示名称" @bind-Value="Model.Name" For="@(() => Model.Name)" InputId="instance-name" Disabled="_saving" />
+                <MudTextField T="string" Label="SQL 连接地址" @bind-Value="Model.Address" For="@(() => Model.Address)" InputId="instance-address" HelperText="主机、主机\实例名或主机,端口" Disabled="_saving" />
+                <MudSelect T="Guid" Label="SQL 登录凭据" @bind-Value="Model.CredentialId" Disabled="_saving">
+                    <MudSelectItem Value="Guid.Empty" Disabled="true">请选择 SQL 登录凭据</MudSelectItem>
+                    @foreach (var credential in SqlCredentials)
+                    {
+                        <MudSelectItem Value="credential.Id">@credential.Name @(credential.IsEnabled ? "" : "（已停用）")</MudSelectItem>
+                    }
+                </MudSelect>
+                @if (SqlCredentials.Count == 0)
+                {
+                    <MudAlert Severity="Severity.Info">
+                        请先到<MudLink Href="/sql-credentials">“SQL 凭据”</MudLink>添加登录账号。
+                    </MudAlert>
+                }
+                <MudNumericField T="int" Label="连接超时（秒）" @bind-Value="Model.Timeout" Min="1" Max="300" Disabled="_saving" />
+                <MudText Typo="Typo.caption">连接始终加密，默认验证服务器证书。</MudText>
+                <MudCheckBox T="bool" Label="对此实例启用证书信任例外" @bind-Value="Model.Trust" Disabled="_saving" data-testid="trust-certificate" />
+                @if (Model.Trust)
+                {
+                    <MudAlert Severity="Severity.Warning">信任例外会跳过此实例的服务器证书验证。请确认目标身份并填写原因。</MudAlert>
+                    <MudTextField T="string" Label="证书信任例外原因（必填）" @bind-Value="Model.Reason" Disabled="_saving" MaxLength="500" />
+                }
+                <MudCheckBox T="bool" Label="对此实例允许 SQL 2008 R2 RTM / 旧 TLS 兼容" @bind-Value="Model.AllowLegacyTls" Disabled="_saving" />
+                @if (Model.AllowLegacyTls)
+                {
+                    <MudAlert Severity="Severity.Warning">此例外允许旧版本及 TLS 1.0。连接仍加密，但不满足默认安全基线；不会自动修改操作系统协议设置。仅用于已确认的旧实例。</MudAlert>
+                    <MudTextField T="string" Label="旧 TLS 兼容原因（必填）" @bind-Value="Model.LegacyTlsReason" Required="true" RequiredError="请填写旧 TLS 兼容原因。" MaxLength="500" Disabled="_saving" />
+                }
+                <MudCheckBox T="bool" Label="启用实例" @bind-Value="Model.Enabled" Disabled="_saving" />
+            </MudStack>
+        </DialogContent>
+        <DialogActions>
+            <MudButton OnClick="Cancel" Disabled="_saving">取消</MudButton>
+            <MudButton ButtonType="ButtonType.Submit"
+                       Variant="Variant.Filled"
+                       Color="Color.Primary"
+                       Disabled="_saving"
+                       data-testid="dialog-save">
+                @(_saving ? "保存中…" : "保存")
+            </MudButton>
+        </DialogActions>
+    </MudDialog>
+</EditForm>
+
+@code {
+    private bool _saving;
+    private string? _error;
+
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired]
+    public InstanceFormModel Model { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public IReadOnlyList<SqlCredentialItem> SqlCredentials { get; set; } = [];
+
+    /// <summary>保存委托；返回 <c>null</c> 表示成功，否则为显示给用户的中文错误。</summary>
+    [Parameter, EditorRequired]
+    public Func<InstanceFormModel, Task<string?>> OnSave { get; set; } = default!;
+
+    private async Task SubmitAsync()
+    {
+        if (Model.AllowLegacyTls && string.IsNullOrWhiteSpace(Model.LegacyTlsReason))
+        {
+            _error = "请填写旧 TLS 兼容原因。";
+            return;
+        }
+        if (_saving)
+        {
+            return;
+        }
+
+        _saving = true;
+        _error = null;
+        try
+        {
+            var error = await OnSave(Model);
+            if (error is null)
+            {
+                MudDialog.Close(DialogResult.Ok(true));
+                return;
+            }
+
+            _error = error;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void Cancel() => MudDialog.Cancel();
+}

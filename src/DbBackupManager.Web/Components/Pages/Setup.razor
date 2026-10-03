@@ -1,0 +1,105 @@
+@page "/setup"
+@layout AuthLayout
+@attribute [AllowAnonymous]
+@attribute [ExcludeFromInteractiveRouting]
+@using DbBackupManager.Application.Identity
+@using Microsoft.AspNetCore.Authorization
+@inject IAdminIdentityService IdentityService
+@inject NavigationManager Navigation
+
+<PageTitle>首次设置 - DbBackupManager</PageTitle>
+
+<MudStack Spacing="3">
+    <div>
+        <h1>首次设置</h1>
+        <MudText Typo="Typo.body2" Class="mud-text-secondary">
+            创建本地管理员账号。密码长度为 12 到 128 个字符，页面不会回显已输入的密码。
+        </MudText>
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(_errorMessage))
+    {
+        <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" data-testid="auth-error">
+            @_errorMessage
+        </MudAlert>
+    }
+
+    @if (!_setupRequired)
+    {
+        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" data-testid="setup-unavailable">
+            首次设置已完成，不能重复创建管理员。
+            <MudLink Href="@LoginHref" data-testid="setup-to-login">前往登录</MudLink>
+        </MudAlert>
+    }
+    else
+    {
+        <MudPaper Class="pa-6" Elevation="1">
+            <form method="post" action="/account/setup" data-testid="setup-form">
+                <AntiforgeryToken />
+                @if (_returnUrl is not null)
+                {
+                    <input type="hidden" name="returnUrl" value="@_returnUrl" />
+                }
+
+                <MudStack Spacing="3">
+                    <AuthFormField Id="setup-username"
+                                   Label="用户名"
+                                   Name="username"
+                                   Type="text"
+                                   Autocomplete="username"
+                                   Autocapitalize="none"
+                                   Spellcheck="false"
+                                   TestId="setup-username" />
+                    <AuthFormField Id="setup-password"
+                                   Label="密码"
+                                   Name="password"
+                                   Type="password"
+                                   Autocomplete="new-password"
+                                   MinLength="12"
+                                   MaxLength="128"
+                                   TestId="setup-password" />
+                    <MudButton ButtonType="ButtonType.Submit"
+                               Variant="Variant.Filled"
+                               Color="Color.Primary"
+                               FullWidth="true"
+                               data-testid="setup-submit">
+                        创建管理员
+                    </MudButton>
+                </MudStack>
+            </form>
+        </MudPaper>
+    }
+</MudStack>
+
+@code {
+    private string? _errorMessage;
+    private string? _returnUrl;
+    private bool _setupRequired = true;
+
+    [CascadingParameter]
+    public HttpContext? PageHttpContext { get; set; }
+
+    [SupplyParameterFromQuery(Name = "error")]
+    public string? Error { get; set; }
+
+    [SupplyParameterFromQuery(Name = "returnUrl")]
+    public string? ReturnUrl { get; set; }
+
+    protected override void OnParametersSet()
+    {
+        _returnUrl = AuthPageMessages.SanitizeReturnUrl(
+            ReturnUrl ?? AuthQuery.Get(Navigation, PageHttpContext, "returnUrl"));
+        _errorMessage = AuthPageMessages.ForError(
+            Error ?? AuthQuery.Get(Navigation, PageHttpContext, "error"));
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _setupRequired = await IdentityService.IsSetupRequiredAsync();
+    }
+
+    private string LoginHref =>
+        _returnUrl is null
+            ? "/login"
+            : $"/login?returnUrl={Uri.EscapeDataString(_returnUrl)}";
+}

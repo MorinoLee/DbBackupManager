@@ -1,0 +1,285 @@
+@*
+    存储目标：远程备份副本的 SMB/SFTP 目的地管理，支持新建、编辑、启停和只读连接测试。
+    连接测试只读取哨兵文件，不创建、修改或删除业务文件；主机、路径与凭据名称仅向已登录管理员呈现。
+*@
+@page "/storage-targets"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@implements IDisposable
+@using DbBackupManager.Application.FileCredentials
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Application.Servers
+@using DbBackupManager.Application.StorageTargets
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.SqlCredentials
+@using DbBackupManager.Web.StorageTargets
+@using Microsoft.AspNetCore.Authorization
+@inject IStorageTargetManagementService Management
+@inject IFileCredentialService FileCredentialsService
+@inject AuthenticationStateProvider Authentication
+@inject IDialogService Dialogs
+
+<PageTitle>存储目标 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="存储目标"
+                        Description="远程备份副本的 SMB/SFTP 目的地。先在“暂存访问凭据”录入账号，再添加目标并测试连接，最后在备份配置中选择。">
+                <Actions>
+                    @if (!_login)
+                    {
+                        <MudButton OnClick="RefreshAsync"
+                                   Disabled="_busy"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Refresh"
+                                   data-testid="refresh-targets">
+                            刷新
+                        </MudButton>
+                        <MudButton OnClick="@(() => OpenEditorAsync(null))"
+                                   Disabled="_busy"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Outlined.Add"
+                                   data-testid="new-target">
+                            添加存储目标
+                        </MudButton>
+                    }
+                </Actions>
+            </PageHeader>
+            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                SFTP 目标必须填写服务器实际的主机密钥指纹（SHA256），系统不会自动信任未知主机；连接测试只读取哨兵文件，不会创建、修改或删除业务文件。
+            </MudAlert>
+            @if (_error is not null) { <MudAlert Severity="Severity.Error" role="alert">@_error</MudAlert> }
+            @if (_message is not null) { <MudAlert Severity="Severity.Success" role="status">@_message</MudAlert> }
+            @if (_login)
+            {
+                <MudButton Href="/login?returnUrl=/storage-targets" Color="Color.Primary">重新登录</MudButton>
+            }
+            else if (_targets.Count == 0)
+            {
+                <EmptyState Title="暂无存储目标"
+                            Icon="@Icons.Material.Outlined.CloudUpload"
+                            Description="存储目标是远程备份副本的目的地；添加目标并测试连接后，才能在备份配置中启用远程副本。">
+                    <Actions>
+                        <MudButton OnClick="@(() => OpenEditorAsync(null))"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   data-testid="empty-new-target">
+                            添加存储目标
+                        </MudButton>
+                    </Actions>
+                </EmptyState>
+            }
+            else
+            {
+                <MudTable T="StorageTargetItem" Items="_targets" Loading="_busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1" data-testid="target-list">
+                    <HeaderContent>
+                        <MudTh>名称</MudTh><MudTh>协议</MudTh><MudTh>主机</MudTh><MudTh>根路径</MudTh><MudTh>访问凭据</MudTh><MudTh>状态</MudTh><MudTh>操作</MudTh>
+                    </HeaderContent>
+                    <RowTemplate Context="target">
+                        <MudTd DataLabel="名称">@target.Settings.Name</MudTd>
+                        <MudTd DataLabel="协议">
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info">
+                                @(target.Settings.Protocol == 1 ? "SMB" : target.Settings.Protocol == 2 ? "SFTP" : "未知协议")
+                            </MudChip>
+                        </MudTd>
+                        <MudTd DataLabel="主机">
+                            @target.Settings.Host
+                            @if (target.Settings.Port is not null)
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">端口 @target.Settings.Port</MudText>
+                            }
+                            @if (target.Settings.Protocol == 2 && !string.IsNullOrWhiteSpace(target.Settings.Fingerprint))
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary" data-testid="target-fingerprint">@target.Settings.Fingerprint</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="根路径"><span class="file-meta">@target.Settings.BasePath</span></MudTd>
+                        <MudTd DataLabel="访问凭据">@CredentialLabel(target.Settings)</MudTd>
+                        <MudTd DataLabel="状态">
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                     Color="@(target.Settings.IsEnabled ? Color.Success : Color.Default)">
+                                @(target.Settings.IsEnabled ? "已启用" : "已停用")
+                            </MudChip>
+                        </MudTd>
+                        <MudTd DataLabel="操作">
+                            <MudButton Size="Size.Small" OnClick="@(() => OpenEditorAsync(target))" Disabled="_busy" data-testid="edit-target">编辑</MudButton>
+                            <MudButton Size="Size.Small" OnClick="@(() => ProbeAsync(target))" Disabled="@(_busy || !CanProbe(target))" data-testid="probe-target">测试连接</MudButton>
+                            <MudButton Size="Size.Small" OnClick="@(() => ToggleAsync(target))" Disabled="_busy" data-testid="toggle-target">@(target.Settings.IsEnabled ? "停用" : "启用")</MudButton>
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText Class="pa-4">暂无存储目标，点击“添加存储目标”创建。</MudText></NoRecordsContent>
+                </MudTable>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private static readonly DialogOptions EditorOptions = new() { MaxWidth = MaxWidth.Medium, FullWidth = true };
+
+    private readonly CancellationTokenSource _lifetime = new();
+    private IReadOnlyList<StorageTargetItem> _targets = [];
+    private IReadOnlyList<FileCredentialItem> _fileCredentials = [];
+    private bool _busy, _login, _disposed;
+    private string? _error, _message;
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    private string CredentialLabel(StorageTargetInput settings)
+    {
+        var credential = _fileCredentials.FirstOrDefault(x => x.Id == settings.CredentialId);
+        if (credential is null)
+        {
+            return "凭据不可用";
+        }
+
+        var mismatch = settings.Protocol == 1
+            ? credential.Kind != FileCredentialKind.SmbPassword
+            : credential.Kind is not (FileCredentialKind.SftpPassword or FileCredentialKind.SftpPrivateKey);
+        var suffix = mismatch ? "（类型不匹配）" : credential.IsEnabled ? "" : "（已停用）";
+        return credential.Name + suffix;
+    }
+
+    private bool CanProbe(StorageTargetItem target)
+    {
+        if (!target.Settings.IsEnabled)
+        {
+            return false;
+        }
+
+        var credential = _fileCredentials.FirstOrDefault(x => x.Id == target.Settings.CredentialId);
+        return credential is { IsEnabled: true }
+            && (target.Settings.Protocol == 1
+                ? credential.Kind == FileCredentialKind.SmbPassword
+                : credential.Kind is FileCredentialKind.SftpPassword or FileCredentialKind.SftpPrivateKey);
+    }
+
+    private async Task RunAsync(Func<AdminSession, Task> action)
+    {
+        if (_busy || _disposed) return;
+        _busy = true; _error = null; _message = null;
+        try
+        {
+            var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+            if (actor is null) { Failure(ManagementCode.AuthenticationRequired); return; }
+            await action(actor);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception) { Failure(ManagementCode.Unavailable); }
+        finally { _busy = false; }
+    }
+
+    private Task RefreshAsync() => RunAsync(LoadAsync);
+
+    private async Task LoadAsync(AdminSession actor)
+    {
+        var result = await Management.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code != ManagementCode.Succeeded) { _targets = []; _fileCredentials = []; Failure(result.Code); return; }
+        var credentials = await FileCredentialsService.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (credentials.Code == FileCredentialResultCode.AuthenticationRequired)
+        { Failure(ManagementCode.AuthenticationRequired); return; }
+        _targets = result.Value!;
+        _fileCredentials = credentials.Value ?? [];
+        if (credentials.Code != FileCredentialResultCode.Succeeded) Failure(ManagementCode.Unavailable);
+    }
+
+    private async Task OpenEditorAsync(StorageTargetItem? item)
+    {
+        if (_busy || _disposed) return;
+        var settings = item?.Settings;
+        var model = settings is null ? new StorageTargetFormModel() : new StorageTargetFormModel
+        {
+            Name = settings.Name, Protocol = settings.Protocol, Host = settings.Host,
+            Port = settings.Port ?? 22, BasePath = settings.BasePath, CredentialId = settings.CredentialId,
+            Fingerprint = settings.Fingerprint ?? "", Enabled = settings.IsEnabled
+        };
+        var parameters = new DialogParameters<StorageTargetEditDialog>
+        {
+            { dialog => dialog.Title, item is null ? "添加存储目标" : "编辑存储目标" },
+            { dialog => dialog.Model, model },
+            { dialog => dialog.FileCredentials, _fileCredentials },
+            { dialog => dialog.OnSave, (StorageTargetFormModel input) => SaveAsync(item?.Id, item?.Version, input) },
+        };
+        var dialog = await Dialogs.ShowAsync<StorageTargetEditDialog>(item is null ? "添加存储目标" : "编辑存储目标", parameters, EditorOptions);
+        await dialog.Result;
+    }
+
+    /// <summary>弹窗保存委托：返回 null 表示成功，否则返回中文错误并保持弹窗与输入。</summary>
+    private async Task<string?> SaveAsync(Guid? id, string? version, StorageTargetFormModel input)
+    {
+        _error = null;
+        _message = null;
+        var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+        if (actor is null)
+        {
+            Failure(ManagementCode.AuthenticationRequired);
+            return null;
+        }
+
+        var result = await Management.SaveAsync(actor, id, version,
+            new(input.Name, input.Protocol, input.Host, input.Protocol == 2 ? input.Port : null,
+                input.BasePath, input.CredentialId,
+                input.Protocol == 2 ? input.Fingerprint : null, input.Enabled), _lifetime.Token);
+        if (_disposed) return null;
+        if (result.Code == ManagementCode.AuthenticationRequired)
+        {
+            Failure(result.Code);
+            return null;
+        }
+
+        if (result.Code != ManagementCode.Succeeded)
+        {
+            return StorageTargetPresentation.Error(result.Code).Message;
+        }
+
+        _message = "存储目标已保存。";
+        await LoadAsync(actor);
+        return null;
+    }
+
+    private Task ProbeAsync(StorageTargetItem item) => RunAsync(async actor =>
+    {
+        var result = await Management.TestConnectionAsync(actor, item.Id, item.Version, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code == ManagementCode.Succeeded)
+        {
+            Upsert(result.Value!);
+            _message = "连接测试通过。";
+            return;
+        }
+
+        if (result.Value is not null) Upsert(result.Value);
+        if (result.Code == ManagementCode.TargetFailed)
+        {
+            _error = $"连接测试失败。{BackupFilePresentation.Failure(result.TargetError)}";
+            return;
+        }
+
+        Failure(result.Code);
+    });
+
+    private Task ToggleAsync(StorageTargetItem item) => RunAsync(async actor =>
+    {
+        var result = await Management.SetEnabledAsync(actor, item.Id, item.Version, !item.Settings.IsEnabled, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code != ManagementCode.Succeeded) { Failure(result.Code); return; }
+        Upsert(result.Value!);
+        _message = result.Value!.Settings.IsEnabled ? "存储目标已启用。" : "存储目标已停用，后续备份与清理将无法使用此目标。";
+    });
+
+    private void Upsert(StorageTargetItem item) =>
+        _targets = _targets.Where(x => x.Id != item.Id).Append(item).OrderBy(x => x.Settings.Name).ToArray();
+
+    private void Failure(ManagementCode code)
+    {
+        if (_disposed) return;
+        _error = StorageTargetPresentation.Error(code).Message;
+        if (code == ManagementCode.AuthenticationRequired)
+        { _login = true; _targets = []; _fileCredentials = []; }
+    }
+
+    public void Dispose() { _disposed = true; _lifetime.Cancel(); _lifetime.Dispose(); }
+}

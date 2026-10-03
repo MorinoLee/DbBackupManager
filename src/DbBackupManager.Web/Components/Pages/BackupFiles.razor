@@ -1,0 +1,105 @@
+@page "/backup-files"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@inherits SearchMonitoringPageBase
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.BackupTasks
+@using Microsoft.AspNetCore.Authorization
+
+<PageTitle>备份文件 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="备份文件" Description="查看全部已登记的本地与远程备份副本，日期按验证时间筛选。">
+                <Actions><MudButton OnClick="RefreshAsync" Disabled="Busy" Variant="Variant.Outlined" data-testid="refresh-files">刷新</MudButton></Actions>
+            </PageHeader>
+            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">这里展示验证时登记的副本记录，不会重新检查文件是否存在；保留天数仅为配置记录，自动清理将在后续阶段启用。本页不提供文件删除操作。</MudAlert>
+            @if (Error is not null) { <MudAlert Severity="Severity.Error" role="alert">@Error</MudAlert> }
+            @if (RequiresLogin) { <MudButton Href="/login?returnUrl=/backup-files">重新登录</MudButton> }
+            else
+            {
+                <MudPaper Class="pa-4" Elevation="1">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" md="4"><MudTextField T="string" Immediate="true" @bind-Value="SearchInput" Label="数据库 / 配置名称" MaxLength="200" Disabled="Busy" Variant="Variant.Outlined" Margin="Margin.Dense" data-testid="search-text" /></MudItem>
+
+        <MudItem xs="6" md="2"><MudTextField T="string" Immediate="true" @bind-Value="FromInput" InputType="InputType.Date" Label="起始日期" Disabled="Busy" Variant="Variant.Outlined" Margin="Margin.Dense" /></MudItem>
+        <MudItem xs="6" md="2"><MudTextField T="string" Immediate="true" @bind-Value="UntilInput" InputType="InputType.Date" Label="结束日期（含）" Disabled="Busy" Variant="Variant.Outlined" Margin="Margin.Dense" /></MudItem>
+        <MudItem xs="12" md="2"><MudCheckBox T="bool" @bind-Value="OldestInput" Label="最早优先" Disabled="Busy" /></MudItem>
+    </MudGrid>
+    <MudStack Row="true" Class="mt-3" Wrap="Wrap.Wrap">
+        <MudButton OnClick="ApplySearch" Disabled="Busy" Variant="Variant.Filled" Color="Color.Primary" data-testid="apply-search">查询</MudButton>
+        <MudButton OnClick="ResetSearch" Disabled="Busy" data-testid="reset-search">重置</MudButton>
+    </MudStack>
+</MudPaper>
+                <MudTable T="BackupFileSummary" Items="_data.Items" Loading="Busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1" data-testid="file-list">
+                    <HeaderContent><MudTh>数据库 / 实例</MudTh><MudTh>备份配置</MudTh><MudTh>位置</MudTh><MudTh>状态</MudTh><MudTh>验证时间</MudTh><MudTh>大小</MudTh><MudTh>文件路径</MudTh><MudTh>保留天数</MudTh><MudTh>任务</MudTh></HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="数据库 / 实例">@context.DatabaseName / @context.InstanceName</MudTd>
+                        <MudTd DataLabel="备份配置">@context.PolicyName</MudTd>
+                        <MudTd DataLabel="位置">
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                     Color="@(context.Location == "Remote" ? Color.Info : Color.Default)">
+                                @BackupFilePresentation.Location(context.Location)
+                            </MudChip>
+                            @if (context.Location == "Remote")
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@BackupFilePresentation.Protocol(context.Protocol) · @(context.TargetDisplayName ?? "原存储目标")</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="状态">
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="@StatusColor(context.Status)">
+                                @BackupFilePresentation.Status(context.Status)
+                            </MudChip>
+                            @if (BackupFilePresentation.StatusNote(context.Status, context.ErrorCode) is { } note)
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@note</MudText>
+                            }
+                            @if (context.DeletedAtUtc is not null)
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">删除时间：@Formatters.LocalDateTime(context.DeletedAtUtc)</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="验证时间"><span class="file-meta">@Formatters.LocalDateTime(context.VerifiedAtUtc)</span></MudTd>
+                        <MudTd DataLabel="大小"><span class="file-meta">@Formatters.Bytes(context.LengthBytes)</span></MudTd>
+                        <MudTd DataLabel="文件路径">
+                            <span class="backup-file-path">@context.Path</span>
+                            @if (!string.IsNullOrEmpty(context.SqlPath))
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">SQL 路径：@context.SqlPath</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="保留天数">@context.RetentionDays</MudTd>
+                        <MudTd DataLabel="任务"><span class="file-meta"><MudLink Href="@($"/backup-tasks/{context.TaskId}?back={Uri.EscapeDataString(ListUrl)}")" data-testid="file-task-detail">详情</MudLink></span></MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText Class="pa-4">暂无符合条件的已登记副本。</MudText></NoRecordsContent>
+                </MudTable>
+                <MudStack Row="true" AlignItems="AlignItems.Center" Wrap="Wrap.Wrap">
+                    <MudButton OnClick="Previous" Disabled="@(Busy || Page <= 0)" Variant="Variant.Outlined" data-testid="previous-page">上一页</MudButton>
+                    <MudText>第 @(Page + 1) 页 · 共 @_data.TotalCount 条</MudText>
+                    <MudButton OnClick="Next" Disabled="@(Busy || !_data.HasMore)" Variant="Variant.Outlined" data-testid="next-page">下一页</MudButton>
+                </MudStack>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+@code {
+    private BackupPage<BackupFileSummary> _data = new([], 0, 0);
+
+    private static Color StatusColor(string status) => status switch
+    {
+        "Available" => Color.Success,
+        "DeleteFailed" => Color.Error,
+        "DeletePending" or "Missing" => Color.Warning,
+        _ => Color.Default,
+    };
+
+    protected override string ListRoute => "/backup-files";
+    protected override async Task<Action> FetchAsync(AdminSession actor, CancellationToken token)
+    {
+        var result = Require(await Monitoring.FilesAsync(actor, Query(), token));
+        return () => _data = result;
+    }
+    protected override void ClearData() => _data = new([], 0, 0);
+}

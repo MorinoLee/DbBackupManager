@@ -1,0 +1,17 @@
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Web.BackupTasks
+<MudTable T="BackupTaskSummary" Items="Items" Dense="true" Hover="true" Breakpoint="Breakpoint.Sm" Elevation="0">
+    <HeaderContent><MudTh>数据库 / 配置</MudTh><MudTh>状态 / 阶段</MudTh><MudTh>创建时间</MudTh><MudTh>详情</MudTh></HeaderContent>
+    <RowTemplate>
+        <MudTd DataLabel="数据库 / 配置"><span class="monitoring-name" title="@context.DatabaseName">@context.DatabaseName</span><span class="monitoring-name" title="@context.PolicyName">@context.PolicyName</span></MudTd>
+        <MudTd DataLabel="状态 / 阶段"><div><TaskStatusChip Status="@context.Status" /><div>@BackupPresentation.Stage(context.Stage)</div>
+            @if (context.ErrorCode is not null) { <MudText Typo="Typo.caption">@BackupPresentation.FailureSummary(context.ErrorCode)</MudText> }
+        </div></MudTd>
+        <MudTd DataLabel="创建时间"><span class="monitoring-time">@Formatters.LocalDateTime(context.CreatedAtUtc)</span></MudTd>
+        <MudTd DataLabel="详情"><span class="monitoring-time"><MudLink Href="@($"/backup-tasks/{context.Id}")">查看</MudLink></span></MudTd>
+    </RowTemplate>
+    <NoRecordsContent><MudText Class="pa-4">暂无符合条件的任务。</MudText></NoRecordsContent>
+</MudTable>
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<BackupTaskSummary> Items { get; set; } = [];
+}

@@ -1,0 +1,96 @@
+@page "/"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@inherits MonitoringPageBase
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.BackupTasks
+@using Microsoft.AspNetCore.Authorization
+
+<PageTitle>工作台 - DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="工作台" Description="全局任务、数据库保护情况与最近验证的本地备份。">
+                <Actions><MudButton OnClick="RefreshAsync" Disabled="Busy" Variant="Variant.Outlined" StartIcon="@Icons.Material.Outlined.Refresh" data-testid="dashboard-refresh">刷新</MudButton></Actions>
+            </PageHeader>
+            @if (Error is not null) { <MudAlert Severity="Severity.Error" role="alert" data-testid="dashboard-error">@Error</MudAlert> }
+            @if (RequiresLogin) { <MudButton Href="/login?returnUrl=/">重新登录</MudButton> }
+            @if (_overview is null && Busy) { <LoadingState /> }
+            @if (_overview is { } model)
+            {
+                <MudGrid Spacing="3" data-testid="dashboard-metrics">
+                    @foreach (var metric in new[] {
+                        ("已纳管数据库", model.ManagedDatabases, "/databases"),
+                        ("等待执行", model.PendingTasks, "/backup-tasks?status=Pending"),
+                        ("执行中", model.RunningTasks, "/backup-tasks?status=Running"),
+                        ("待核对", model.NeedsAttentionTasks, "/backup-tasks?status=NeedsAttention") })
+                    {
+                        <MudItem xs="6" md="3"><MudPaper Class="pa-4" Elevation="1">
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">@metric.Item1</MudText>
+                            <MudText Typo="Typo.h4"><MudLink Href="@metric.Item3" Typo="Typo.h4">@metric.Item2</MudLink></MudText>
+                        </MudPaper></MudItem>
+                    }
+                </MudGrid>
+                <MudPaper Class="pa-4" Elevation="1" data-testid="worker-presence">
+                    <MudStack Row="true" Wrap="Wrap.Wrap" AlignItems="AlignItems.Center">
+                        <MudChip T="string" Color="@(model.Worker.Status == "Online" ? Color.Success : Color.Warning)">Worker：@(model.Worker.Status switch { "Online" => "在线", "Offline" => "离线", _ => "尚无心跳" })</MudChip>
+                        <MudText Typo="Typo.body2">最近心跳：@Formatters.LocalDateTime(model.Worker.LastSeenAtUtc)</MudText>
+                        <MudText Typo="Typo.caption">超过 @model.Worker.OfflineAfterSeconds 秒无心跳视为离线；在线仅表示心跳服务可运行。</MudText>
+                    </MudStack>
+                </MudPaper>
+                <MudPaper Class="pa-4" Elevation="1" data-testid="database-protection">
+                    <MudText Typo="Typo.h6" HtmlTag="h2">数据库保护情况</MudText>
+                    <MudStack Row="true" Wrap="Wrap.Wrap" Class="my-2" Spacing="3">
+                        <MudText>已有验证副本：@model.WithVerifiedFile</MudText>
+                        <MudText>从未登记验证副本：@model.NeverVerified</MudText>
+                        <MudLink Href="/backup-policies">未启用备份配置：@model.WithoutEnabledPolicy</MudLink>
+                    </MudStack>
+                    <MudText Typo="Typo.caption">按当前纳管数据库统计；“未启用配置”可与另外两项重叠。已登记副本不代表文件现在仍存在或已完成恢复演练。</MudText>
+                    @if (model.ManagedDatabases == 0) { <MudButton Href="/servers" Color="Color.Primary" data-testid="dashboard-add-server">添加服务器并纳管数据库</MudButton> }
+                </MudPaper>
+                <MudGrid Spacing="3">
+                    <MudItem xs="12" lg="6"><MudPaper Class="pa-3" Elevation="1" data-testid="recent-tasks">
+                        <MudText Typo="Typo.h6" HtmlTag="h2">最近任务</MudText>
+                        <MonitoringTaskTable Items="model.RecentTasks" />
+                        <MudLink Href="/backup-tasks">查看全部任务</MudLink>
+                    </MudPaper></MudItem>
+                    <MudItem xs="12" lg="6"><MudPaper Class="pa-3" Elevation="1" data-testid="recent-failures">
+                        <MudText Typo="Typo.h6" HtmlTag="h2">近 24 小时失败任务 · @model.RecentFailedTasks</MudText>
+                        <MudText Typo="Typo.caption">按完成时间统计当前仍失败的任务，已重试成功的历史失败不计入。</MudText>
+                        <MonitoringTaskTable Items="model.RecentFailures" />
+                        <MudLink Href="/backup-tasks?status=Failed">查看全部失败任务</MudLink>
+                    </MudPaper></MudItem>
+                </MudGrid>
+                <MudPaper Class="pa-3" Elevation="1" data-testid="recent-files">
+                    <MudText Typo="Typo.h6" HtmlTag="h2">最近验证的本地备份</MudText>
+                    <MudTable T="BackupFileSummary" Items="model.RecentFiles" Dense="true" Breakpoint="Breakpoint.Sm" Elevation="0">
+                        <HeaderContent><MudTh>数据库 / 实例</MudTh><MudTh>验证时间</MudTh><MudTh>大小</MudTh><MudTh>任务</MudTh></HeaderContent>
+                        <RowTemplate><MudTd DataLabel="数据库 / 实例">@context.DatabaseName / @context.InstanceName</MudTd><MudTd DataLabel="验证时间">@Formatters.LocalDateTime(context.VerifiedAtUtc)</MudTd><MudTd DataLabel="大小">@Formatters.Bytes(context.LengthBytes)</MudTd><MudTd DataLabel="任务"><MudLink Href="@($"/backup-tasks/{context.TaskId}")">查看</MudLink></MudTd></RowTemplate>
+                        <NoRecordsContent><MudText Class="pa-4">尚无已验证副本。请从备份配置发起手动备份。</MudText></NoRecordsContent>
+                    </MudTable>
+                    <MudLink Href="/backup-files">查看全部备份文件</MudLink>
+                </MudPaper>
+                <MudStack Row="true" Wrap="Wrap.Wrap" data-testid="dashboard-shortcuts">
+                    <MudButton Href="/servers" Variant="Variant.Outlined">服务器与实例</MudButton>
+                    <MudButton Href="/storage-targets" Variant="Variant.Outlined">存储目标</MudButton>
+                    <MudButton Href="/backup-policies" Variant="Variant.Outlined">备份配置</MudButton>
+                    <MudButton Href="/backup-tasks" Variant="Variant.Outlined">任务记录</MudButton>
+                    <MudButton Href="/backup-files" Variant="Variant.Outlined">备份文件</MudButton>
+                    <MudButton Href="/notifications" Variant="Variant.Outlined">通知设置</MudButton>
+                </MudStack>
+                <MudText Typo="Typo.caption">数据生成时间：@Formatters.LocalDateTime(model.GeneratedAtUtc) · 每 30 秒校准</MudText>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudButton Href="/login?returnUrl=/" data-testid="home-login">登录</MudButton></NotAuthorized>
+</AuthorizeView>
+@code {
+    private BackupOverview? _overview;
+    protected override async Task<Action> FetchAsync(AdminSession actor, CancellationToken token)
+    {
+        var model = Require(await Monitoring.OverviewAsync(actor, token));
+        return () => _overview = model;
+    }
+    protected override void ClearData() => _overview = null;
+}

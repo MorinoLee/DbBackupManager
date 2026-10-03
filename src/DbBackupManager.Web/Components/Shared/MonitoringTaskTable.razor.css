@@ -1,0 +1,16 @@
+.monitoring-name {
+    display: block;
+    max-width: min(9rem, 45vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.monitoring-time {
+    white-space: nowrap;
+    font-size: 0.8rem;
+}
+
+::deep .mud-table-cell {
+    padding: 6px 8px;
+}

@@ -1,0 +1,217 @@
+@*
+    数据库清单：展示全部已发现数据库的发现状态与纳管状态。
+    筛选在浏览器内作用于已加载的完整清单，不是服务端分页；纳管操作沿用既有显式用例。
+*@
+@page "/databases"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@implements IDisposable
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Application.Servers
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.SqlCredentials
+@using DbBackupManager.Web.Servers
+@using Microsoft.AspNetCore.Authorization
+@inject IServerManagementService Management
+@inject AuthenticationStateProvider Authentication
+
+<PageTitle>数据库清单 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="数据库清单"
+                        Description="查看发现的数据库并选择纳管。新发现的数据库默认不纳管；纳管后可在“备份配置”中创建手动备份。">
+                <Actions>
+                    @if (!_login)
+                    {
+                        <MudButton OnClick="RefreshAsync"
+                                   Disabled="_busy"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Refresh"
+                                   data-testid="refresh-databases">
+                            刷新
+                        </MudButton>
+                        <MudButton Href="/servers"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Dns"
+                                   data-testid="go-servers">
+                            服务器与实例
+                        </MudButton>
+                    }
+                </Actions>
+            </PageHeader>
+            @if (_error is not null) { <MudAlert Severity="Severity.Error" role="alert">@_error</MudAlert> }
+            @if (_message is not null) { <MudAlert Severity="Severity.Success" role="status">@_message</MudAlert> }
+            @if (_login)
+            {
+                <MudButton Href="/login?returnUrl=/databases" Color="Color.Primary">重新登录</MudButton>
+            }
+            else if (_inventory.Servers.Count == 0)
+            {
+                <EmptyState Title="暂无服务器"
+                            Icon="@Icons.Material.Outlined.Dns"
+                            Description="先添加服务器与 SQL 实例，发现数据库后再回到这里纳管。">
+                    <Actions>
+                        <MudButton Href="/servers" Variant="Variant.Filled" Color="Color.Primary" data-testid="empty-go-servers">
+                            添加服务器
+                        </MudButton>
+                    </Actions>
+                </EmptyState>
+            }
+            else
+            {
+                <MudPaper Outlined="true" Class="pa-3" data-testid="database-filters">
+                    <MudStack Row="true" Wrap="Wrap.Wrap" Spacing="2" AlignItems="AlignItems.Center">
+                        <MudSelect T="Guid?" Label="服务器" Value="_serverFilter" ValueChanged="OnServerFilterChanged" Disabled="_busy" data-testid="filter-server" Style="min-width: 12rem;">
+                            <MudSelectItem T="Guid?" Value="null">全部服务器</MudSelectItem>
+                            @foreach (var server in _inventory.Servers)
+                            {
+                                <MudSelectItem T="Guid?" Value="server.Id">@server.Settings.Name</MudSelectItem>
+                            }
+                        </MudSelect>
+                        <MudSelect T="Guid?" Label="实例" @bind-Value="_instanceFilter" Disabled="_busy" data-testid="filter-instance" Style="min-width: 12rem;">
+                            <MudSelectItem T="Guid?" Value="null">全部实例</MudSelectItem>
+                            @foreach (var instance in VisibleInstances)
+                            {
+                                <MudSelectItem T="Guid?" Value="instance.Id">@instance.Settings.Name</MudSelectItem>
+                            }
+                        </MudSelect>
+                        <MudSelect T="string" Label="纳管状态" @bind-Value="_managedFilter" Disabled="_busy" data-testid="filter-managed" Style="min-width: 10rem;">
+                            <MudSelectItem Value="@("all")">全部</MudSelectItem>
+                            <MudSelectItem Value="@("managed")">已纳管</MudSelectItem>
+                            <MudSelectItem Value="@("unmanaged")">未纳管</MudSelectItem>
+                        </MudSelect>
+                    </MudStack>
+                </MudPaper>
+                <MudTable T="DatabaseItem" Items="VisibleDatabases" Loading="_busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1">
+                    <HeaderContent>
+                        <MudTh>数据库</MudTh><MudTh>服务器 · 实例</MudTh><MudTh>状态</MudTh><MudTh>恢复模式</MudTh><MudTh>最近发现</MudTh><MudTh>纳管</MudTh>
+                    </HeaderContent>
+                    <RowTemplate Context="database">
+                        <MudTd DataLabel="数据库">@database.Name @(database.IsSystemDatabase ? "（系统库）" : "")</MudTd>
+                        <MudTd DataLabel="服务器 · 实例">@OwnerLabel(database)</MudTd>
+                        <MudTd DataLabel="状态">@(database.IsAvailable ? database.State ?? "—" : "本次未发现")</MudTd>
+                        <MudTd DataLabel="恢复模式">@(database.RecoveryModel ?? "—")</MudTd>
+                        <MudTd DataLabel="最近发现">@Formatters.LocalDateTime(database.LastDiscoveredAtUtc)</MudTd>
+                        <MudTd DataLabel="纳管">
+                            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                         Color="@(database.IsManaged ? Color.Success : Color.Default)">
+                                    @(database.IsManaged ? "已纳管" : "未纳管")
+                                </MudChip>
+                                <MudButton Size="Size.Small"
+                                           OnClick="@(() => ToggleManagedAsync(database))"
+                                           Disabled="@(_busy || (!database.IsManaged && (!database.IsAvailable || database.IsSystemDatabase)))"
+                                           data-testid="toggle-managed">
+                                    @(database.IsManaged ? "取消纳管" : "纳管")
+                                </MudButton>
+                            </MudStack>
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent>
+                        <MudText Class="pa-4">@(_inventory.Databases.Count == 0 ? "暂无发现记录，请先在“服务器与实例”中执行“发现数据库”。" : "当前筛选条件下没有数据库。")</MudText>
+                    </NoRecordsContent>
+                </MudTable>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private ServerInventory _inventory = new([], [], []);
+    private bool _busy, _login, _disposed;
+    private string? _error, _message;
+    private Guid? _serverFilter;
+    private Guid? _instanceFilter;
+    private string _managedFilter = "all";
+
+    /// <summary>从“服务器与实例”页进入时预选实例筛选。</summary>
+    [SupplyParameterFromQuery(Name = "instance")]
+    public Guid? Instance { get; set; }
+
+    protected override void OnParametersSet()
+    {
+        if (Instance is not null)
+        {
+            _instanceFilter = Instance;
+        }
+    }
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    private IEnumerable<InstanceItem> VisibleInstances => _inventory.Instances
+        .Where(instance => _serverFilter is null || instance.Settings.ServerId == _serverFilter);
+
+    private IEnumerable<DatabaseItem> VisibleDatabases => _inventory.Databases
+        .Where(database => _instanceFilter is null || database.InstanceId == _instanceFilter)
+        .Where(database => _serverFilter is null
+            || _inventory.Instances.Any(instance => instance.Id == database.InstanceId && instance.Settings.ServerId == _serverFilter))
+        .Where(database => _managedFilter switch
+        {
+            "managed" => database.IsManaged,
+            "unmanaged" => !database.IsManaged,
+            _ => true,
+        });
+
+    private string OwnerLabel(DatabaseItem database)
+    {
+        var instance = _inventory.Instances.FirstOrDefault(x => x.Id == database.InstanceId);
+        var server = instance is null ? null : _inventory.Servers.FirstOrDefault(x => x.Id == instance.Settings.ServerId);
+        return $"{server?.Settings.Name ?? "—"} · {instance?.Settings.Name ?? "—"}";
+    }
+
+    private void OnServerFilterChanged(Guid? serverId)
+    {
+        _serverFilter = serverId;
+        if (_instanceFilter is not null
+            && !_inventory.Instances.Any(instance => instance.Id == _instanceFilter
+                && (serverId is null || instance.Settings.ServerId == serverId)))
+        {
+            _instanceFilter = null;
+        }
+    }
+
+    private async Task RunAsync(Func<AdminSession, Task> action)
+    {
+        if (_busy || _disposed) return;
+        _busy = true; _error = null; _message = null;
+        try
+        {
+            var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+            if (actor is null) { Failure(ManagementCode.AuthenticationRequired); return; }
+            await action(actor);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception) { Failure(ManagementCode.Unavailable); }
+        finally { _busy = false; }
+    }
+
+    private Task RefreshAsync() => RunAsync(LoadAsync);
+
+    private async Task LoadAsync(AdminSession actor)
+    {
+        var result = await Management.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code != ManagementCode.Succeeded) { _inventory = new([], [], []); Failure(result.Code); return; }
+        _inventory = result.Value!;
+    }
+
+    private Task ToggleManagedAsync(DatabaseItem item) => RunAsync(async actor =>
+    {
+        var result = await Management.SetManagedAsync(actor, item.Id, item.Version, !item.IsManaged, _lifetime.Token);
+        if (result.Code != ManagementCode.Succeeded) { Failure(result.Code); return; }
+        await LoadAsync(actor);
+        if (_error is null) _message = "纳管设置已保存。";
+    });
+
+    private void Failure(ManagementCode code)
+    {
+        if (_disposed) return;
+        _error = ServerManagementPresentation.Error(code).Message;
+        if (code == ManagementCode.AuthenticationRequired)
+        { _login = true; _inventory = new([], [], []); }
+    }
+
+    public void Dispose() { _disposed = true; _lifetime.Cancel(); _lifetime.Dispose(); }
+}

@@ -1,0 +1,31 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cs,razor}]
+indent_style = space
+indent_size = 4
+
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = false
+dotnet_diagnostic.IDE0055.severity = warning
+
+csharp_style_namespace_declarations = file_scoped:suggestion
+csharp_style_prefer_primary_constructors = true:suggestion
+
+# EF Core 生成的 Migration 以常量数组描述列，按需求重新生成时不再手工改写。
+[src/DbBackupManager.Infrastructure/Persistence/Migrations/*.cs]
+dotnet_diagnostic.CA1861.severity = none
+
+[*.{csproj,props,targets,xml,json,yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.{md,mdc}]
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true

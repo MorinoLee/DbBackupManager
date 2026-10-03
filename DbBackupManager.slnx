@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DbBackupManager.Application/DbBackupManager.Application.csproj" />
+    <Project Path="src/DbBackupManager.Contracts/DbBackupManager.Contracts.csproj" />
+    <Project Path="src/DbBackupManager.Domain/DbBackupManager.Domain.csproj" />
+    <Project Path="src/DbBackupManager.Infrastructure/DbBackupManager.Infrastructure.csproj" />
+    <Project Path="src/DbBackupManager.Web/DbBackupManager.Web.csproj" />
+    <Project Path="src/DbBackupManager.Worker/DbBackupManager.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DbBackupManager.Application.Tests/DbBackupManager.Application.Tests.csproj" />
+    <Project Path="tests/DbBackupManager.ArchitectureTests/DbBackupManager.ArchitectureTests.csproj" />
+    <Project Path="tests/DbBackupManager.Domain.Tests/DbBackupManager.Domain.Tests.csproj" />
+    <Project Path="tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj" />
+    <Project Path="tests/DbBackupManager.Web.Tests/DbBackupManager.Web.Tests.csproj" />
+    <Project Path="tests/DbBackupManager.Worker.Tests/DbBackupManager.Worker.Tests.csproj" />
+  </Folder>
+</Solution>

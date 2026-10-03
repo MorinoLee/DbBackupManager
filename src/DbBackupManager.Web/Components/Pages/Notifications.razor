@@ -1,0 +1,513 @@
+@*
+    全局 SMTP 通知设置。Blazor 直接调用 ISmtpSettingsService，不经同进程 HTTP。
+    密码只写不回显；测试通知只登记 Outbox，本页不连接邮件服务器、不发送真实邮件。
+    保存失败保留用户输入；身份失效则清空受保护字段并给出重新登录入口。
+*@
+@page "/notifications"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@implements IDisposable
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Application.Notifications
+@using DbBackupManager.Application.Servers
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.Notifications
+@using DbBackupManager.Web.SqlCredentials
+@using Microsoft.AspNetCore.Authorization
+@inject ISmtpSettingsService Smtp
+@inject AuthenticationStateProvider Authentication
+
+<PageTitle>通知设置 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="通知设置"
+                        Description="配置全局 SMTP 主机、安全模式、可选凭据和收件人。测试通知只写入待发送队列，由独立 Worker 投递；本页不会直接发信。">
+                <Actions>
+                    @if (!_requiresLogin)
+                    {
+                        <MudButton OnClick="RefreshAsync"
+                                   Disabled="_busy"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Refresh"
+                                   data-testid="refresh-smtp">
+                            刷新
+                        </MudButton>
+                    }
+                </Actions>
+            </PageHeader>
+            @if (_error is not null)
+            {
+                <MudAlert Severity="Severity.Error" role="alert">@_error</MudAlert>
+            }
+            @if (_message is not null)
+            {
+                <MudAlert Severity="Severity.Success" role="status">@_message</MudAlert>
+            }
+            @if (_requiresLogin)
+            {
+                <MudButton Href="/login?returnUrl=/notifications" Variant="Variant.Filled" Color="Color.Primary">重新登录</MudButton>
+            }
+            else if (!_loaded && _busy)
+            {
+                <LoadingState Message="正在加载通知设置…" />
+            }
+            else
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    默认使用 STARTTLS 或连接时 TLS。明文须由管理员按 ADR-0007 显式选择，TLS 失败不会自动降级。密码保存后不会显示；无认证服务器可以不保存凭据。
+                </MudAlert>
+                @if (Model.SecurityMode == 3)
+                {
+                    <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" role="alert" Class="mt-3">
+                        当前为明文 SMTP。认证与邮件内容将以明文传输，不满足默认安全基线。
+                    </MudAlert>
+                }
+                @if (!_configured)
+                {
+                    <EmptyState Title="尚未保存 SMTP 设置"
+                                Icon="@Icons.Material.Outlined.Notifications"
+                                Description="先填写主机、端口、安全模式和发件人并保存，再添加收件人。启用后才可以登记测试通知。">
+                    </EmptyState>
+                }
+                <EditForm Model="Model" OnValidSubmit="SaveSettingsAsync">
+                    <DataAnnotationsValidator />
+                    <MudPaper Class="pa-4" Elevation="1" data-testid="smtp-settings-form">
+                        <MudText Typo="Typo.h6" HtmlTag="h2">SMTP 服务器</MudText>
+                        <MudGrid Spacing="3" Class="mt-1">
+                            <MudItem xs="12" md="6">
+                                <MudTextField T="string" Label="主机" @bind-Value="Model.Host" For="@(() => Model.Host)"
+                                              InputId="smtp-host" Disabled="_busy" MaxLength="255" />
+                            </MudItem>
+                            <MudItem xs="12" md="3">
+                                <MudNumericField T="int" Label="端口" @bind-Value="Model.Port" For="@(() => Model.Port)"
+                                                 Min="1" Max="65535" Disabled="_busy" data-testid="smtp-port" />
+                            </MudItem>
+                            <MudItem xs="12" md="3">
+                                <MudSelect T="int" Label="安全模式" @bind-Value="Model.SecurityMode" Disabled="_busy"
+                                           data-testid="smtp-security">
+                                    <MudSelectItem Value="1">STARTTLS</MudSelectItem>
+                                    <MudSelectItem Value="2">连接时 TLS</MudSelectItem>
+                                    <MudSelectItem Value="3">明文（无 TLS）</MudSelectItem>
+                                </MudSelect>
+                            </MudItem>
+                            <MudItem xs="12" md="6">
+                                <MudTextField T="string" Label="发件人" @bind-Value="Model.FromAddress" For="@(() => Model.FromAddress)"
+                                              InputId="smtp-from" Disabled="_busy" MaxLength="320" />
+                            </MudItem>
+                            <MudItem xs="12" md="3">
+                                <MudNumericField T="int" Label="超时（秒）" @bind-Value="Model.TimeoutSeconds" For="@(() => Model.TimeoutSeconds)"
+                                                 Min="1" Max="300" Disabled="_busy" data-testid="smtp-timeout" />
+                            </MudItem>
+                            <MudItem xs="12" md="3" Class="d-flex align-center">
+                                <MudCheckBox T="bool" @bind-Value="Model.IsEnabled" Disabled="_busy"
+                                             Label="启用 SMTP 通知" data-testid="smtp-enabled" />
+                            </MudItem>
+                        </MudGrid>
+                        <MudStack Row="true" Wrap="Wrap.Wrap" Spacing="2" Class="mt-3">
+                            <MudButton ButtonType="ButtonType.Submit"
+                                       Variant="Variant.Filled"
+                                       Color="Color.Primary"
+                                       Disabled="_busy"
+                                       data-testid="save-smtp">
+                                @(_busy ? "保存中…" : "保存设置")
+                            </MudButton>
+                            @if (_configured)
+                            {
+                                <MudButton OnClick="ToggleEnabledAsync"
+                                           Variant="Variant.Outlined"
+                                           Disabled="_busy"
+                                           data-testid="toggle-smtp">
+                                    @(Model.IsEnabled ? "停用" : "启用")
+                                </MudButton>
+                            }
+                        </MudStack>
+                    </MudPaper>
+                </EditForm>
+                <MudPaper Class="pa-4" Elevation="1" data-testid="smtp-credential-section">
+                    <MudStack Row="true" Wrap="Wrap.Wrap" AlignItems="AlignItems.Center" Spacing="2">
+                        <MudText Typo="Typo.h6" HtmlTag="h2">SMTP 凭据</MudText>
+                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                 Color="@(_hasCredential ? Color.Success : Color.Default)"
+                                 data-testid="credential-status">
+                            @(_hasCredential ? "已设置凭据" : "未设置凭据")
+                        </MudChip>
+                    </MudStack>
+                    <MudText Typo="Typo.caption" Class="mud-text-secondary">
+                        列表只显示是否已保存密码，不回显用户名、密码或密文。无认证服务器可保持未设置。
+                    </MudText>
+                    <MudGrid Spacing="3" Class="mt-1">
+                        <MudItem xs="12" md="6">
+                            <MudTextField T="string" Label="SMTP 用户名" @bind-Value="_username"
+                                          InputId="smtp-username" Disabled="@(_busy || !_configured)" MaxLength="256"
+                                          autocomplete="off" />
+                        </MudItem>
+                        <MudItem xs="12" md="6">
+                            <MudTextField T="string" Label="SMTP 密码" @bind-Value="_password"
+                                          InputType="InputType.Password" InputId="smtp-password"
+                                          Disabled="@(_busy || !_configured)" MaxLength="1024"
+                                          autocomplete="new-password" />
+                        </MudItem>
+                    </MudGrid>
+                    <MudStack Row="true" Wrap="Wrap.Wrap" Spacing="2" Class="mt-3">
+                        <MudButton OnClick="RotatePasswordAsync"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   Disabled="@(_busy || !_configured)"
+                                   data-testid="save-smtp-password">
+                            保存密码
+                        </MudButton>
+                        <MudButton OnClick="ClearPasswordAsync"
+                                   Variant="Variant.Outlined"
+                                   Disabled="@(_busy || !_configured || !_hasCredential)"
+                                   data-testid="clear-smtp-password">
+                            清除密码
+                        </MudButton>
+                    </MudStack>
+                </MudPaper>
+                <MudPaper Class="pa-4" Elevation="1" data-testid="smtp-recipient-section">
+                    <MudText Typo="Typo.h6" HtmlTag="h2">收件人</MudText>
+                    <MudStack Row="true" Wrap="Wrap.Wrap" AlignItems="AlignItems.Start" Spacing="2" Class="mt-2">
+                        <MudTextField T="string" Label="收件人地址" @bind-Value="_recipientAddress"
+                                      InputId="smtp-recipient" Disabled="@(_busy || !_configured)" MaxLength="320"
+                                      Class="flex-grow-1" />
+                        <MudButton OnClick="AddRecipientAsync"
+                                   Variant="Variant.Filled"
+                                   Disabled="@(_busy || !_configured)"
+                                   data-testid="add-recipient">
+                            添加收件人
+                        </MudButton>
+                    </MudStack>
+                    <MudTable T="SmtpRecipientItem" Items="_recipients" Breakpoint="Breakpoint.Sm" Hover="true"
+                              Elevation="0" Class="mt-3" data-testid="recipient-list">
+                        <HeaderContent>
+                            <MudTh>地址</MudTh><MudTh>操作</MudTh>
+                        </HeaderContent>
+                        <RowTemplate Context="recipient">
+                            <MudTd DataLabel="地址">@recipient.Address</MudTd>
+                            <MudTd DataLabel="操作">
+                                <MudButton Size="Size.Small"
+                                           Disabled="@(_busy || !_configured)"
+                                           OnClick="@(() => RemoveRecipientAsync(recipient))"
+                                           data-testid="remove-recipient">
+                                    移除
+                                </MudButton>
+                            </MudTd>
+                        </RowTemplate>
+                        <NoRecordsContent>
+                            <MudText Class="pa-4">暂无收件人。保存 SMTP 设置后添加至少一个收件人，才能登记测试通知。</MudText>
+                        </NoRecordsContent>
+                    </MudTable>
+                </MudPaper>
+                <MudPaper Class="pa-4" Elevation="1" data-testid="smtp-test-section">
+                    <MudText Typo="Typo.h6" HtmlTag="h2">测试通知</MudText>
+                    <MudText Typo="Typo.body2" Class="mud-text-secondary">
+                        测试使用本页生成的请求标识登记 Outbox；相同标识再次提交不会重复入队。登记成功不表示邮件已送达。
+                    </MudText>
+                    @if (_lastRequestId is { } requestId)
+                    {
+                        <MudText Typo="Typo.caption" data-testid="last-request-id">最近请求：@requestId</MudText>
+                    }
+                    <MudStack Row="true" Wrap="Wrap.Wrap" Spacing="2" Class="mt-3">
+                        <MudButton OnClick="SendTestAsync"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   Disabled="@(_busy || !CanTest)"
+                                   data-testid="send-test">
+                            发送测试通知
+                        </MudButton>
+                        <MudButton OnClick="ReplayTestAsync"
+                                   Variant="Variant.Outlined"
+                                   Disabled="@(_busy || !CanTest || _lastRequestId is null)"
+                                   data-testid="replay-test">
+                            重放同一请求
+                        </MudButton>
+                    </MudStack>
+                </MudPaper>
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly SmtpSettingsFormModel Model = new();
+    private IReadOnlyList<SmtpRecipientItem> _recipients = [];
+    private string _version = string.Empty;
+    private string _username = string.Empty;
+    private string _password = string.Empty;
+    private string _recipientAddress = string.Empty;
+    private Guid? _lastRequestId;
+    private bool _busy;
+    private bool _loaded;
+    private bool _configured;
+    private bool _hasCredential;
+    private bool _requiresLogin;
+    private bool _disposed;
+    private string? _error;
+    private string? _message;
+
+    private bool CanTest => _configured && Model.IsEnabled && _recipients.Count > 0;
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    private async Task RunAsync(Func<AdminSession, Task> action)
+    {
+        if (_busy || _disposed)
+        {
+            return;
+        }
+
+        _busy = true;
+        _error = null;
+        _message = null;
+        try
+        {
+            var state = await Authentication.GetAuthenticationStateAsync();
+            var actor = SqlCredentialPresentation.GetActor(state.User);
+            if (actor is null)
+            {
+                ShowFailure(ManagementCode.AuthenticationRequired);
+                return;
+            }
+
+            await action(actor);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception)
+        {
+            ShowFailure(ManagementCode.Unavailable);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private Task RefreshAsync() => RunAsync(async actor =>
+    {
+        var result = await Smtp.GetAsync(actor, _lifetime.Token);
+        if (_disposed)
+        {
+            return;
+        }
+
+        _loaded = true;
+        if (result.Code == ManagementCode.Succeeded)
+        {
+            Apply(result.Value!);
+            return;
+        }
+
+        ClearProtected();
+        ShowFailure(result.Code);
+    });
+
+    private Task SaveSettingsAsync() => RunAsync(async actor =>
+    {
+        var result = await Smtp.SaveAsync(
+            actor,
+            _configured ? _version : null,
+            new SmtpSettingsInput(
+                Model.Host,
+                Model.Port,
+                Model.SecurityMode,
+                Model.FromAddress,
+                Model.TimeoutSeconds,
+                Model.IsEnabled),
+            _lifetime.Token);
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (result.Code == ManagementCode.Succeeded)
+        {
+            Apply(result.Value!);
+            _message = "SMTP 设置已保存。";
+            return;
+        }
+
+        ShowFailure(result.Code);
+    });
+
+    private Task ToggleEnabledAsync() => RunAsync(async actor =>
+    {
+        var result = await Smtp.SetEnabledAsync(actor, _version, !Model.IsEnabled, _lifetime.Token);
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (result.Code != ManagementCode.Succeeded)
+        {
+            ShowFailure(result.Code);
+            return;
+        }
+
+        Apply(result.Value!);
+        _message = result.Value!.IsEnabled
+            ? "SMTP 通知已启用。"
+            : "SMTP 通知已停用。失败事实仍会入队，但不会投递。";
+    });
+
+    private Task RotatePasswordAsync() => RunAsync(async actor =>
+    {
+        var username = _username;
+        var password = _password;
+        _password = string.Empty;
+        var result = await Smtp.RotatePasswordAsync(actor, _version, username, password, _lifetime.Token);
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (result.Code == ManagementCode.Succeeded)
+        {
+            Apply(result.Value!);
+            _username = string.Empty;
+            _message = "SMTP 密码已保存。";
+            return;
+        }
+
+        ShowFailure(result.Code);
+    });
+
+    private Task ClearPasswordAsync() => RunAsync(async actor =>
+    {
+        _password = string.Empty;
+        _username = string.Empty;
+        var result = await Smtp.ClearPasswordAsync(actor, _version, _lifetime.Token);
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (result.Code != ManagementCode.Succeeded)
+        {
+            ShowFailure(result.Code);
+            return;
+        }
+
+        Apply(result.Value!);
+        _message = "SMTP 密码已清除。";
+    });
+
+    private Task AddRecipientAsync() => RunAsync(async actor =>
+    {
+        var address = _recipientAddress;
+        var result = await Smtp.AddRecipientAsync(actor, _version, address, _lifetime.Token);
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (result.Code == ManagementCode.Succeeded)
+        {
+            Apply(result.Value!);
+            _recipientAddress = string.Empty;
+            _message = "收件人已添加。";
+            return;
+        }
+
+        ShowFailure(result.Code);
+    });
+
+    private Task RemoveRecipientAsync(SmtpRecipientItem recipient) => RunAsync(async actor =>
+    {
+        var result = await Smtp.RemoveRecipientAsync(actor, _version, recipient.Id, _lifetime.Token);
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (result.Code != ManagementCode.Succeeded)
+        {
+            ShowFailure(result.Code);
+            return;
+        }
+
+        Apply(result.Value!);
+        _message = "收件人已移除。";
+    });
+
+    private Task SendTestAsync() => QueueTestAsync(Guid.NewGuid());
+
+    private Task ReplayTestAsync() =>
+        _lastRequestId is { } requestId ? QueueTestAsync(requestId) : Task.CompletedTask;
+
+    private Task QueueTestAsync(Guid requestId) => RunAsync(async actor =>
+    {
+        _lastRequestId = requestId;
+        var result = await Smtp.QueueTestAsync(actor, _version, requestId, _lifetime.Token);
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (result.Code != ManagementCode.Succeeded)
+        {
+            ShowFailure(result.Code);
+            return;
+        }
+
+        Apply(result.Value!);
+        _message = "测试通知已按当前请求登记；相同请求不会重复入队。";
+    });
+
+    private void Apply(SmtpSettingsItem item)
+    {
+        _version = item.Version;
+        _configured = !string.IsNullOrEmpty(item.Version);
+        _hasCredential = item.HasCredential;
+        _recipients = item.Recipients;
+        Model.Host = item.Host;
+        Model.Port = item.Port;
+        Model.SecurityMode = item.SecurityMode;
+        Model.FromAddress = item.FromAddress;
+        Model.TimeoutSeconds = item.TimeoutSeconds;
+        Model.IsEnabled = item.IsEnabled;
+    }
+
+    private void ClearProtected()
+    {
+        Model.Host = string.Empty;
+        Model.Port = 587;
+        Model.SecurityMode = 1;
+        Model.FromAddress = string.Empty;
+        Model.TimeoutSeconds = 30;
+        Model.IsEnabled = false;
+        _version = string.Empty;
+        _configured = false;
+        _hasCredential = false;
+        _recipients = [];
+        _username = string.Empty;
+        _password = string.Empty;
+        _recipientAddress = string.Empty;
+        _lastRequestId = null;
+    }
+
+    private void ShowFailure(ManagementCode code)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _error = SmtpSettingsPresentation.Error(code).Message;
+        if (code == ManagementCode.AuthenticationRequired)
+        {
+            _requiresLogin = true;
+            ClearProtected();
+        }
+    }
+
+    public void Dispose()
+    {
+        _disposed = true;
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

@@ -1,0 +1,342 @@
+@page "/servers"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@implements IDisposable
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Application.Servers
+@using DbBackupManager.Application.SqlCredentials
+@using DbBackupManager.Application.FileCredentials
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.SqlCredentials
+@using DbBackupManager.Web.Servers
+@using Microsoft.AspNetCore.Authorization
+@inject IServerManagementService Management
+@inject ISqlCredentialService SqlCredentialsService
+@inject IFileCredentialService FileCredentialsService
+@inject AuthenticationStateProvider Authentication
+@inject IDialogService Dialogs
+
+<PageTitle>服务器与实例 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized Context="authState">
+        <MudStack Spacing="3">
+            <PageHeader Title="服务器与实例"
+                        Description="按服务器组织 SQL 实例；先添加服务器及暂存访问映射，再配置实例并发现数据库。">
+                <Actions>
+                    @if (!_login)
+                    {
+                        <MudButton OnClick="RefreshAsync"
+                                   Disabled="_busy"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Refresh"
+                                   data-testid="refresh-servers">
+                            刷新
+                        </MudButton>
+                        <MudButton OnClick="@(() => OpenServerEditorAsync(null))"
+                                   Disabled="_busy"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Outlined.Add"
+                                   data-testid="new-server">
+                            添加服务器
+                        </MudButton>
+                    }
+                </Actions>
+            </PageHeader>
+            @if (_error is not null) { <MudAlert Severity="Severity.Error" role="alert">@_error</MudAlert> }
+            @if (_message is not null) { <MudAlert Severity="Severity.Success" role="status">@_message</MudAlert> }
+            @if (_login)
+            {
+                <MudButton Href="/login?returnUrl=/servers" Color="Color.Primary">重新登录</MudButton>
+            }
+            else if (_inventory.Servers.Count == 0)
+            {
+                <EmptyState Title="暂无服务器"
+                            Icon="@Icons.Material.Outlined.Dns"
+                            Description="先添加服务器并配置暂存访问，再添加 SQL 实例并发现数据库。">
+                    <Actions>
+                        <MudButton OnClick="@(() => OpenServerEditorAsync(null))"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   data-testid="empty-new-server">
+                            添加服务器
+                        </MudButton>
+                    </Actions>
+                </EmptyState>
+            }
+            else
+            {
+                foreach (var server in _inventory.Servers)
+                {
+                    var instances = _inventory.Instances.Where(x => x.Settings.ServerId == server.Id).ToArray();
+                    <MudPaper Outlined="true" Class="pa-4" data-testid="server-card">
+                        <MudStack Spacing="2">
+                            <div class="server-card__header">
+                                <div class="server-card__title">
+                                    <MudText Typo="Typo.h6" HtmlTag="h2">@server.Settings.Name</MudText>
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                             Color="@(server.Settings.IsEnabled ? Color.Success : Color.Default)">
+                                        @(server.Settings.IsEnabled ? "已启用" : "已停用")
+                                    </MudChip>
+                                </div>
+                                <div class="server-card__actions">
+                                    <MudButton Size="Size.Small"
+                                               OnClick="@(() => OpenServerEditorAsync(server))"
+                                               Disabled="_busy"
+                                               data-testid="edit-server">
+                                        编辑
+                                    </MudButton>
+                                    <MudButton Size="Size.Small"
+                                               OnClick="@(() => OpenInstanceEditorAsync(null, server.Id))"
+                                               Disabled="@(_busy || !server.Settings.IsEnabled)"
+                                               data-testid="new-instance">
+                                        添加实例
+                                    </MudButton>
+                                </div>
+                            </div>
+                            <MudText Typo="Typo.body2" Class="mud-text-secondary">
+                                SQL 本地目录 @server.Settings.LocalBackupRootPath ·
+                                @(server.Settings.Protocol == 1 ? "SMB" : "SFTP") 暂存访问 @server.Settings.Host @server.Settings.BasePath
+                            </MudText>
+                            @if (!string.IsNullOrWhiteSpace(server.Settings.Description))
+                            {
+                                <MudText Typo="Typo.body2">@server.Settings.Description</MudText>
+                            }
+                            <MudTable T="InstanceItem" Items="instances" Loading="@IsServerBusy(server.Id)" Breakpoint="Breakpoint.Sm" Hover="true" Dense="true" Elevation="0">
+                                <HeaderContent><MudTh>实例</MudTh><MudTh>连接地址</MudTh><MudTh>状态</MudTh><MudTh>操作</MudTh></HeaderContent>
+                                <RowTemplate Context="instance">
+                                    <MudTd DataLabel="实例">@instance.Settings.Name</MudTd>
+                                    <MudTd DataLabel="连接地址">
+                                        @instance.Settings.ConnectionAddress
+                                        @if (instance.Settings.AllowLegacyTls)
+                                        {
+                                            <MudAlert Severity="Severity.Warning" Dense="true">旧版本兼容例外：允许 SQL 2008 R2 RTM / TLS 1.0</MudAlert>
+                                        }
+                                        @if (instance.Settings.TrustServerCertificate)
+                                        {
+                                            <MudAlert Severity="Severity.Warning" Dense="true">已启用证书信任例外</MudAlert>
+                                        }
+                                    </MudTd>
+                                    <MudTd DataLabel="状态">
+                                        @(instance.Settings.IsEnabled ? ConnectionLabel(instance) : "已停用")
+                                        <MudText Typo="Typo.caption">@instance.ProductVersion @instance.Edition @instance.ErrorCode</MudText>
+                                    </MudTd>
+                                    <MudTd DataLabel="操作">
+                                        <MudButton Size="Size.Small" OnClick="@(() => OpenInstanceEditorAsync(instance, server.Id))" Disabled="_busy" data-testid="edit-instance">编辑</MudButton>
+                                        <MudButton Size="Size.Small" OnClick="@(() => ProbeAsync(instance, false))" Disabled="@(_busy || !CanProbe(instance))" data-testid="probe-instance">测试连接</MudButton>
+                                        <MudButton Size="Size.Small" OnClick="@(() => ProbeAsync(instance, true))" Disabled="@(_busy || !CanProbe(instance))" data-testid="discover-instance">发现数据库</MudButton>
+                                        <MudButton Size="Size.Small"
+                                                   Href="@($"/databases?instance={instance.Id}")"
+                                                   Disabled="_busy"
+                                                   data-testid="view-databases">
+                                            查看数据库
+                                        </MudButton>
+                                    </MudTd>
+                                </RowTemplate>
+                                <NoRecordsContent><MudText Class="pa-4">暂无实例，点击“添加实例”配置 SQL 连接。</MudText></NoRecordsContent>
+                            </MudTable>
+                        </MudStack>
+                    </MudPaper>
+                }
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private static readonly DialogOptions EditorOptions = new() { MaxWidth = MaxWidth.Medium, FullWidth = true };
+
+    private readonly CancellationTokenSource _lifetime = new();
+    private ServerInventory _inventory = new([], [], []);
+    private IReadOnlyList<SqlCredentialItem> _sqlCredentials = [];
+    private IReadOnlyList<FileCredentialItem> _fileCredentials = [];
+    private bool _busy, _login, _disposed;
+    private Guid? _probingInstanceId;
+    private string? _error, _message;
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    /// <summary>
+    /// 卡片级加载状态：只有被探测实例所属的服务器显示加载。没有定向探测时（刷新、保存等整页操作）
+    /// 才整页显示。若直接绑定整页 <c>_busy</c>，一处探测会让所有服务器卡片的表格同时亮起加载条。
+    /// </summary>
+    private bool IsServerBusy(Guid serverId) =>
+        _probingInstanceId is { } instanceId
+            ? _inventory.Instances.Any(item => item.Id == instanceId && item.Settings.ServerId == serverId)
+            : _busy;
+
+    private bool CanProbe(InstanceItem instance) => instance.Settings.IsEnabled
+        && _inventory.Servers.Any(s => s.Id == instance.Settings.ServerId && s.Settings.IsEnabled)
+        && _sqlCredentials.Any(c => c.Id == instance.Settings.SqlCredentialId && c.IsEnabled);
+
+    private static string ConnectionLabel(InstanceItem instance) => instance.ConnectionStatus switch
+    { "Connected" => "已连接", "Failed" => "连接失败", _ => "待测试" };
+
+    private async Task RunAsync(Func<AdminSession, Task> action)
+    {
+        if (_busy || _disposed) return;
+        _busy = true; _error = null; _message = null;
+        try
+        {
+            var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+            if (actor is null) { Failure(ManagementCode.AuthenticationRequired); return; }
+            await action(actor);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception) { Failure(ManagementCode.Unavailable); }
+        finally { _busy = false; }
+    }
+
+    private Task RefreshAsync() => RunAsync(LoadAsync);
+
+    private async Task LoadAsync(AdminSession actor)
+    {
+        var result = await Management.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code != ManagementCode.Succeeded) { _inventory = new([], [], []); Failure(result.Code); return; }
+        var sql = await SqlCredentialsService.ListAsync(actor, _lifetime.Token);
+        var files = await FileCredentialsService.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (sql.Code == SqlCredentialResultCode.AuthenticationRequired || files.Code == FileCredentialResultCode.AuthenticationRequired)
+        { Failure(ManagementCode.AuthenticationRequired); return; }
+        _inventory = result.Value!;
+        _sqlCredentials = sql.Value ?? [];
+        _fileCredentials = files.Value ?? [];
+        if (sql.Code != SqlCredentialResultCode.Succeeded || files.Code != FileCredentialResultCode.Succeeded) Failure(ManagementCode.Unavailable);
+    }
+
+    private async Task OpenServerEditorAsync(ServerItem? item)
+    {
+        if (_busy || _disposed) return;
+        var settings = item?.Settings;
+        var model = settings is null ? new ServerFormModel() : new ServerFormModel
+        {
+            Name = settings.Name, LocalPath = settings.LocalBackupRootPath, Protocol = settings.Protocol,
+            Host = settings.Host, Port = settings.Port ?? 22, BasePath = settings.BasePath,
+            CredentialId = settings.CredentialId, Fingerprint = settings.Fingerprint ?? "",
+            Description = settings.Description ?? "", Enabled = settings.IsEnabled
+        };
+        var parameters = new DialogParameters<ServerEditDialog>
+        {
+            { dialog => dialog.Title, item is null ? "添加服务器" : "编辑服务器" },
+            { dialog => dialog.Model, model },
+            { dialog => dialog.FileCredentials, _fileCredentials },
+            { dialog => dialog.OnSave, (ServerFormModel input) => SaveServerAsync(item?.Id, item?.Version, input) },
+        };
+        var dialog = await Dialogs.ShowAsync<ServerEditDialog>(item is null ? "添加服务器" : "编辑服务器", parameters, EditorOptions);
+        await dialog.Result;
+    }
+
+    private async Task OpenInstanceEditorAsync(InstanceItem? item, Guid serverId)
+    {
+        if (_busy || _disposed) return;
+        var settings = item?.Settings;
+        var model = settings is null ? new InstanceFormModel { ServerId = serverId } : new InstanceFormModel
+        {
+            ServerId = settings.ServerId, Name = settings.Name, Address = settings.ConnectionAddress,
+            CredentialId = settings.SqlCredentialId, Trust = settings.TrustServerCertificate,
+            Reason = settings.CertificateTrustReason ?? "", Timeout = settings.ConnectionTimeoutSeconds,
+            AllowLegacyTls = settings.AllowLegacyTls, LegacyTlsReason = settings.LegacyTlsReason ?? "",
+            Enabled = settings.IsEnabled
+        };
+        var parameters = new DialogParameters<InstanceEditDialog>
+        {
+            { dialog => dialog.Title, item is null ? "添加实例" : "编辑实例" },
+            { dialog => dialog.Model, model },
+            { dialog => dialog.SqlCredentials, _sqlCredentials },
+            { dialog => dialog.OnSave, (InstanceFormModel input) => SaveInstanceAsync(item?.Id, item?.Version, input) },
+        };
+        var dialog = await Dialogs.ShowAsync<InstanceEditDialog>(item is null ? "添加实例" : "编辑实例", parameters, EditorOptions);
+        await dialog.Result;
+    }
+
+    /// <summary>弹窗保存委托：返回 null 表示成功，否则返回中文错误并保持弹窗与输入。</summary>
+    private async Task<string?> SaveServerAsync(Guid? id, string? version, ServerFormModel input)
+    {
+        _error = null;
+        _message = null;
+        var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+        if (actor is null)
+        {
+            Failure(ManagementCode.AuthenticationRequired);
+            return _error;
+        }
+
+        var result = await Management.SaveServerAsync(actor, id, version,
+            new(input.Name, input.LocalPath, input.Protocol, input.Host, input.Protocol == 2 ? input.Port : null,
+                input.BasePath, input.CredentialId, input.Protocol == 2 ? input.Fingerprint : null,
+                input.Description, input.Enabled), _lifetime.Token);
+        if (_disposed) return null;
+        if (result.Code != ManagementCode.Succeeded)
+        {
+            var message = ServerManagementPresentation.Error(result.Code).Message;
+            if (result.Code == ManagementCode.AuthenticationRequired) Failure(result.Code);
+            return message;
+        }
+
+        _message = "服务器已保存。";
+        await LoadAsync(actor);
+        return null;
+    }
+
+    /// <summary>弹窗保存委托：返回 null 表示成功，否则返回中文错误并保持弹窗与输入。</summary>
+    private async Task<string?> SaveInstanceAsync(Guid? id, string? version, InstanceFormModel input)
+    {
+        _error = null;
+        _message = null;
+        var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+        if (actor is null)
+        {
+            Failure(ManagementCode.AuthenticationRequired);
+            return _error;
+        }
+
+        var result = await Management.SaveInstanceAsync(actor, id, version,
+            new(input.ServerId, input.Name, input.Address, input.CredentialId, input.Trust,
+                input.Trust ? input.Reason : null, input.Timeout, input.Enabled,
+                input.AllowLegacyTls, input.AllowLegacyTls ? input.LegacyTlsReason : null), _lifetime.Token);
+        if (_disposed) return null;
+        if (result.Code != ManagementCode.Succeeded)
+        {
+            var message = ServerManagementPresentation.Error(result.Code).Message;
+            if (result.Code == ManagementCode.AuthenticationRequired) Failure(result.Code);
+            return message;
+        }
+
+        _message = "实例已保存，请测试连接并发现数据库。";
+        await LoadAsync(actor);
+        return null;
+    }
+
+    private async Task ProbeAsync(InstanceItem item, bool discover)
+    {
+        // 在进入 RunAsync 之前就设置：RunAsync 首次 await 即触发重绘，
+        // 晚设会先渲染一次「所有服务器都在加载」再收敛。
+        _probingInstanceId = item.Id;
+        try
+        {
+            await RunAsync(async actor =>
+            {
+                var result = await Management.ProbeAsync(actor, item.Id, item.Version, discover, _lifetime.Token);
+                await LoadAsync(actor);
+                if (_login || _disposed) return;
+                if (result.Code != ManagementCode.Succeeded) { Failure(result.Code); return; }
+                _message = discover ? "数据库发现完成，请在“数据库清单”中选择需要纳管的数据库。" : "连接测试通过。";
+            });
+        }
+        finally
+        {
+            _probingInstanceId = null;
+        }
+    }
+
+    private void Failure(ManagementCode code)
+    {
+        if (_disposed) return;
+        _error = ServerManagementPresentation.Error(code).Message;
+        if (code == ManagementCode.AuthenticationRequired)
+        { _login = true; _inventory = new([], [], []); _sqlCredentials = []; _fileCredentials = []; }
+    }
+
+    public void Dispose() { _disposed = true; _lifetime.Cancel(); _lifetime.Dispose(); }
+}

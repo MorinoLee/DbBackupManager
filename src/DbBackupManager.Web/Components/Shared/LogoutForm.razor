@@ -1,0 +1,14 @@
+@using DbBackupManager.Web.Authentication
+
+@* 认证表单保持原有 action、method、字段名与防伪令牌，仅视觉与用户菜单项对齐。 *@
+<form method="post" action="/account/logout" data-testid="logout-form" class="logout-form">
+    <AntiforgeryToken />
+    <MudButton ButtonType="ButtonType.Submit"
+               Variant="Variant.Text"
+               FullWidth="true"
+               StartIcon="@Icons.Material.Outlined.Logout"
+               Class="logout-form__button"
+               data-testid="logout-submit">
+        退出登录
+    </MudButton>
+</form>

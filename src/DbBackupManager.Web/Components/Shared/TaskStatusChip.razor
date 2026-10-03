@@ -1,0 +1,29 @@
+@*
+    备份任务状态的统一呈现：中文标签与颜色同时存在，不只靠颜色区分状态。
+*@
+@using DbBackupManager.Web.BackupTasks
+
+<MudChip T="string"
+         Size="Size.Small"
+         Variant="Variant.Outlined"
+         Color="@ChipColor"
+         data-testid="task-status-chip">
+    @Label
+</MudChip>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Status { get; set; } = string.Empty;
+
+    private string Label => BackupPresentation.State(Status);
+
+    private Color ChipColor => Status switch
+    {
+        "Pending" => Color.Info,
+        "Running" => Color.Primary,
+        "NeedsAttention" => Color.Warning,
+        "Succeeded" => Color.Success,
+        "Failed" => Color.Error,
+        _ => Color.Default,
+    };
+}

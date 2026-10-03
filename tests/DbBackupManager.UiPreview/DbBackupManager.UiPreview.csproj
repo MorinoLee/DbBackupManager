@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup><PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../../src/DbBackupManager.Web/DbBackupManager.Web.csproj" /></ItemGroup>
+</Project>
