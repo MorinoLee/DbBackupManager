@@ -24,7 +24,24 @@ public enum SqlConnectionStatus
 
 public enum BackupType
 {
-    Full = 1
+    Full = 1,
+    Differential = 2,
+    Log = 3
+}
+
+public enum BackupPlanMode
+{
+    Full = 1,
+    FullAndDifferential = 2,
+    FullAndDifferentialAndLog = 3
+}
+
+public enum DatabaseRecoveryModel
+{
+    Full = 1,
+    BulkLogged = 2,
+    Simple = 3,
+    Unknown = 4
 }
 
 public enum BackupScheduleType

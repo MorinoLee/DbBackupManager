@@ -69,6 +69,9 @@ _ReSharper*/
 .localhistory/
 .vshistory/
 
+# 本地设计笔记，不纳入版本库
+docs/统一备份计划设计.md
+
 # 临时文件与系统缓存
 *.tmp
 *.swp
