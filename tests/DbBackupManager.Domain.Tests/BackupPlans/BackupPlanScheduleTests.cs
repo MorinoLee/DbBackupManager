@@ -77,6 +77,78 @@ public sealed class BackupPlanScheduleTests
     }
 
     [Fact]
+    public void SucceededFullCoverageSurvivesALaterFullSlot()
+    {
+        var plan = ChainPlan();
+        var friday = new DateTimeOffset(2026, 10, 2, 2, 0, 0, TimeSpan.Zero);
+        var saturday = new DateTimeOffset(2026, 10, 3, 2, 0, 0, TimeSpan.Zero);
+        var fridayCandidates = new[]
+        {
+            Candidate(BackupType.Full, friday),
+            Candidate(BackupType.Differential, friday),
+        };
+
+        var merged = BackupPlanSchedule.SelectDue(plan, friday.AddHours(1), fridayCandidates, Empty());
+        var afterSuccess = BackupPlanSchedule.SelectDue(
+            plan,
+            friday.AddHours(1),
+            fridayCandidates,
+            Outcome(merged[0].Key, BackupSlotDisposition.Succeeded));
+        var nextDay = BackupPlanSchedule.SelectDue(
+            plan,
+            saturday.AddHours(1),
+            [
+                Candidate(BackupType.Full, friday),
+                Candidate(BackupType.Differential, friday),
+                Candidate(BackupType.Full, saturday),
+            ],
+            Outcome(merged[0].Key, BackupSlotDisposition.Succeeded));
+        var rememberedWithoutOldCandidate = BackupPlanSchedule.SelectDue(
+            plan,
+            saturday.AddHours(1),
+            [
+                Candidate(BackupType.Differential, friday),
+                Candidate(BackupType.Full, saturday),
+            ],
+            Outcome(merged[0].Key, BackupSlotDisposition.Succeeded));
+
+        Assert.Empty(afterSuccess);
+        Assert.Single(nextDay);
+        Assert.Equal(BackupType.Full, nextDay[0].Key.BackupType);
+        Assert.Equal(saturday, nextDay[0].Key.SlotUtc);
+        Assert.Null(nextDay[0].DifferentialCoveredWhenFullSucceeds);
+        Assert.Equal(nextDay, rememberedWithoutOldCandidate);
+    }
+
+    [Fact]
+    public void FailedCoveringFullStillLeavesTheDifferentialDueAfterALaterFull()
+    {
+        var plan = ChainPlan();
+        var friday = new DateTimeOffset(2026, 10, 2, 2, 0, 0, TimeSpan.Zero);
+        var saturday = new DateTimeOffset(2026, 10, 3, 2, 0, 0, TimeSpan.Zero);
+        var merged = BackupPlanSchedule.SelectDue(
+            plan,
+            friday.AddHours(1),
+            [Candidate(BackupType.Full, friday), Candidate(BackupType.Differential, friday)],
+            Empty());
+        var nextDay = BackupPlanSchedule.SelectDue(
+            plan,
+            saturday.AddHours(1),
+            [
+                Candidate(BackupType.Full, friday),
+                Candidate(BackupType.Differential, friday),
+                Candidate(BackupType.Full, saturday),
+            ],
+            Outcome(merged[0].Key, BackupSlotDisposition.Failed));
+
+        Assert.Equal(2, nextDay.Count);
+        Assert.Equal(saturday, nextDay[0].Key.SlotUtc);
+        Assert.Equal(BackupType.Full, nextDay[0].Key.BackupType);
+        Assert.Equal(friday, nextDay[1].Key.SlotUtc);
+        Assert.Equal(BackupType.Differential, nextDay[1].Key.BackupType);
+    }
+
+    [Fact]
     public void PausedPlanSelectsNothing()
     {
         var plan = ChainPlan();

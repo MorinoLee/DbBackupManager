@@ -57,6 +57,7 @@ public static class BackupPlanSchedule
 
         BackupPlanSlotCandidate? latestFull = null;
         BackupPlanSlotCandidate? latestDifferential = null;
+        var dueFulls = new List<BackupPlanSlotCandidate>();
         foreach (var candidate in candidates)
         {
             var version = Version(plan, candidate.PlanVersionId);
@@ -73,6 +74,7 @@ public static class BackupPlanSchedule
             var normalized = candidate with { SlotUtc = slot };
             if (candidate.BackupType == BackupType.Full)
             {
+                dueFulls.Add(normalized);
                 latestFull = Later(latestFull, normalized);
             }
             else
@@ -88,25 +90,24 @@ public static class BackupPlanSchedule
         if (latestFull is { } selectedFull)
         {
             var fullKey = Key(plan, selectedFull);
-            var hasFull = existing.TryGetValue(fullKey, out var fullDisposition);
-            if (!hasFull)
+            if (!existing.ContainsKey(fullKey))
             {
                 work.Add(new BackupPlanDueWork(
                     fullKey,
                     sameInstant ? Key(plan, latestDifferential!.Value) : null));
             }
-            else if (sameInstant
-                && fullDisposition == BackupSlotDisposition.Failed
-                && !existing.ContainsKey(Key(plan, latestDifferential!.Value)))
-            {
-                work.Add(new BackupPlanDueWork(Key(plan, latestDifferential!.Value), null));
-            }
         }
 
-        if (!sameInstant && latestDifferential is { } selectedDifferential)
+        if (latestDifferential is { } selectedDifferential)
         {
             var differentialKey = Key(plan, selectedDifferential);
-            if (!existing.ContainsKey(differentialKey))
+            var mergedIntoNewFull = sameInstant
+                && latestFull is { } mergedFull
+                && !existing.ContainsKey(Key(plan, mergedFull));
+            if (!existing.ContainsKey(differentialKey)
+                && !mergedIntoNewFull
+                && CoveringFullState(plan, selectedDifferential.SlotUtc, dueFulls, existing)
+                    is not (CoveringFull.Covered or CoveringFull.Waiting))
             {
                 work.Add(new BackupPlanDueWork(differentialKey, null));
             }
@@ -133,5 +134,57 @@ public static class BackupPlanSchedule
     private static BackupScheduleSlotKey Key(BackupPlan plan, BackupPlanSlotCandidate candidate)
     {
         return new BackupScheduleSlotKey(plan.Id, candidate.PlanVersionId, candidate.BackupType, candidate.SlotUtc);
+    }
+
+    private static CoveringFull CoveringFullState(
+        BackupPlan plan,
+        DateTimeOffset slotUtc,
+        IReadOnlyList<BackupPlanSlotCandidate> dueFulls,
+        IReadOnlyDictionary<BackupScheduleSlotKey, BackupSlotDisposition> existing)
+    {
+        BackupScheduleSlotKey? key = null;
+        foreach (var full in dueFulls)
+        {
+            if (full.SlotUtc == slotUtc)
+            {
+                key = Key(plan, full);
+                break;
+            }
+        }
+
+        if (key is null)
+        {
+            foreach (var entry in existing)
+            {
+                if (entry.Key.PlanId == plan.Id
+                    && entry.Key.BackupType == BackupType.Full
+                    && entry.Key.SlotUtc == slotUtc)
+                {
+                    key = entry.Key;
+                    break;
+                }
+            }
+        }
+
+        if (key is null || !existing.TryGetValue(key.Value, out var disposition))
+        {
+            return CoveringFull.None;
+        }
+
+        return disposition switch
+        {
+            BackupSlotDisposition.Succeeded => CoveringFull.Covered,
+            BackupSlotDisposition.Pending => CoveringFull.Waiting,
+            BackupSlotDisposition.Failed => CoveringFull.Failed,
+            _ => throw new ArgumentOutOfRangeException(nameof(existing), disposition, "枚举值无效。"),
+        };
+    }
+
+    private enum CoveringFull
+    {
+        None = 0,
+        Waiting = 1,
+        Covered = 2,
+        Failed = 3
     }
 }
