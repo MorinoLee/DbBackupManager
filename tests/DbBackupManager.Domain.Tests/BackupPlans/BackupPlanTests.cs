@@ -14,6 +14,21 @@ public sealed class BackupPlanTests
     private static readonly Guid ThirdVersionId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
 
     [Fact]
+    public void VersionHistoryStaysReadOnlyWhileRevisionsRemainVisible()
+    {
+        var plan = CreatePlan();
+        var history = plan.Versions;
+
+        Assert.IsNotType<List<BackupPlanVersion>>(history);
+        Assert.Throws<InvalidCastException>(() => (List<BackupPlanVersion>)history);
+
+        plan.Revise(SecondVersionId, FullDefinition(recoveryWindowDays: 30), CreatedAt.AddHours(1));
+
+        Assert.Same(history, plan.Versions);
+        Assert.Equal(2, history.Count);
+    }
+
+    [Fact]
     public void CreateBindsOneDatabaseToItsFirstVersion()
     {
         var plan = CreatePlan();

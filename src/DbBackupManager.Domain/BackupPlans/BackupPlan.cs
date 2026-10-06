@@ -96,14 +96,17 @@ public sealed class BackupPlanVersion : ConcurrentEntity
 public sealed class BackupPlan : ConcurrentEntity
 {
     private readonly List<BackupPlanVersion> _versions = [];
+    private readonly IReadOnlyList<BackupPlanVersion> _versionView;
 
     private BackupPlan()
     {
+        _versionView = _versions.AsReadOnly();
     }
 
     private BackupPlan(Guid id, Guid databaseId, string name)
         : base(id)
     {
+        _versionView = _versions.AsReadOnly();
         DatabaseId = ConfigurationValues.RequireId(databaseId, nameof(databaseId));
         Rename(name);
     }
@@ -120,7 +123,7 @@ public sealed class BackupPlan : ConcurrentEntity
 
     public BackupPlanVersion CurrentVersion => _versions.Single(version => version.Id == CurrentVersionId);
 
-    public IReadOnlyList<BackupPlanVersion> Versions => _versions;
+    public IReadOnlyList<BackupPlanVersion> Versions => _versionView;
 
     public static BackupPlan Create(
         Guid id,
