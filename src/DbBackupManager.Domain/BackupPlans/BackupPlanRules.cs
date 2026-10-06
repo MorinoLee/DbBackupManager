@@ -44,6 +44,30 @@ public readonly record struct BackupPlanProtectionOptions
     public bool UseCompression { get; }
 }
 
+public readonly record struct BackupSlotOccupancy
+{
+    public BackupSlotOccupancy(bool databaseBackupOccupied, bool logBackupOccupied)
+    {
+        DatabaseBackupOccupied = databaseBackupOccupied;
+        LogBackupOccupied = logBackupOccupied;
+    }
+
+    public static BackupSlotOccupancy None { get; } = new(databaseBackupOccupied: false, logBackupOccupied: false);
+
+    public static BackupSlotOccupancy Both { get; } = new(databaseBackupOccupied: true, logBackupOccupied: true);
+
+    public bool DatabaseBackupOccupied { get; }
+
+    public bool LogBackupOccupied { get; }
+
+    public static BackupSlotOccupancy ForPurpose(BackupRunPurpose purpose)
+    {
+        return BackupPlanRules.UsesDatabaseBackupSlot(purpose)
+            ? new BackupSlotOccupancy(databaseBackupOccupied: true, logBackupOccupied: false)
+            : new BackupSlotOccupancy(databaseBackupOccupied: false, logBackupOccupied: true);
+    }
+}
+
 public readonly record struct BackupAdmissionRequest
 {
     public BackupAdmissionRequest(
@@ -55,7 +79,7 @@ public readonly record struct BackupAdmissionRequest
         bool hasManagedBaseline,
         bool hasValidLogSequence,
         BackupPlanProtectionOptions protection,
-        BackupRunPurpose? activePurpose,
+        BackupSlotOccupancy slotOccupancy,
         bool allowDatabaseBackupAndLogOverlap)
     {
         BackupPlanRules.RequireDefined(mode, nameof(mode));
@@ -67,11 +91,6 @@ public readonly record struct BackupAdmissionRequest
             throw new ArgumentException("临时完整备份只能由管理员手动发起。", nameof(purpose));
         }
 
-        if (activePurpose is { } active)
-        {
-            BackupPlanRules.RequireDefined(active, nameof(activePurpose));
-        }
-
         Mode = mode;
         Purpose = purpose;
         Trigger = trigger;
@@ -80,7 +99,7 @@ public readonly record struct BackupAdmissionRequest
         HasManagedBaseline = hasManagedBaseline;
         HasValidLogSequence = hasValidLogSequence;
         Protection = protection;
-        ActivePurpose = activePurpose;
+        SlotOccupancy = slotOccupancy;
         AllowDatabaseBackupAndLogOverlap = allowDatabaseBackupAndLogOverlap;
     }
 
@@ -100,7 +119,7 @@ public readonly record struct BackupAdmissionRequest
 
     public BackupPlanProtectionOptions Protection { get; }
 
-    public BackupRunPurpose? ActivePurpose { get; }
+    public BackupSlotOccupancy SlotOccupancy { get; }
 
     public bool AllowDatabaseBackupAndLogOverlap { get; }
 }
@@ -245,7 +264,7 @@ public static class BackupPlanRules
             return BackupAdmissionDecision.Deny(BackupAdmissionStatus.BaselineRequired);
         }
 
-        if (ResourceConflict(request.Purpose, request.ActivePurpose, request.AllowDatabaseBackupAndLogOverlap) is { } conflict)
+        if (ResourceConflict(request.Purpose, request.SlotOccupancy, request.AllowDatabaseBackupAndLogOverlap) is { } conflict)
         {
             return BackupAdmissionDecision.Deny(conflict);
         }
@@ -283,25 +302,28 @@ public static class BackupPlanRules
 
     private static BackupAdmissionStatus? ResourceConflict(
         BackupRunPurpose incoming,
-        BackupRunPurpose? active,
+        BackupSlotOccupancy occupancy,
         bool allowDatabaseBackupAndLogOverlap)
     {
-        if (active is null)
+        if (UsesDatabaseBackupSlot(incoming))
         {
-            return null;
+            if (occupancy.DatabaseBackupOccupied)
+            {
+                return BackupAdmissionStatus.DatabaseBackupBusy;
+            }
+
+            return occupancy.LogBackupOccupied && !allowDatabaseBackupAndLogOverlap
+                ? BackupAdmissionStatus.DatabaseAndLogMustQueue
+                : null;
         }
 
-        var incomingUsesDatabase = UsesDatabaseBackupSlot(incoming);
-        var activeUsesDatabase = UsesDatabaseBackupSlot(active.Value);
-        if (incomingUsesDatabase == activeUsesDatabase)
+        if (occupancy.LogBackupOccupied)
         {
-            return incomingUsesDatabase
-                ? BackupAdmissionStatus.DatabaseBackupBusy
-                : BackupAdmissionStatus.LogBackupBusy;
+            return BackupAdmissionStatus.LogBackupBusy;
         }
 
-        return allowDatabaseBackupAndLogOverlap
-            ? null
-            : BackupAdmissionStatus.DatabaseAndLogMustQueue;
+        return occupancy.DatabaseBackupOccupied && !allowDatabaseBackupAndLogOverlap
+            ? BackupAdmissionStatus.DatabaseAndLogMustQueue
+            : null;
     }
 }

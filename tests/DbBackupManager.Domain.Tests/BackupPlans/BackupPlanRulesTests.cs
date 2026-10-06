@@ -196,12 +196,12 @@ public sealed class BackupPlanRulesTests
             BackupPlanMode.FullAndDifferential,
             BackupRunPurpose.PlanDifferential,
             hasManagedBaseline: true,
-            activePurpose: BackupRunPurpose.PlanFull));
+            slotOccupancy: BackupSlotOccupancy.ForPurpose(BackupRunPurpose.PlanFull)));
         var adHoc = BackupPlanRules.Evaluate(Request(
             BackupPlanMode.Full,
             BackupRunPurpose.AdHocCopyOnlyFull,
             trigger: BackupTaskTriggerType.Manual,
-            activePurpose: BackupRunPurpose.PlanDifferential));
+            slotOccupancy: BackupSlotOccupancy.ForPurpose(BackupRunPurpose.PlanDifferential)));
 
         Assert.Equal(BackupAdmissionStatus.DatabaseBackupBusy, differential.Status);
         Assert.Equal(BackupAdmissionStatus.DatabaseBackupBusy, adHoc.Status);
@@ -214,23 +214,42 @@ public sealed class BackupPlanRulesTests
             BackupPlanMode.FullAndDifferentialAndLog,
             BackupRunPurpose.PlanLog,
             hasManagedBaseline: true,
-            activePurpose: BackupRunPurpose.PlanFull));
+            slotOccupancy: BackupSlotOccupancy.ForPurpose(BackupRunPurpose.PlanFull)));
         var overlapped = BackupPlanRules.Evaluate(Request(
             BackupPlanMode.FullAndDifferentialAndLog,
             BackupRunPurpose.PlanLog,
             hasManagedBaseline: true,
-            activePurpose: BackupRunPurpose.PlanFull,
+            slotOccupancy: BackupSlotOccupancy.ForPurpose(BackupRunPurpose.PlanFull),
             allowDatabaseBackupAndLogOverlap: true));
         var secondLog = BackupPlanRules.Evaluate(Request(
             BackupPlanMode.FullAndDifferentialAndLog,
             BackupRunPurpose.PlanLog,
             hasManagedBaseline: true,
-            activePurpose: BackupRunPurpose.PlanLog,
+            slotOccupancy: BackupSlotOccupancy.ForPurpose(BackupRunPurpose.PlanLog),
             allowDatabaseBackupAndLogOverlap: true));
 
         Assert.Equal(BackupAdmissionStatus.DatabaseAndLogMustQueue, queued.Status);
         Assert.True(overlapped.IsAllowed);
         Assert.Equal(BackupAdmissionStatus.LogBackupBusy, secondLog.Status);
+    }
+
+    [Fact]
+    public void BothOccupiedSlotsRejectIncomingWorkOnEitherSlot()
+    {
+        var log = BackupPlanRules.Evaluate(Request(
+            BackupPlanMode.FullAndDifferentialAndLog,
+            BackupRunPurpose.PlanLog,
+            hasManagedBaseline: true,
+            slotOccupancy: BackupSlotOccupancy.Both,
+            allowDatabaseBackupAndLogOverlap: true));
+        var full = BackupPlanRules.Evaluate(Request(
+            BackupPlanMode.FullAndDifferentialAndLog,
+            BackupRunPurpose.PlanFull,
+            slotOccupancy: BackupSlotOccupancy.Both,
+            allowDatabaseBackupAndLogOverlap: true));
+
+        Assert.Equal(BackupAdmissionStatus.LogBackupBusy, log.Status);
+        Assert.Equal(BackupAdmissionStatus.DatabaseBackupBusy, full.Status);
     }
 
     [Fact]
@@ -257,7 +276,7 @@ public sealed class BackupPlanRulesTests
         bool hasManagedBaseline = false,
         bool hasValidLogSequence = false,
         BackupPlanProtectionOptions? protection = null,
-        BackupRunPurpose? activePurpose = null,
+        BackupSlotOccupancy? slotOccupancy = null,
         bool allowDatabaseBackupAndLogOverlap = false)
     {
         return new BackupAdmissionRequest(
@@ -269,7 +288,7 @@ public sealed class BackupPlanRulesTests
             hasManagedBaseline,
             hasValidLogSequence,
             protection ?? BackupPlanProtectionOptions.Default,
-            activePurpose,
+            slotOccupancy ?? BackupSlotOccupancy.None,
             allowDatabaseBackupAndLogOverlap);
     }
 }
