@@ -1,3 +1,4 @@
+using DbBackupManager.Application.BackupSets;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Identity;
 using Microsoft.EntityFrameworkCore;
@@ -41,6 +42,8 @@ public static class PlatformDatabaseServiceCollectionExtensions
         services.RemoveAll<PlatformDbContext>();
         services.TryAddScoped<IAdminIdentityStore, AdminIdentityStore>();
         services.TryAddScoped<IBackupTaskExecutionStore, BackupTaskExecutionStore>();
+        services.TryAddScoped<IBackupSetRegistrationStore, BackupSetRegistrationStore>();
+        services.TryAddScoped<BackupSetRegistrationService>();
         services.TryAddScoped<IWorkerHeartbeatStore, BackupManagement.WorkerHeartbeatStore>();
 
         return services;

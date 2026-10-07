@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using Microsoft.EntityFrameworkCore;
@@ -60,6 +61,10 @@ internal sealed class BackupFileConfiguration : IEntityTypeConfiguration<BackupF
                 + "AND [MissingDetectedAtUtc] >= [ValidatedAtUtc])");
         });
         builder.ConfigureConcurrency();
+        builder.HasOne<BackupSet>().WithMany()
+            .HasForeignKey(x => new { x.TaskId, x.AttemptId, x.DatabaseId, x.BackupSetId })
+            .HasPrincipalKey(x => new { x.TaskId, x.AttemptId, x.DatabaseId, x.Id })
+            .OnDelete(DeleteBehavior.Restrict);
         builder.Property(x => x.Location).HasConversion<string>().HasMaxLength(10).IsRequired();
         builder.Property(x => x.Protocol).HasConversion<string>().HasMaxLength(10).IsRequired();
         builder.Property(x => x.Path).HasMaxLength(2048).IsRequired();
