@@ -1,5 +1,6 @@
 using System.Data;
 using DbBackupManager.Application.TargetSql;
+using DbBackupManager.Domain.Configuration;
 using Microsoft.Data.SqlClient;
 
 namespace DbBackupManager.Infrastructure.TargetSql;
@@ -63,18 +64,48 @@ internal static class TargetSqlCommandFactory
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        return CreateDatabaseBackup(connection, request.DatabaseName, request.LocalSqlFilePath, BackupType.Full,
+            request.UseCopyOnly, request.UseChecksum, request.UseCompression, request.CommandTimeoutSeconds);
+    }
+
+    public static SqlCommand CreateBackup(SqlConnection connection, TargetSqlBackupRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return CreateDatabaseBackup(connection, request.DatabaseName, request.LocalSqlFilePath, request.BackupType,
+            request.UseCopyOnly, request.UseChecksum, request.UseCompression, request.CommandTimeoutSeconds);
+    }
+
+    internal static SqlCommand CreateDatabaseBackup(
+        SqlConnection connection, string databaseName, string localSqlFilePath, BackupType backupType,
+        bool useCopyOnly, bool useChecksum, bool useCompression, int commandTimeoutSeconds)
+    {
+        if (backupType is not (BackupType.Full or BackupType.Differential))
+        {
+            throw new ArgumentException("当前命令工厂只支持完整和差异数据库备份。", nameof(backupType));
+        }
+
+        if (backupType == BackupType.Differential && useCopyOnly)
+        {
+            throw new ArgumentException("差异备份不能同时使用 COPY_ONLY。", nameof(useCopyOnly));
+        }
+
         var options = new List<string>();
-        if (request.UseCopyOnly)
+        if (backupType == BackupType.Differential)
+        {
+            options.Add("DIFFERENTIAL");
+        }
+
+        if (useCopyOnly)
         {
             options.Add("COPY_ONLY");
         }
 
-        if (request.UseChecksum)
+        if (useChecksum)
         {
             options.Add("CHECKSUM");
         }
 
-        if (request.UseCompression)
+        if (useCompression)
         {
             options.Add("COMPRESSION");
         }
@@ -84,9 +115,9 @@ internal static class TargetSqlCommandFactory
             : $"\nWITH {string.Join(", ", options)}";
         var command = CreateTextCommand(
             connection,
-            $"BACKUP DATABASE {QuoteIdentifier(request.DatabaseName)}\nTO DISK = @backupPath{withClause};",
-            request.CommandTimeoutSeconds);
-        AddBackupPathParameter(command, request.LocalSqlFilePath);
+            $"BACKUP DATABASE {QuoteIdentifier(databaseName)}\nTO DISK = @backupPath{withClause};",
+            commandTimeoutSeconds);
+        AddBackupPathParameter(command, localSqlFilePath);
         return command;
     }
 

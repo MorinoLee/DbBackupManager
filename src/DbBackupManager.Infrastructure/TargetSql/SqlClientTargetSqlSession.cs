@@ -460,22 +460,28 @@ internal sealed class TargetSqlClientException : Exception
         if (exception is SqlException sqlException)
         {
             var errorNumbers = sqlException.Errors.Cast<SqlError>().Select(error => error.Number).ToArray();
-            if (errorNumbers.Contains(-2))
-            {
-                return Indeterminate(TargetSqlFailureCode.TimedOut);
-            }
-
-            if (errorNumbers.Any(NetworkErrorNumbers.Contains))
-            {
-                return Indeterminate(TargetSqlFailureCode.ConnectionInterrupted);
-            }
-
-            return Confirmed(ClassifySqlErrorNumbers(
-                errorNumbers,
-                TargetSqlClientOperation.BackupCommand));
+            return FromBackupErrorNumbers(errorNumbers);
         }
 
         return Confirmed(TargetSqlFailureCode.CommandRejected);
+    }
+
+    internal static TargetSqlClientException FromBackupErrorNumbers(IEnumerable<int> errorNumbers)
+    {
+        var numbers = errorNumbers.ToArray();
+        if (numbers.Contains(-2))
+        {
+            return Indeterminate(TargetSqlFailureCode.TimedOut);
+        }
+
+        if (numbers.Any(NetworkErrorNumbers.Contains))
+        {
+            return Indeterminate(TargetSqlFailureCode.ConnectionInterrupted);
+        }
+
+        return Confirmed(ClassifySqlErrorNumbers(
+            numbers,
+            TargetSqlClientOperation.BackupCommand));
     }
 
     public static TargetSqlClientException InvalidResponse()
@@ -521,6 +527,12 @@ internal sealed class TargetSqlClientException : Exception
         if (numbers.Any(DatabaseUnavailableErrorNumbers.Contains))
         {
             return TargetSqlFailureCode.DatabaseUnavailable;
+        }
+
+        if (operation == TargetSqlClientOperation.BackupCommand
+            && numbers.Contains(3035))
+        {
+            return TargetSqlFailureCode.DifferentialBaseMissing;
         }
 
         if (operation == TargetSqlClientOperation.BackupCommand

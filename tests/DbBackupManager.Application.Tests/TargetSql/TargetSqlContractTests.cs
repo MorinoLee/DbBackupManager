@@ -1,9 +1,34 @@
 using DbBackupManager.Application.TargetSql;
+using DbBackupManager.Domain.BackupPlans;
 
 namespace DbBackupManager.Application.Tests.TargetSql;
 
 public sealed class TargetSqlContractTests
 {
+    [Theory]
+    [InlineData(BackupRunPurpose.PlanFull)]
+    [InlineData(BackupRunPurpose.PlanDifferential)]
+    [InlineData(BackupRunPurpose.AdHocCopyOnlyFull)]
+    public void PlanRequestDerivesReadOnlyOptionsFromDomainPurpose(BackupRunPurpose purpose)
+    {
+        var request = new TargetSqlBackupRequest("SyntheticDatabase", "synthetic.bak", purpose, true, false, 60);
+        Assert.Equal(BackupPlanRules.ToBackupType(purpose), request.BackupType);
+        Assert.Equal(BackupPlanRules.UseCopyOnly(purpose), request.UseCopyOnly);
+        Assert.Null(typeof(TargetSqlBackupRequest).GetProperty(nameof(request.BackupType))!.SetMethod);
+        Assert.Null(typeof(TargetSqlBackupRequest).GetProperty(nameof(request.UseCopyOnly))!.SetMethod);
+    }
+
+    [Fact]
+    public void PlanRequestRejectsLogInvalidPurposeAndUnsafeInputs()
+    {
+        Assert.Throws<ArgumentException>(() => new TargetSqlBackupRequest("Synthetic", "synthetic.bak", BackupRunPurpose.PlanLog, true, false, 60));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TargetSqlBackupRequest("Synthetic", "synthetic.bak", (BackupRunPurpose)999, true, false, 60));
+        Assert.Throws<ArgumentException>(() => new TargetSqlBackupRequest("Synthetic\nDatabase", "synthetic.bak", BackupRunPurpose.PlanFull, true, false, 60));
+        Assert.Throws<ArgumentException>(() => new TargetSqlBackupRequest("Synthetic", "synthetic.tmp", BackupRunPurpose.PlanFull, true, false, 60));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TargetSqlBackupRequest("Synthetic", "synthetic.bak", BackupRunPurpose.PlanFull, true, false, 0));
+        Assert.Equal("ExecuteBackupAsync", Assert.Single(typeof(ITargetSqlPlanBackupExecutor).GetMethods()).Name);
+    }
+
     [Fact]
     public void ReadOnlyProbeAndBackupExecutorHaveSeparateCapabilities()
     {

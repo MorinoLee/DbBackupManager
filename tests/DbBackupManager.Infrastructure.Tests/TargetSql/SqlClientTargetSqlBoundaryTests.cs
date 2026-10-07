@@ -145,6 +145,7 @@ public sealed class SqlClientTargetSqlBoundaryTests
     [InlineData(3201, TargetSqlFailureCode.BackupDestinationUnavailable)]
     [InlineData(3202, TargetSqlFailureCode.BackupDestinationUnavailable)]
     [InlineData(3013, TargetSqlFailureCode.CommandRejected)]
+    [InlineData(3035, TargetSqlFailureCode.DifferentialBaseMissing)]
     public void BackupServerErrorsAreConfirmedByStableNumber(
         int errorNumber,
         TargetSqlFailureCode expected)
@@ -170,6 +171,18 @@ public sealed class SqlClientTargetSqlBoundaryTests
         Assert.Equal(TargetSqlClientFailureCertainty.Indeterminate, cancellation.Certainty);
         Assert.DoesNotContain("protected target detail", timeout.Message, StringComparison.Ordinal);
         Assert.Null(timeout.InnerException);
+    }
+
+    [Fact]
+    public void MissingDifferentialBaseIsConfirmedButTransportAmbiguityStillWins()
+    {
+        var rejected = TargetSqlClientException.FromBackupErrorNumbers([3035, 3013]);
+        Assert.Equal(TargetSqlFailureCode.DifferentialBaseMissing, rejected.FailureCode);
+        Assert.Equal(TargetSqlClientFailureCertainty.Confirmed, rejected.Certainty);
+        Assert.Equal(TargetSqlClientFailureCertainty.Indeterminate,
+            TargetSqlClientException.FromBackupErrorNumbers([3035, -2]).Certainty);
+        Assert.Equal(TargetSqlClientFailureCertainty.Indeterminate,
+            TargetSqlClientException.FromBackupErrorNumbers([3035, 10054]).Certainty);
     }
 
     [Fact]

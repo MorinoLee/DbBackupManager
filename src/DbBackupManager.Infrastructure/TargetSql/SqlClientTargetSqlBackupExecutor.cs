@@ -1,5 +1,6 @@
 using System.Data;
 using DbBackupManager.Application.TargetSql;
+using DbBackupManager.Domain.Configuration;
 using Microsoft.Data.SqlClient;
 
 namespace DbBackupManager.Infrastructure.TargetSql;
@@ -15,6 +16,8 @@ internal interface ITargetSqlBackupClientSessionFactory
 internal interface ITargetSqlBackupClientSession : IAsyncDisposable
 {
     Task<TargetSqlServerInfo> ReadServerInfoAsync(CancellationToken cancellationToken);
+
+    Task<TargetSqlBackupCompletion> ExecuteBackupAsync(TargetSqlBackupRequest request, CancellationToken cancellationToken);
 
     Task<TargetSqlFullBackupCompletion> ExecuteFullBackupAsync(
         TargetSqlFullBackupRequest request,
@@ -117,6 +120,24 @@ internal sealed class SqlClientTargetSqlBackupSession(SqlConnection connection)
         }
     }
 
+    public async Task<TargetSqlBackupCompletion> ExecuteBackupAsync(
+        TargetSqlBackupRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var command = TargetSqlCommandFactory.CreateBackup(_connection, request);
+        try
+        {
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return new(request.BackupType, request.UseCopyOnly, request.UseChecksum, request.UseCompression);
+        }
+        catch (Exception exception) when (exception is OperationCanceledException
+            || TargetSqlClientException.CanClassify(exception))
+        {
+            throw TargetSqlClientException.FromBackupExecution(exception);
+        }
+    }
+
     public ValueTask DisposeAsync()
     {
         return SqlClientTargetSqlConnectionFactory.DisposeQuietlyAsync(_connection);
@@ -126,7 +147,8 @@ internal sealed class SqlClientTargetSqlBackupSession(SqlConnection connection)
 internal sealed class SqlClientTargetSqlBackupExecutor(
     ITargetSqlCredentialResolver credentialResolver,
     ITargetSqlBackupClientSessionFactory sessionFactory,
-    ITargetSqlBackupCommandObserver? commandObserver = null) : ITargetSqlBackupExecutor
+    ITargetSqlBackupCommandObserver? commandObserver = null,
+    DifferentialBackupAllowance? differentialAllowance = null) : ITargetSqlBackupExecutor, ITargetSqlPlanBackupExecutor
 {
     private readonly ITargetSqlCredentialResolver _credentialResolver = credentialResolver
         ?? throw new ArgumentNullException(nameof(credentialResolver));
@@ -135,13 +157,35 @@ internal sealed class SqlClientTargetSqlBackupExecutor(
     private readonly ITargetSqlBackupCommandObserver _commandObserver = commandObserver
         ?? new NoOpTargetSqlBackupCommandObserver();
 
-    public async Task<TargetSqlResult<TargetSqlFullBackupCompletion>> ExecuteFullBackupAsync(
-        TargetSqlConnectionInput connection,
-        TargetSqlFullBackupRequest request,
+    private readonly DifferentialBackupAllowance _differentialAllowance = differentialAllowance ?? DifferentialBackupAllowance.None;
+
+    public Task<TargetSqlResult<TargetSqlFullBackupCompletion>> ExecuteFullBackupAsync(
+        TargetSqlConnectionInput connection, TargetSqlFullBackupRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(request);
+        return ExecuteCoreAsync(connection, request.UseCompression, false,
+            (session, token) => session.ExecuteFullBackupAsync(request, token), cancellationToken);
+    }
+
+    public Task<TargetSqlResult<TargetSqlBackupCompletion>> ExecuteBackupAsync(
+        TargetSqlConnectionInput connection, TargetSqlBackupRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return ExecuteCoreAsync(connection, request.UseCompression, request.BackupType == BackupType.Differential,
+            (session, token) => session.ExecuteBackupAsync(request, token), cancellationToken);
+    }
+
+    private async Task<TargetSqlResult<T>> ExecuteCoreAsync<T>(
+        TargetSqlConnectionInput connection,
+        bool useCompression,
+        bool isDifferential,
+        Func<ITargetSqlBackupClientSession, CancellationToken, Task<T>> execute,
+        CancellationToken cancellationToken)
+        where T : class
+    {
+        ArgumentNullException.ThrowIfNull(connection);
 
         TargetSqlCredentialResolution credentialResolution;
         try
@@ -152,7 +196,7 @@ internal sealed class SqlClientTargetSqlBackupExecutor(
         }
         catch (OperationCanceledException)
         {
-            return ConfirmedFailure(
+            return ConfirmedFailure<T>(
                 TargetSqlFailureCode.Cancelled,
                 TargetSqlFailurePhase.CredentialResolution);
         }
@@ -161,7 +205,7 @@ internal sealed class SqlClientTargetSqlBackupExecutor(
         {
             if (credentialResolution.FailureCode is { } credentialFailure)
             {
-                return ConfirmedFailure(
+                return ConfirmedFailure<T>(
                     credentialFailure,
                     TargetSqlFailurePhase.CredentialResolution);
             }
@@ -176,22 +220,23 @@ internal sealed class SqlClientTargetSqlBackupExecutor(
             }
             catch (OperationCanceledException)
             {
-                return ConfirmedFailure(
+                return ConfirmedFailure<T>(
                     TargetSqlFailureCode.Cancelled,
                     TargetSqlFailurePhase.ConnectionOpen);
             }
             catch (TargetSqlClientException exception)
             {
-                return ConfirmedFailure(
+                return ConfirmedFailure<T>(
                     exception.FailureCode,
                     TargetSqlFailurePhase.ConnectionOpen);
             }
 
             await using (session)
             {
-                var serverFailure = await ValidateServerAsync(
+                var serverFailure = await ValidateServerAsync<T>(
                     session,
-                    request.UseCompression,
+                    useCompression,
+                    isDifferential,
                     connection.AllowLegacyTls,
                     cancellationToken);
                 if (serverFailure is not null)
@@ -201,33 +246,31 @@ internal sealed class SqlClientTargetSqlBackupExecutor(
 
                 if (cancellationToken.IsCancellationRequested)
                 {
-                    return ConfirmedFailure(
+                    return ConfirmedFailure<T>(
                         TargetSqlFailureCode.Cancelled,
                         TargetSqlFailurePhase.BackupExecution);
                 }
 
                 try
                 {
-                    var operation = session.ExecuteFullBackupAsync(
-                        request,
-                        cancellationToken);
+                    var operation = execute(session, cancellationToken);
                     await _commandObserver.OnCommandStartedAsync(cancellationToken);
                     var completion = await operation;
                     return TargetSqlResult.Succeeded(completion);
                 }
                 catch (OperationCanceledException)
                 {
-                    return TargetSqlResult.Indeterminate<TargetSqlFullBackupCompletion>(
+                    return TargetSqlResult.Indeterminate<T>(
                         TargetSqlFailureCode.Cancelled,
                         TargetSqlFailurePhase.BackupExecution);
                 }
                 catch (TargetSqlClientException exception)
                 {
                     return exception.Certainty == TargetSqlClientFailureCertainty.Indeterminate
-                        ? TargetSqlResult.Indeterminate<TargetSqlFullBackupCompletion>(
+                        ? TargetSqlResult.Indeterminate<T>(
                             exception.FailureCode,
                             TargetSqlFailurePhase.BackupExecution)
-                        : ConfirmedFailure(
+                        : ConfirmedFailure<T>(
                             exception.FailureCode,
                             TargetSqlFailurePhase.BackupExecution);
                 }
@@ -235,46 +278,54 @@ internal sealed class SqlClientTargetSqlBackupExecutor(
         }
     }
 
-    private static async Task<TargetSqlResult<TargetSqlFullBackupCompletion>?> ValidateServerAsync(
+    private async Task<TargetSqlResult<T>?> ValidateServerAsync<T>(
         ITargetSqlBackupClientSession session,
         bool useCompression,
+        bool isDifferential,
         bool allowLegacyTls,
         CancellationToken cancellationToken)
+        where T : class
     {
         try
         {
             var serverInfo = await session.ReadServerInfoAsync(cancellationToken);
             if (!TargetSqlServerInfoMapper.IsSupported(serverInfo, allowLegacyTls))
             {
-                return ConfirmedFailure(
+                return ConfirmedFailure<T>(
                     TargetSqlFailureCode.UnsupportedServerVersion,
                     TargetSqlFailurePhase.ServerProbe);
             }
 
+            if (isDifferential && !_differentialAllowance.Allows(serverInfo))
+            {
+                return ConfirmedFailure<T>(TargetSqlFailureCode.BackupTypeNotValidated, TargetSqlFailurePhase.ServerProbe);
+            }
+
             return useCompression && !serverInfo.SupportsBackupCompression
-                ? ConfirmedFailure(
+                ? ConfirmedFailure<T>(
                     TargetSqlFailureCode.CompressionUnsupported,
                     TargetSqlFailurePhase.ServerProbe)
                 : null;
         }
         catch (OperationCanceledException)
         {
-            return ConfirmedFailure(
+            return ConfirmedFailure<T>(
                 TargetSqlFailureCode.Cancelled,
                 TargetSqlFailurePhase.ServerProbe);
         }
         catch (TargetSqlClientException exception)
         {
-            return ConfirmedFailure(
+            return ConfirmedFailure<T>(
                 exception.FailureCode,
                 TargetSqlFailurePhase.ServerProbe);
         }
     }
 
-    private static TargetSqlResult<TargetSqlFullBackupCompletion> ConfirmedFailure(
+    private static TargetSqlResult<T> ConfirmedFailure<T>(
         TargetSqlFailureCode code,
         TargetSqlFailurePhase phase)
+        where T : class
     {
-        return TargetSqlResult.ConfirmedFailure<TargetSqlFullBackupCompletion>(code, phase);
+        return TargetSqlResult.ConfirmedFailure<T>(code, phase);
     }
 }

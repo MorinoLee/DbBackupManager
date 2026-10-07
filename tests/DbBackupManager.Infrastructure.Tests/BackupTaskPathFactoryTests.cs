@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Infrastructure.Persistence;
@@ -6,6 +7,61 @@ namespace DbBackupManager.Infrastructure.Tests;
 
 public sealed class BackupTaskPathFactoryTests
 {
+    [Theory]
+    [InlineData(BackupRunPurpose.PlanFull, "full", "FULL")]
+    [InlineData(BackupRunPurpose.PlanDifferential, "diff", "DIFF")]
+    [InlineData(BackupRunPurpose.AdHocCopyOnlyFull, "full", "COPYONLY")]
+    public void V3DistinguishesPurposeAcrossSqlSmbAndSftp(BackupRunPurpose purpose, string directory, string suffix)
+    {
+        var input = PlanInput(purpose);
+        var paths = BackupTaskPathFactory.Create(input, AttemptId, PreparedAtUtc);
+        var fileName = $"20260922023045_{AttemptId:N}_{suffix}.bak";
+        Assert.EndsWith($"\\{directory}\\{fileName}", paths.LocalSqlFilePath, StringComparison.Ordinal);
+        Assert.EndsWith($"\\{directory}\\{fileName}", paths.WorkerSourceFilePath, StringComparison.Ordinal);
+        Assert.EndsWith($"/{directory}/{fileName}", paths.RemoteFinalFilePath, StringComparison.Ordinal);
+        Assert.Equal($"{paths.RemoteFinalFilePath}.part", paths.RemotePartialFilePath);
+        Assert.NotEqual(paths.LocalSqlFilePath,
+            BackupTaskPathFactory.Create(input, Guid.NewGuid(), PreparedAtUtc).LocalSqlFilePath);
+    }
+
+    [Theory]
+    [InlineData("v2")]
+    [InlineData("v4")]
+    public void V3InputRequiresExplicitRuleVersion(string version)
+    {
+        var input = PlanInput(BackupRunPurpose.PlanFull);
+        Assert.Throws<InvalidOperationException>(() => BackupTaskPathFactory.Create(
+            input with { Source = input.Source with { FileNameRuleVersion = version } }, AttemptId, PreparedAtUtc));
+    }
+
+    [Fact]
+    public void V3RejectsLogAndInvalidAttemptAndNonUtcTime()
+    {
+        Assert.Throws<InvalidOperationException>(() => BackupTaskPathFactory.Create(PlanInput(BackupRunPurpose.PlanLog), AttemptId, PreparedAtUtc));
+        Assert.Throws<ArgumentException>(() => BackupTaskPathFactory.Create(PlanInput(BackupRunPurpose.PlanFull), Guid.Empty, PreparedAtUtc));
+        Assert.Throws<ArgumentException>(() => BackupTaskPathFactory.Create(PlanInput(BackupRunPurpose.PlanFull), AttemptId, PreparedAtUtc.ToOffset(TimeSpan.FromHours(8))));
+    }
+
+    [Fact]
+    public void V3EnforcesLegacySqlAndRemotePartialPathLengthLimits()
+    {
+        var input = PlanInput(BackupRunPurpose.AdHocCopyOnlyFull);
+        Assert.Throws<InvalidOperationException>(() => BackupTaskPathFactory.Create(
+            input with { Source = input.Source with { LocalSqlBackupRootPath = "D:\\" + new string('r', 250) } }, AttemptId, PreparedAtUtc));
+        var baseline = BackupTaskPathFactory.Create(input, AttemptId, PreparedAtUtc);
+        var remoteRootLength = BackupTaskPathFactory.MaximumStoredPathLength - baseline.RemoteFinalFilePath!.Length + "/archive".Length;
+        var remote = input.RemoteTarget!;
+        var endpoint = remote.Endpoint with { BasePath = "/" + new string('r', remoteRootLength - 1) };
+        Assert.Throws<InvalidOperationException>(() => BackupTaskPathFactory.Create(
+            input with { RemoteTarget = remote with { Endpoint = endpoint } }, AttemptId, PreparedAtUtc));
+    }
+
+    private static BackupPlanPathInput PlanInput(BackupRunPurpose purpose) => new(
+        new(ServerId, "Server/One", InstanceId, "MSSQLSERVER", DatabaseId, "DB/Prod"),
+        new(@"D:\SqlBackups", BackupTaskPathFactory.PlanVersion, Endpoint(FileTransferProtocol.Smb, "source-host", "SqlBackups$")),
+        new(Guid.Parse("55555555-5555-5555-5555-555555555555"), Endpoint(FileTransferProtocol.Sftp, "sftp-host", "/archive")),
+        purpose);
+
     private static readonly Guid ServerId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid InstanceId = Guid.Parse("22222222-2222-2222-2222-222222222222");
     private static readonly Guid DatabaseId = Guid.Parse("33333333-3333-3333-3333-333333333333");
