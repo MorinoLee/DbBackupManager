@@ -4,6 +4,8 @@ using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DbBackupManager.Infrastructure.Tests;
@@ -111,17 +113,111 @@ public sealed class BackupPlanSqlServerTests(PlatformDatabaseSqlServerFixture da
         Assert.Contains("只能追加", exception.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task DownIsRejectedAfterAPlanExists()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReviseAppendsVersionAndMovesCurrentPointer(bool saveSynchronously)
     {
         var databaseId = await AddManagedDatabaseAsync();
-        await Store()
-            .AddAsync(CreatePlan(databaseId, BackupPlanMode.Full));
+        var plan = CreatePlan(databaseId, BackupPlanMode.Full);
+        await Store().AddAsync(plan);
+        var originalVersionId = plan.CurrentVersionId;
+        var revisedVersionId = Guid.NewGuid();
 
-        await using var context = database.CreateContext();
-        var exception = await Assert.ThrowsAsync<SqlException>(() =>
-            context.Database.ExecuteSqlRawAsync(BackupPlanMigrationGuard.RejectDownWhenPlansExist));
-        Assert.Contains("已写入备份计划", exception.Message, StringComparison.Ordinal);
+        await using (var context = database.CreateContext())
+        {
+            var stored = await context.BackupPlans.Include(item => item.Versions).SingleAsync(item => item.Id == plan.Id);
+            Assert.True(stored.Revise(revisedVersionId, Definition(BackupPlanMode.FullAndDifferential), Now.AddHours(1)));
+            if (saveSynchronously)
+            {
+                context.SaveChanges();
+            }
+            else
+            {
+                await context.SaveChangesAsync();
+            }
+        }
+
+        await using var verification = database.CreateContext();
+        var revised = await verification.BackupPlans.Include(item => item.Versions).SingleAsync(item => item.Id == plan.Id);
+        Assert.Equal(revisedVersionId, revised.CurrentVersionId);
+        Assert.Equal(2, revised.Versions.Count);
+        Assert.Equal(1, revised.Versions.Single(item => item.Id == originalVersionId).Number);
+        Assert.Equal(2, revised.CurrentVersion.Number);
+        Assert.Equal(BackupPlanMode.FullAndDifferential, revised.CurrentVersion.Mode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReviseFromStaleContextIsRejectedWithoutAppendingVersion(bool saveSynchronously)
+    {
+        var databaseId = await AddManagedDatabaseAsync();
+        var plan = CreatePlan(databaseId, BackupPlanMode.Full);
+        await Store().AddAsync(plan);
+
+        await using var first = database.CreateContext();
+        await using var stale = database.CreateContext();
+        var firstPlan = await first.BackupPlans.Include(item => item.Versions).SingleAsync(item => item.Id == plan.Id);
+        var stalePlan = await stale.BackupPlans.Include(item => item.Versions).SingleAsync(item => item.Id == plan.Id);
+        var acceptedVersionId = Guid.NewGuid();
+        var rejectedVersionId = Guid.NewGuid();
+        Assert.True(firstPlan.Revise(acceptedVersionId, Definition(BackupPlanMode.FullAndDifferential), Now.AddHours(1)));
+        await first.SaveChangesAsync();
+
+        Assert.True(stalePlan.Revise(rejectedVersionId, Definition(BackupPlanMode.FullAndDifferentialAndLog), Now.AddHours(2)));
+        if (saveSynchronously)
+        {
+            Assert.Throws<DbUpdateConcurrencyException>(() => stale.SaveChanges());
+        }
+        else
+        {
+            await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => stale.SaveChangesAsync());
+        }
+
+        await using var verification = database.CreateContext();
+        var stored = await verification.BackupPlans.Include(item => item.Versions).SingleAsync(item => item.Id == plan.Id);
+        Assert.Equal(acceptedVersionId, stored.CurrentVersionId);
+        Assert.Equal(2, stored.Versions.Count);
+        Assert.DoesNotContain(stored.Versions, item => item.Id == rejectedVersionId);
+    }
+
+    [Fact]
+    public async Task MigrationDownAndUpWorkOnlyBeforePlansExist()
+    {
+        var temporaryDatabase = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await temporaryDatabase.InitializeAsync();
+            await using var context = temporaryDatabase.CreateContext();
+            var migrator = context.GetService<IMigrator>();
+            var migrations = context.Database.GetMigrations().ToArray();
+            var initialMigration = migrations.First();
+
+            await migrator.MigrateAsync(initialMigration);
+            Assert.Equal(0, await PlanTableCountAsync(context));
+            Assert.Equal(new[] { initialMigration }, (await context.Database.GetAppliedMigrationsAsync()).ToArray());
+
+            await migrator.MigrateAsync();
+            Assert.Equal(2, await PlanTableCountAsync(context));
+            Assert.Equal(migrations, (await context.Database.GetAppliedMigrationsAsync()).ToArray());
+            var databaseId = await AddManagedDatabaseAsync(temporaryDatabase);
+            var plan = CreatePlan(databaseId, BackupPlanMode.Full);
+            await Store(temporaryDatabase).AddAsync(plan);
+
+            var exception = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(initialMigration));
+            Assert.Equal(51000, exception.Number);
+            Assert.Contains("已写入备份计划", exception.Message, StringComparison.Ordinal);
+            Assert.Equal(2, await PlanTableCountAsync(context));
+            Assert.Equal(migrations, (await context.Database.GetAppliedMigrationsAsync()).ToArray());
+            var stored = await context.BackupPlans.Include(item => item.Versions).SingleAsync(item => item.Id == plan.Id);
+            Assert.Equal(plan.CurrentVersionId, stored.CurrentVersionId);
+            Assert.Single(stored.Versions);
+        }
+        finally
+        {
+            await temporaryDatabase.DisposeAsync();
+        }
     }
 
     [Theory]
@@ -134,6 +230,12 @@ public sealed class BackupPlanSqlServerTests(PlatformDatabaseSqlServerFixture da
     [InlineData("CK_BackupPlanVersions_LogInterval", "LogInterval")]
     [InlineData("CK_BackupPlanVersions_UtcOffset", "Utc")]
     [InlineData("CK_BackupPlanVersions_Windows", "Windows")]
+    [InlineData("CK_BackupPlanVersions_Windows", "LocalWindowNull")]
+    [InlineData("CK_BackupPlanVersions_Number", "NumberZero")]
+    [InlineData("CK_BackupPlanVersions_Number", "NumberNegative")]
+    [InlineData("CK_BackupPlanVersions_Schedule", "DifferentialTimeNull")]
+    [InlineData("CK_BackupPlanVersions_Schedule", "DifferentialDaysNull")]
+    [InlineData("CK_BackupPlanVersions_Schedule", "DifferentialTypeNullWithTime")]
     public async Task CheckConstraintRejectsOneIllegalRow(string constraint, string violation)
     {
         var databaseId = await AddManagedDatabaseAsync();
@@ -149,12 +251,15 @@ public sealed class BackupPlanSqlServerTests(PlatformDatabaseSqlServerFixture da
         Assert.Contains(constraint, exception.Message, StringComparison.Ordinal);
     }
 
-    private BackupPlanStore Store()
+    private static Task<int> PlanTableCountAsync(PlatformDbContext context) =>
+        context.Database.SqlQuery<int>($"SELECT COUNT(*) AS [Value] FROM sys.tables WHERE [name] IN ('BackupPlans', 'BackupPlanVersions')").SingleAsync();
+
+    private BackupPlanStore Store(PlatformDatabaseSqlServerFixture? target = null)
     {
-        return new BackupPlanStore(database.CreateServiceProvider().GetRequiredService<IDbContextFactory<PlatformDbContext>>());
+        return new BackupPlanStore((target ?? database).CreateServiceProvider().GetRequiredService<IDbContextFactory<PlatformDbContext>>());
     }
 
-    private async Task<Guid> AddManagedDatabaseAsync()
+    private async Task<Guid> AddManagedDatabaseAsync(PlatformDatabaseSqlServerFixture? target = null)
     {
         var suffix = Guid.NewGuid().ToString("N");
         var staging = new CredentialReference(
@@ -170,7 +275,7 @@ public sealed class BackupPlanSqlServerTests(PlatformDatabaseSqlServerFixture da
             Guid.NewGuid(), server.Id, $"合成实例-{suffix}", $"synthetic-{suffix}", sql.Id, true, false, null, 30);
         var managed = new ManagedDatabase(
             Guid.NewGuid(), instance.Id, $"Synthetic_{suffix}", false, true, Now, "FULL", "ONLINE");
-        await using var context = database.CreateContext();
+        await using var context = (target ?? database).CreateContext();
         context.AddRange(staging, sql, server, instance, managed);
         await context.SaveChangesAsync();
         return managed.Id;
@@ -232,6 +337,15 @@ public sealed class BackupPlanSqlServerTests(PlatformDatabaseSqlServerFixture da
         "LogInterval" => VersionInsert(planId, mode: "FullAndDifferentialAndLog", differentialType: "Daily", logInterval: 0, logAnchor: "2026-10-07T00:00:00+00:00"),
         "Utc" => VersionInsert(planId, effectiveFrom: "2026-10-07T08:00:00+08:00"),
         "Windows" => VersionInsert(planId, remoteWindow: 7),
+        "LocalWindowNull" => VersionInsert(planId).Replace("14, NULL, 1, 0,", "NULL, NULL, 1, 0,", StringComparison.Ordinal),
+        "NumberZero" => VersionInsert(planId, number: 0),
+        "NumberNegative" => VersionInsert(planId, number: -5),
+        "DifferentialTimeNull" => VersionInsert(planId, mode: "FullAndDifferential", differentialType: "Daily")
+            .Replace("N'Daily', '03:00:00', 0,", "N'Daily', NULL, 0,", StringComparison.Ordinal),
+        "DifferentialDaysNull" => VersionInsert(planId, mode: "FullAndDifferential", differentialType: "Daily")
+            .Replace("N'Daily', '03:00:00', 0,", "N'Daily', '03:00:00', NULL,", StringComparison.Ordinal),
+        "DifferentialTypeNullWithTime" => VersionInsert(planId)
+            .Replace("NULL, NULL, NULL,", "NULL, '03:00:00', NULL,", StringComparison.Ordinal),
         _ => throw new ArgumentOutOfRangeException(nameof(violation))
     };
 

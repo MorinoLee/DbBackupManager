@@ -29,6 +29,7 @@ internal sealed class BackupPlanStore(IDbContextFactory<PlatformDbContext> facto
         {
             await using var context = await factory.CreateDbContextAsync(cancellationToken);
             await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
+            // 暂时清空当前版本指针，先插入计划和版本，再在同一事务内补齐循环外键。
             CurrentVersionField.SetValue(plan, null);
             context.BackupPlans.Add(plan);
             await context.SaveChangesAsync(cancellationToken);
@@ -89,6 +90,7 @@ internal sealed class BackupPlanVersionConfiguration : IEntityTypeConfiguration<
     {
         builder.ToTable("BackupPlanVersions", table =>
         {
+            table.HasCheckConstraint("CK_BackupPlanVersions_Number", "[Number] >= 1");
             table.HasCheckConstraint("CK_BackupPlanVersions_TimeZoneId_NotEmpty", "LEN([TimeZoneId]) > 0");
             table.HasCheckConstraint(
                 "CK_BackupPlanVersions_ModeSchedules",
@@ -113,7 +115,8 @@ internal sealed class BackupPlanVersionConfiguration : IEntityTypeConfiguration<
             table.HasCheckConstraint(
                 "CK_BackupPlanVersions_LogInterval",
                 "([LogSchedule_IntervalMinutes] IS NULL AND [LogSchedule_AnchorUtc] IS NULL) OR "
-                + "([LogSchedule_IntervalMinutes] BETWEEN 1 AND 1440 AND [LogSchedule_AnchorUtc] IS NOT NULL)");
+                + "([LogSchedule_IntervalMinutes] IS NOT NULL "
+                + "AND [LogSchedule_IntervalMinutes] BETWEEN 1 AND 1440 AND [LogSchedule_AnchorUtc] IS NOT NULL)");
             table.HasCheckConstraint(
                 "CK_BackupPlanVersions_UtcOffset",
                 "DATEPART(TZOFFSET, [EffectiveFromUtc]) = 0 AND "
@@ -121,14 +124,17 @@ internal sealed class BackupPlanVersionConfiguration : IEntityTypeConfiguration<
             table.HasCheckConstraint(
                 "CK_BackupPlanVersions_Windows",
                 "([StorageMode] = 'LocalOnly' AND [StorageTargetId] IS NULL "
+                + "AND [LocalRecoveryWindowDays] IS NOT NULL "
                 + "AND [LocalRecoveryWindowDays] BETWEEN 1 AND 36500 AND [RemoteRecoveryWindowDays] IS NULL) OR "
                 + "([StorageMode] = 'LocalAndRemote' AND [StorageTargetId] IS NOT NULL "
-                + "AND [LocalRecoveryWindowDays] BETWEEN 1 AND 36500 "
-                + "AND [RemoteRecoveryWindowDays] BETWEEN 1 AND 36500) OR "
+                + "AND [LocalRecoveryWindowDays] IS NOT NULL AND [LocalRecoveryWindowDays] BETWEEN 1 AND 36500 "
+                + "AND [RemoteRecoveryWindowDays] IS NOT NULL AND [RemoteRecoveryWindowDays] BETWEEN 1 AND 36500) OR "
                 + "([StorageMode] = 'RemoteOnly' AND [StorageTargetId] IS NOT NULL "
-                + "AND [LocalRecoveryWindowDays] IS NULL AND [RemoteRecoveryWindowDays] BETWEEN 1 AND 36500)");
+                + "AND [LocalRecoveryWindowDays] IS NULL AND [RemoteRecoveryWindowDays] IS NOT NULL "
+                + "AND [RemoteRecoveryWindowDays] BETWEEN 1 AND 36500)");
         });
         builder.ConfigureConcurrency();
+        builder.Property(x => x.Id).ValueGeneratedNever();
         builder.HasAlternateKey(x => new { x.PlanId, x.Id })
             .HasName("AK_BackupPlanVersions_PlanId_Id");
         builder.Property(x => x.Number).IsRequired();
@@ -173,7 +179,8 @@ internal sealed class BackupPlanVersionConfiguration : IEntityTypeConfiguration<
     }
 
     private static string ScheduleClause(string prefix) =>
-        $"([{prefix}_ScheduleType] IN ('Daily', 'Weekly') AND "
+        $"([{prefix}_ScheduleType] IS NOT NULL AND [{prefix}_LocalTime] IS NOT NULL "
+        + $"AND [{prefix}_DaysOfWeek] IS NOT NULL AND [{prefix}_ScheduleType] IN ('Daily', 'Weekly') AND "
         + $"(([{prefix}_ScheduleType] = 'Daily' AND [{prefix}_DaysOfWeek] = 0) OR "
         + $"([{prefix}_ScheduleType] = 'Weekly' AND [{prefix}_DaysOfWeek] BETWEEN 1 AND 127)))";
 }
