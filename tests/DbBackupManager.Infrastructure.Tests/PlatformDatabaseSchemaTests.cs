@@ -21,13 +21,13 @@ public sealed class PlatformDatabaseSchemaTests(PlatformDatabaseSqlServerFixture
     public async Task SameNameFromOldBaselineIsRejected(string oldMigration)
     {
         await using var context = database.CreateContext();
-        var current = Assert.Single(context.Database.GetMigrations());
+        var current = context.Database.GetMigrations().Last();
         try
         {
             await context.Database.ExecuteSqlInterpolatedAsync(
                 $"UPDATE [__EFMigrationsHistory] SET [MigrationId] = {oldMigration} WHERE [MigrationId] = {current}");
             Assert.False(await PlatformDatabaseSchema.IsCurrentAsync(context));
-            Assert.Equal(oldMigration, Assert.Single(await context.Database.GetAppliedMigrationsAsync()));
+            Assert.Contains(oldMigration, await context.Database.GetAppliedMigrationsAsync());
         }
         finally
         {
@@ -58,7 +58,7 @@ public sealed class PlatformDatabaseSchemaTests(PlatformDatabaseSqlServerFixture
     public async Task MissingAppliedMigrationIsRejected()
     {
         await using var context = database.CreateContext();
-        var current = Assert.Single(context.Database.GetMigrations());
+        var current = context.Database.GetMigrations().Last();
         try
         {
             await context.Database.ExecuteSqlInterpolatedAsync(

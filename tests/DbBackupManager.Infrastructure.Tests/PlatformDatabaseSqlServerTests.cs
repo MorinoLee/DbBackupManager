@@ -17,14 +17,18 @@ public sealed class PlatformDatabaseSqlServerTests(PlatformDatabaseSqlServerFixt
     {
         await using var context = database.CreateContext();
 
-        var appliedMigrations = await context.Database.GetAppliedMigrationsAsync();
+        var appliedMigrations = (await context.Database.GetAppliedMigrationsAsync()).ToArray();
         var compatibilityLevel = await context.Database
             .SqlQueryRaw<int>(
                 "SELECT CAST([compatibility_level] AS int) AS [Value] FROM [sys].[databases] WHERE [name] = DB_NAME()")
             .SingleAsync();
 
-        var appliedMigration = Assert.Single(appliedMigrations);
-        Assert.EndsWith("_InitialPlatformSchema", appliedMigration, StringComparison.Ordinal);
+        Assert.Contains(
+            appliedMigrations,
+            migration => migration.EndsWith("_InitialPlatformSchema", StringComparison.Ordinal));
+        Assert.Contains(
+            appliedMigrations,
+            migration => migration.EndsWith("_AddBackupPlans", StringComparison.Ordinal));
         Assert.False(context.Database.HasPendingModelChanges());
         Assert.Equal(PlatformDatabaseServiceCollectionExtensions.CompatibilityLevel, compatibilityLevel);
     }

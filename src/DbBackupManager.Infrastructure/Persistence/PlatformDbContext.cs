@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Domain.Entities;
@@ -31,6 +32,10 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
     public DbSet<StorageTarget> StorageTargets => Set<StorageTarget>();
 
     public DbSet<BackupPolicy> BackupPolicies => Set<BackupPolicy>();
+
+    public DbSet<BackupPlan> BackupPlans => Set<BackupPlan>();
+
+    public DbSet<BackupPlanVersion> BackupPlanVersions => Set<BackupPlanVersion>();
 
     public DbSet<BackupTask> BackupTasks => Set<BackupTask>();
 
@@ -86,6 +91,14 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
             if (entry.State is EntityState.Added or EntityState.Modified)
             {
                 entry.Property(x => x.UpdatedAtUtc).CurrentValue = now;
+            }
+        }
+
+        foreach (var entry in ChangeTracker.Entries<BackupPlanVersion>())
+        {
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+            {
+                throw new InvalidOperationException("备份计划版本只能追加，不能修改或删除。");
             }
         }
 
