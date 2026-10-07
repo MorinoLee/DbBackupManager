@@ -190,6 +190,187 @@ public sealed class RecoveryWindowProtectionTests
         Assert.Equal(RecoveryProtectionReason.ActiveDifferentialBaseline, Reason(assessment, 1));
     }
 
+    [Fact]
+    public void UncertainDifferentialKeepsItsBaseFull()
+    {
+        var assessment = RecoveryWindowProtection.Evaluate(
+            7,
+            Now,
+            [
+                Full(1, Now.AddDays(-20)),
+                Full(2, Now.AddDays(-9), copyOnly: true),
+                Set(3, BackupType.Differential, Now.AddDays(-1), baseId: 1, certainty: BackupCertainty.Uncertain),
+            ],
+            ActiveBaseline.None);
+
+        Assert.Equal(RecoveryProtectionReason.Uncertain, Reason(assessment, 3));
+        Assert.Equal(RecoveryProtectionReason.DifferentialBase, Reason(assessment, 1));
+        Assert.Equal(RecoveryWindowVerdict.Protected, Decision(assessment, 1).Verdict);
+    }
+
+    [Fact]
+    public void UnresolvedBaselineStillKeepsTheAnchorDifferential()
+    {
+        var assessment = RecoveryWindowProtection.Evaluate(
+            7,
+            Now,
+            [
+                Full(1, Now.AddDays(-10)),
+                Differential(2, Now.AddDays(-8), baseId: 1),
+                Full(3, Now.AddDays(-1)),
+            ],
+            ActiveBaseline.Unresolved);
+
+        Assert.Equal(RecoveryProtectionReason.BaselineUnresolved, Reason(assessment, 1));
+        Assert.Equal(RecoveryProtectionReason.BaselineUnresolved, Reason(assessment, 3));
+        Assert.Equal(RecoveryWindowVerdict.Protected, Decision(assessment, 2).Verdict);
+        Assert.Equal(LocationRecoveryConclusion.RestorableWindowIncomplete, assessment.Conclusion);
+    }
+
+    [Fact]
+    public void LogBackupSetsStayProtected()
+    {
+        var assessment = Evaluate(Set(1, BackupType.Log, Now.AddDays(-30)));
+
+        Assert.Equal(RecoveryProtectionReason.LogRetentionDeferred, Reason(assessment, 1));
+    }
+
+    [Fact]
+    public void UncertainBackupSetsStayProtected()
+    {
+        var assessment = Evaluate(Set(1, BackupType.Full, Now.AddDays(-30), certainty: BackupCertainty.Uncertain));
+
+        Assert.Equal(RecoveryProtectionReason.Uncertain, Reason(assessment, 1));
+    }
+
+    [Fact]
+    public void ActiveTaskReferencesStayProtected()
+    {
+        var assessment = Evaluate(Set(1, BackupType.Full, Now.AddDays(-30), activeTask: true));
+
+        Assert.Equal(RecoveryProtectionReason.ActiveTaskDependency, Reason(assessment, 1));
+    }
+
+    [Fact]
+    public void UnknownCompletionTimeStaysProtected()
+    {
+        var assessment = Evaluate(Set(1, BackupType.Full, completedAt: null));
+
+        Assert.Equal(RecoveryProtectionReason.CompletionUnknown, Reason(assessment, 1));
+    }
+
+    [Theory]
+    [InlineData(BackupCopyPresence.Missing)]
+    [InlineData(BackupCopyPresence.Unknown)]
+    public void UnavailableCopiesStayProtected(BackupCopyPresence presence)
+    {
+        var assessment = Evaluate(Set(1, BackupType.Full, Now.AddDays(-1), presence: presence));
+
+        Assert.Equal(RecoveryProtectionReason.PresenceNotDeletable, Reason(assessment, 1));
+    }
+
+    [Fact]
+    public void MissingDifferentialDoesNotKeepItsBase()
+    {
+        var assessment = RecoveryWindowProtection.Evaluate(
+            7,
+            Now,
+            [
+                Full(1, Now.AddDays(-20)),
+                Full(2, Now.AddDays(-8)),
+                Full(3, Now.AddDays(-1)),
+                Set(4, BackupType.Differential, Now.AddDays(-19), baseId: 1, presence: BackupCopyPresence.Missing),
+            ],
+            ActiveBaseline.None);
+
+        Assert.Equal(RecoveryWindowVerdict.Deletable, Decision(assessment, 1).Verdict);
+        Assert.Equal(RecoveryProtectionReason.PresenceNotDeletable, Reason(assessment, 4));
+    }
+
+    [Fact]
+    public void UnknownDifferentialKeepsItsBase()
+    {
+        var assessment = RecoveryWindowProtection.Evaluate(
+            7,
+            Now,
+            [
+                Full(1, Now.AddDays(-20)),
+                Full(2, Now.AddDays(-8)),
+                Full(3, Now.AddDays(-1)),
+                Set(4, BackupType.Differential, Now.AddDays(-19), baseId: 1, presence: BackupCopyPresence.Unknown),
+            ],
+            ActiveBaseline.None);
+
+        Assert.Equal(RecoveryProtectionReason.DifferentialBase, Reason(assessment, 1));
+        Assert.Equal(RecoveryProtectionReason.PresenceNotDeletable, Reason(assessment, 4));
+    }
+
+    [Fact]
+    public void EarlierGateWinsWhenSeveralApply()
+    {
+        var assessment = RecoveryWindowProtection.Evaluate(
+            7,
+            Now,
+            [
+                Set(1, BackupType.Log, Now.AddDays(-1), certainty: BackupCertainty.Uncertain),
+                Set(2, BackupType.Full, Now.AddDays(-1), certainty: BackupCertainty.Uncertain, activeTask: true),
+                Set(3, BackupType.Full, completedAt: null, activeTask: true),
+                Set(4, BackupType.Full, completedAt: null, presence: BackupCopyPresence.Missing),
+                Set(5, BackupType.Full, Now.AddDays(-1), presence: BackupCopyPresence.Missing),
+            ],
+            ActiveBaseline.Unresolved);
+
+        Assert.Equal(RecoveryProtectionReason.LogRetentionDeferred, Reason(assessment, 1));
+        Assert.Equal(RecoveryProtectionReason.Uncertain, Reason(assessment, 2));
+        Assert.Equal(RecoveryProtectionReason.ActiveTaskDependency, Reason(assessment, 3));
+        Assert.Equal(RecoveryProtectionReason.CompletionUnknown, Reason(assessment, 4));
+        Assert.Equal(RecoveryProtectionReason.PresenceNotDeletable, Reason(assessment, 5));
+    }
+
+    [Fact]
+    public void DifferentialThatReferencesCopyOnlyFullIsNotARestorePoint()
+    {
+        var completedAt = Now.AddDays(-1);
+        var assessment = RecoveryWindowProtection.Evaluate(
+            7,
+            Now,
+            [
+                Full(1, completedAt, copyOnly: true),
+                Differential(2, completedAt, baseId: 1),
+            ],
+            ActiveBaseline.None);
+
+        Assert.Equal(RecoveryProtectionReason.DifferentialBase, Reason(assessment, 1));
+        Assert.Equal(RecoveryProtectionReason.BaseUnavailableAtLocation, Reason(assessment, 2));
+        Assert.Equal(LocationRecoveryConclusion.NotRestorable, assessment.Conclusion);
+    }
+
+    private static RecoveryWindowAssessment Evaluate(RecoveryBackupSet backupSet)
+    {
+        return RecoveryWindowProtection.Evaluate(7, Now, [backupSet], ActiveBaseline.None);
+    }
+
+    private static RecoveryBackupSet Set(
+        int number,
+        BackupType type,
+        DateTimeOffset? completedAt,
+        int? baseId = null,
+        bool copyOnly = false,
+        BackupCopyPresence presence = BackupCopyPresence.Available,
+        BackupCertainty certainty = BackupCertainty.Determined,
+        bool activeTask = false)
+    {
+        return new RecoveryBackupSet(
+            Id(number),
+            type,
+            completedAt,
+            baseId is null ? null : Id(baseId.Value),
+            copyOnly,
+            presence,
+            certainty,
+            activeTask);
+    }
+
     private static RecoveryBackupSet Full(int number, DateTimeOffset completedAt, bool copyOnly = false)
     {
         return new RecoveryBackupSet(

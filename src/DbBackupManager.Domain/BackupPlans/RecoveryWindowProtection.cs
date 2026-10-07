@@ -151,27 +151,28 @@ public static class RecoveryWindowProtection
         }
 
         var decisions = new Dictionary<Guid, RecoveryProtectionDecision>(backupSets.Count);
-        var eligible = new List<RecoveryBackupSet>();
+        var calculationSets = new List<RecoveryBackupSet>();
+        var setsById = backupSets.ToDictionary(set => set.Id);
         foreach (var set in backupSets)
         {
-            if (Gate(set, baseline) is { } reason)
+            if (Gate(set) is { } reason)
             {
                 decisions[set.Id] = Protect(set.Id, reason);
             }
             else
             {
-                eligible.Add(set);
+                calculationSets.Add(set);
             }
         }
 
-        var eligibleFulls = eligible.Where(set => set.Type == BackupType.Full).ToArray();
-        var eligibleById = eligible.ToDictionary(set => set.Id);
-        var restorePoints = eligible.Where(set => IsRestorePoint(set, eligibleById)).ToArray();
-        var newestFullAt = Newest(eligibleFulls);
+        var calculationFulls = calculationSets.Where(set => set.Type == BackupType.Full).ToArray();
+        var calculationById = calculationSets.ToDictionary(set => set.Id);
+        var restorePoints = calculationSets.Where(set => IsRestorePoint(set, calculationById)).ToArray();
+        var newestFullAt = Newest(calculationFulls);
         var newestRestoreAt = Newest(restorePoints);
         var anchorAt = Newest(restorePoints.Where(set => set.CompletedAtUtc!.Value < windowStart).ToArray());
         var protectedDifferentials = new HashSet<Guid>();
-        foreach (var set in eligible)
+        foreach (var set in calculationSets)
         {
             if (set.Type != BackupType.Differential)
             {
@@ -189,15 +190,18 @@ public static class RecoveryWindowProtection
         var differentialBases = new HashSet<Guid>();
         foreach (var id in protectedDifferentials)
         {
-            var differential = eligibleById[id];
-            if (differential.DifferentialBaseId is { } baseId && eligibleById.TryGetValue(baseId, out var baseSet)
-                && baseSet.Type == BackupType.Full)
+            AddReferencedFull(calculationById[id], setsById, differentialBases);
+        }
+
+        foreach (var set in backupSets)
+        {
+            if (ProtectsBaseDespiteGate(set))
             {
-                differentialBases.Add(baseId);
+                AddReferencedFull(set, setsById, differentialBases);
             }
         }
 
-        foreach (var set in eligible)
+        foreach (var set in calculationSets)
         {
             decisions[set.Id] = Decide(
                 set,
@@ -207,11 +211,24 @@ public static class RecoveryWindowProtection
                 newestRestoreAt,
                 anchorAt,
                 differentialBases,
-                eligibleById);
+                calculationById);
+        }
+
+        if (baseline.IsUnresolved)
+        {
+            foreach (var set in calculationSets)
+            {
+                if (set.Type == BackupType.Full)
+                {
+                    decisions[set.Id] = Protect(set.Id, RecoveryProtectionReason.BaselineUnresolved);
+                }
+            }
         }
 
         var ordered = backupSets.Select(set => decisions[set.Id]).ToArray();
-        return new RecoveryWindowAssessment(ordered, Conclude(eligibleFulls, eligible, windowStart, baseline, eligibleById));
+        return new RecoveryWindowAssessment(
+            ordered,
+            Conclude(calculationFulls, calculationSets, windowStart, baseline, calculationById));
     }
 
     private static RecoveryProtectionDecision Decide(
@@ -290,7 +307,7 @@ public static class RecoveryWindowProtection
         return LocationRecoveryConclusion.RestorableWindowSatisfied;
     }
 
-    private static string? Gate(RecoveryBackupSet set, ActiveBaseline baseline)
+    private static string? Gate(RecoveryBackupSet set)
     {
         ConfigurationValues.RequireDefined(set.Type, nameof(set));
         if (set.Type == BackupType.Log)
@@ -318,17 +335,42 @@ public static class RecoveryWindowProtection
             return RecoveryProtectionReason.PresenceNotDeletable;
         }
 
-        if (baseline.IsUnresolved && set.Type == BackupType.Full)
-        {
-            return RecoveryProtectionReason.BaselineUnresolved;
-        }
-
         if (set.Type is not (BackupType.Full or BackupType.Differential))
         {
             return RecoveryProtectionReason.PresenceNotDeletable;
         }
 
         return null;
+    }
+
+    private static bool ProtectsBaseDespiteGate(RecoveryBackupSet set)
+    {
+        if (set.Type != BackupType.Differential)
+        {
+            return false;
+        }
+
+        if (set.Certainty == BackupCertainty.Uncertain
+            || set.ReferencedByActiveTask
+            || set.CompletedAtUtc is null)
+        {
+            return true;
+        }
+
+        return set.Presence == BackupCopyPresence.Unknown;
+    }
+
+    private static void AddReferencedFull(
+        RecoveryBackupSet differential,
+        Dictionary<Guid, RecoveryBackupSet> setsById,
+        HashSet<Guid> differentialBases)
+    {
+        if (differential.DifferentialBaseId is { } baseId
+            && setsById.TryGetValue(baseId, out var baseSet)
+            && baseSet.Type == BackupType.Full)
+        {
+            differentialBases.Add(baseId);
+        }
     }
 
     private static bool IsRestorePoint(RecoveryBackupSet set, Dictionary<Guid, RecoveryBackupSet> eligibleById)
@@ -340,7 +382,8 @@ public static class RecoveryWindowProtection
     {
         return set.DifferentialBaseId is { } baseId
             && eligibleById.TryGetValue(baseId, out var baseSet)
-            && baseSet.Type == BackupType.Full;
+            && baseSet.Type == BackupType.Full
+            && !baseSet.IsCopyOnly;
     }
 
     private static bool IsInside(RecoveryBackupSet set, DateTimeOffset windowStart)
