@@ -21,6 +21,16 @@ public sealed class BackupCompletionTimeRulesTests
     }
 
     [Fact]
+    public void PlatformCompletionSlightlyAfterNowIsPreservedAfterClockMovesBack()
+    {
+        var observed = Now.AddSeconds(1);
+        var result = BackupCompletionTimeRules.Evaluate(observed, null, Now, null, null);
+        Assert.Equal(observed, result.CompletedAtUtc);
+        Assert.Equal(BackupCompletionTimeSource.PlatformObserved, result.Source);
+        Assert.Equal(BackupCompletionTimeReason.PlatformObserved, result.ReasonCode);
+    }
+
+    [Fact]
     public void KnownOffsetConvertsRawLocalTimeWithoutChangingIt()
     {
         var local = new DateTime(2026, 10, 7, 15, 0, 0, DateTimeKind.Unspecified);
@@ -142,7 +152,6 @@ public sealed class BackupCompletionTimeRulesTests
             Now.ToOffset(TimeSpan.FromHours(8)), null, Now, null, null));
         Assert.Throws<ArgumentException>(() => BackupCompletionTimeRules.Evaluate(
             null, null, Now.ToOffset(TimeSpan.FromHours(8)), null, null));
-        Assert.Throws<ArgumentException>(() => BackupCompletionTimeRules.Evaluate(Now.AddTicks(1), null, Now, null, null));
         Assert.Throws<ArgumentException>(() => BackupCompletionTimeRules.Evaluate(
             null, Now.UtcDateTime, Now, TimeSpan.FromHours(8), FixedZone));
     }

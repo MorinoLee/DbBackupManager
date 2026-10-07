@@ -42,11 +42,7 @@ public static class BackupCompletionTimeRules
         if (platformObservedCompletionUtc is { } observed)
         {
             ConfigurationValues.RequireUtc(observed, nameof(platformObservedCompletionUtc));
-            if (observed > nowUtc)
-            {
-                throw new ArgumentException("平台完成时刻不能晚于观察时刻。", nameof(platformObservedCompletionUtc));
-            }
-
+            // 时钟回拨可能让持久化完成时刻晚于 now，仍保留平台已观察到的事实。
             return new(observed, BackupCompletionTimeSource.PlatformObserved, BackupCompletionTimeReason.PlatformObserved);
         }
 
