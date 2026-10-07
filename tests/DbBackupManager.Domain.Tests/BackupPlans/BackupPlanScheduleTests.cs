@@ -334,6 +334,51 @@ public sealed class BackupPlanScheduleTests
         Assert.Empty(work);
     }
 
+    [Fact]
+    public void AbandonedEarlierFullDoesNotSwallowDifferentialWhenLatestFullFailed()
+    {
+        var plan = ChainPlan();
+        var differential = Slot(2);
+        var work = BackupPlanSchedule.SelectDue(
+            plan,
+            Slot(5),
+            [
+                Candidate(BackupType.Full, Slot(3)),
+                Candidate(BackupType.Full, Slot(4)),
+                Candidate(BackupType.Differential, differential),
+            ],
+            Outcome(
+                new BackupScheduleSlotKey(plan.Id, FirstVersionId, BackupType.Full, Slot(4)),
+                BackupSlotDisposition.Failed));
+
+        Assert.Single(work);
+        Assert.Equal(BackupType.Differential, work[0].Key.BackupType);
+        Assert.Equal(differential, work[0].Key.SlotUtc);
+    }
+
+    [Fact]
+    public void CoverageIsNotAttachedToADifferentialThatAlreadyHasARecord()
+    {
+        var plan = ChainPlan();
+        var differential = Slot(2);
+        var full = Slot(3);
+        var work = BackupPlanSchedule.SelectDue(
+            plan,
+            Slot(4),
+            [
+                Candidate(BackupType.Differential, differential),
+                Candidate(BackupType.Full, full),
+            ],
+            Outcome(
+                new BackupScheduleSlotKey(plan.Id, FirstVersionId, BackupType.Differential, differential),
+                BackupSlotDisposition.Succeeded));
+
+        Assert.Single(work);
+        Assert.Equal(BackupType.Full, work[0].Key.BackupType);
+        Assert.Equal(full, work[0].Key.SlotUtc);
+        Assert.Null(work[0].DifferentialCoveredWhenFullSucceeds);
+    }
+
     private static BackupPlan ChainPlan()
     {
         return BackupPlan.Create(

@@ -87,16 +87,23 @@ public static class BackupPlanSchedule
         var work = new List<BackupPlanDueWork>(2);
         if (latestFull is { } selectedFull && !existing.ContainsKey(Key(plan, selectedFull)))
         {
-            var coversLatestDifferential = latestDifferential is { } selectedDifferential
-                && selectedFull.SlotUtc >= selectedDifferential.SlotUtc;
-            work.Add(new BackupPlanDueWork(
-                Key(plan, selectedFull),
-                coversLatestDifferential ? Key(plan, latestDifferential!.Value) : null));
+            BackupScheduleSlotKey? coveredDifferential = null;
+            if (latestDifferential is { } selectedDifferential
+                && selectedFull.SlotUtc >= selectedDifferential.SlotUtc)
+            {
+                var differentialKey = Key(plan, selectedDifferential);
+                if (!existing.ContainsKey(differentialKey))
+                {
+                    coveredDifferential = differentialKey;
+                }
+            }
+
+            work.Add(new BackupPlanDueWork(Key(plan, selectedFull), coveredDifferential));
         }
 
         if (latestDifferential is { } differential
             && !existing.ContainsKey(Key(plan, differential))
-            && !IsDifferentialSuperseded(plan, differential.SlotUtc, dueFulls, existing, now))
+            && !IsDifferentialSuperseded(plan, differential.SlotUtc, latestFull, dueFulls, existing, now))
         {
             work.Add(new BackupPlanDueWork(Key(plan, differential), null));
         }
@@ -127,11 +134,18 @@ public static class BackupPlanSchedule
     private static bool IsDifferentialSuperseded(
         BackupPlan plan,
         DateTimeOffset differentialSlot,
+        BackupPlanSlotCandidate? latestFull,
         IReadOnlyList<BackupPlanSlotCandidate> dueFulls,
         IReadOnlyDictionary<BackupScheduleSlotKey, BackupSlotDisposition> existing,
         DateTimeOffset nowUtc)
     {
-        foreach (var state in FullStatesNotEarlierThan(plan, differentialSlot, dueFulls, existing, nowUtc))
+        foreach (var state in FullStatesNotEarlierThan(
+            plan,
+            differentialSlot,
+            latestFull,
+            dueFulls,
+            existing,
+            nowUtc))
         {
             if (state is not FullSlotState.Failed)
             {
@@ -145,10 +159,12 @@ public static class BackupPlanSchedule
     private static IEnumerable<FullSlotState> FullStatesNotEarlierThan(
         BackupPlan plan,
         DateTimeOffset differentialSlot,
+        BackupPlanSlotCandidate? latestFull,
         IReadOnlyList<BackupPlanSlotCandidate> dueFulls,
         IReadOnlyDictionary<BackupScheduleSlotKey, BackupSlotDisposition> existing,
         DateTimeOffset nowUtc)
     {
+        var latestFullKey = latestFull is { } selected ? Key(plan, selected) : (BackupScheduleSlotKey?)null;
         var seen = new HashSet<BackupScheduleSlotKey>();
         foreach (var full in dueFulls)
         {
@@ -163,9 +179,14 @@ public static class BackupPlanSchedule
                 continue;
             }
 
-            yield return existing.TryGetValue(key, out var disposition)
-                ? ToState(disposition)
-                : FullSlotState.NotCreated;
+            if (existing.TryGetValue(key, out var disposition))
+            {
+                yield return ToState(disposition);
+            }
+            else if (latestFullKey == key)
+            {
+                yield return FullSlotState.NotCreated;
+            }
         }
 
         foreach (var entry in existing)
