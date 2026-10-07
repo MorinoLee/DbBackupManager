@@ -116,12 +116,14 @@ public sealed class BackupPlanScheduleTests
         Assert.Single(nextDay);
         Assert.Equal(BackupType.Full, nextDay[0].Key.BackupType);
         Assert.Equal(saturday, nextDay[0].Key.SlotUtc);
-        Assert.Null(nextDay[0].DifferentialCoveredWhenFullSucceeds);
+        var covered = Assert.NotNull(nextDay[0].DifferentialCoveredWhenFullSucceeds);
+        Assert.Equal(friday, covered.SlotUtc);
+        Assert.Equal(BackupType.Differential, covered.BackupType);
         Assert.Equal(nextDay, rememberedWithoutOldCandidate);
     }
 
     [Fact]
-    public void FailedCoveringFullStillLeavesTheDifferentialDueAfterALaterFull()
+    public void LaterUncreatedFullSupersedesDifferentialAfterEarlierFullFailed()
     {
         var plan = ChainPlan();
         var friday = new DateTimeOffset(2026, 10, 2, 2, 0, 0, TimeSpan.Zero);
@@ -141,11 +143,12 @@ public sealed class BackupPlanScheduleTests
             ],
             Outcome(merged[0].Key, BackupSlotDisposition.Failed));
 
-        Assert.Equal(2, nextDay.Count);
+        Assert.Single(nextDay);
         Assert.Equal(saturday, nextDay[0].Key.SlotUtc);
         Assert.Equal(BackupType.Full, nextDay[0].Key.BackupType);
-        Assert.Equal(friday, nextDay[1].Key.SlotUtc);
-        Assert.Equal(BackupType.Differential, nextDay[1].Key.BackupType);
+        var covered = Assert.NotNull(nextDay[0].DifferentialCoveredWhenFullSucceeds);
+        Assert.Equal(friday, covered.SlotUtc);
+        Assert.Equal(BackupType.Differential, covered.BackupType);
     }
 
     [Fact]
@@ -224,6 +227,111 @@ public sealed class BackupPlanScheduleTests
 
         Assert.Single(work);
         Assert.Equal(BackupType.Full, work[0].Key.BackupType);
+    }
+
+    [Fact]
+    public void FutureSlotsAreIgnoredAndTheCurrentInstantRemainsDue()
+    {
+        var plan = ChainPlan();
+        var now = Slot(2);
+        var work = BackupPlanSchedule.SelectDue(
+            plan,
+            now,
+            [
+                Candidate(BackupType.Full, now.AddMinutes(-1)),
+                Candidate(BackupType.Full, now),
+                Candidate(BackupType.Full, now.AddMinutes(1)),
+            ],
+            Empty());
+
+        Assert.Single(work);
+        Assert.Equal(now, work[0].Key.SlotUtc);
+    }
+
+    [Fact]
+    public void UnknownPlanVersionIsRejected()
+    {
+        var plan = ChainPlan();
+        var unknown = new BackupPlanSlotCandidate(Guid.NewGuid(), BackupType.Full, Slot(1));
+
+        Assert.Throws<ArgumentException>(() => BackupPlanSchedule.SelectDue(plan, Slot(2), [unknown], Empty()));
+    }
+
+    [Fact]
+    public void CrossVersionCandidatesKeepTheLatestDueSlot()
+    {
+        var plan = ChainPlan();
+        var revisedAt = Slot(2);
+        plan.Revise(SecondVersionId, ChainDefinition(recoveryWindowDays: 21), revisedAt);
+        var earlier = revisedAt.AddMinutes(-30);
+        var later = revisedAt.AddHours(2);
+        var work = BackupPlanSchedule.SelectDue(
+            plan,
+            later.AddHours(1),
+            [
+                new BackupPlanSlotCandidate(FirstVersionId, BackupType.Full, earlier),
+                new BackupPlanSlotCandidate(SecondVersionId, BackupType.Full, later),
+            ],
+            Empty());
+
+        Assert.Single(work);
+        Assert.Equal(SecondVersionId, work[0].Key.PlanVersionId);
+        Assert.Equal(later, work[0].Key.SlotUtc);
+    }
+
+    [Theory]
+    [InlineData(BackupSlotDisposition.Pending)]
+    [InlineData(BackupSlotDisposition.Uncertain)]
+    [InlineData(BackupSlotDisposition.Succeeded)]
+    public void NewerFullSupersedesAnOlderDifferential(BackupSlotDisposition disposition)
+    {
+        var plan = ChainPlan();
+        var differential = Slot(2);
+        var full = Slot(3);
+        var fullKey = new BackupScheduleSlotKey(plan.Id, FirstVersionId, BackupType.Full, full);
+        var work = BackupPlanSchedule.SelectDue(
+            plan,
+            Slot(4),
+            [
+                Candidate(BackupType.Differential, differential),
+                Candidate(BackupType.Full, full),
+            ],
+            Outcome(fullKey, disposition));
+
+        Assert.Empty(work);
+    }
+
+    [Fact]
+    public void FailedNewerFullLeavesTheOlderDifferentialDue()
+    {
+        var plan = ChainPlan();
+        var differential = Slot(2);
+        var full = Slot(3);
+        var fullKey = new BackupScheduleSlotKey(plan.Id, FirstVersionId, BackupType.Full, full);
+        var work = BackupPlanSchedule.SelectDue(
+            plan,
+            Slot(4),
+            [Candidate(BackupType.Differential, differential), Candidate(BackupType.Full, full)],
+            Outcome(fullKey, BackupSlotDisposition.Failed));
+
+        Assert.Single(work);
+        Assert.Equal(BackupType.Differential, work[0].Key.BackupType);
+        Assert.Equal(differential, work[0].Key.SlotUtc);
+    }
+
+    [Fact]
+    public void SucceededLaterFullDoesNotRebuildAnEarlierDifferential()
+    {
+        var plan = ChainPlan();
+        var work = BackupPlanSchedule.SelectDue(
+            plan,
+            Slot(4),
+            [Candidate(BackupType.Differential, Slot(2)), Candidate(BackupType.Full, Slot(3))],
+            Outcome(
+                new BackupScheduleSlotKey(plan.Id, FirstVersionId, BackupType.Full, Slot(3)),
+                BackupSlotDisposition.Succeeded));
+
+        Assert.Empty(work);
     }
 
     private static BackupPlan ChainPlan()

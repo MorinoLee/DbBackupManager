@@ -6,7 +6,8 @@ public enum BackupSlotDisposition
 {
     Pending = 1,
     Succeeded = 2,
-    Failed = 3
+    Failed = 3,
+    Uncertain = 4
 }
 
 public readonly record struct BackupScheduleSlotKey(
@@ -84,33 +85,20 @@ public static class BackupPlanSchedule
         }
 
         var work = new List<BackupPlanDueWork>(2);
-        var sameInstant = latestFull is { } full
-            && latestDifferential is { } differential
-            && full.SlotUtc == differential.SlotUtc;
-        if (latestFull is { } selectedFull)
+        if (latestFull is { } selectedFull && !existing.ContainsKey(Key(plan, selectedFull)))
         {
-            var fullKey = Key(plan, selectedFull);
-            if (!existing.ContainsKey(fullKey))
-            {
-                work.Add(new BackupPlanDueWork(
-                    fullKey,
-                    sameInstant ? Key(plan, latestDifferential!.Value) : null));
-            }
+            var coversLatestDifferential = latestDifferential is { } selectedDifferential
+                && selectedFull.SlotUtc >= selectedDifferential.SlotUtc;
+            work.Add(new BackupPlanDueWork(
+                Key(plan, selectedFull),
+                coversLatestDifferential ? Key(plan, latestDifferential!.Value) : null));
         }
 
-        if (latestDifferential is { } selectedDifferential)
+        if (latestDifferential is { } differential
+            && !existing.ContainsKey(Key(plan, differential))
+            && !IsDifferentialSuperseded(plan, differential.SlotUtc, dueFulls, existing, now))
         {
-            var differentialKey = Key(plan, selectedDifferential);
-            var mergedIntoNewFull = sameInstant
-                && latestFull is { } mergedFull
-                && !existing.ContainsKey(Key(plan, mergedFull));
-            if (!existing.ContainsKey(differentialKey)
-                && !mergedIntoNewFull
-                && CoveringFullState(plan, selectedDifferential.SlotUtc, dueFulls, existing)
-                    is not (CoveringFull.Covered or CoveringFull.Waiting))
-            {
-                work.Add(new BackupPlanDueWork(differentialKey, null));
-            }
+            work.Add(new BackupPlanDueWork(Key(plan, differential), null));
         }
 
         return work;
@@ -136,55 +124,83 @@ public static class BackupPlanSchedule
         return new BackupScheduleSlotKey(plan.Id, candidate.PlanVersionId, candidate.BackupType, candidate.SlotUtc);
     }
 
-    private static CoveringFull CoveringFullState(
+    private static bool IsDifferentialSuperseded(
         BackupPlan plan,
-        DateTimeOffset slotUtc,
+        DateTimeOffset differentialSlot,
         IReadOnlyList<BackupPlanSlotCandidate> dueFulls,
-        IReadOnlyDictionary<BackupScheduleSlotKey, BackupSlotDisposition> existing)
+        IReadOnlyDictionary<BackupScheduleSlotKey, BackupSlotDisposition> existing,
+        DateTimeOffset nowUtc)
     {
-        BackupScheduleSlotKey? key = null;
+        foreach (var state in FullStatesNotEarlierThan(plan, differentialSlot, dueFulls, existing, nowUtc))
+        {
+            if (state is not FullSlotState.Failed)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<FullSlotState> FullStatesNotEarlierThan(
+        BackupPlan plan,
+        DateTimeOffset differentialSlot,
+        IReadOnlyList<BackupPlanSlotCandidate> dueFulls,
+        IReadOnlyDictionary<BackupScheduleSlotKey, BackupSlotDisposition> existing,
+        DateTimeOffset nowUtc)
+    {
+        var seen = new HashSet<BackupScheduleSlotKey>();
         foreach (var full in dueFulls)
         {
-            if (full.SlotUtc == slotUtc)
+            if (full.SlotUtc < differentialSlot)
             {
-                key = Key(plan, full);
-                break;
+                continue;
             }
-        }
 
-        if (key is null)
-        {
-            foreach (var entry in existing)
+            var key = Key(plan, full);
+            if (!seen.Add(key))
             {
-                if (entry.Key.PlanId == plan.Id
-                    && entry.Key.BackupType == BackupType.Full
-                    && entry.Key.SlotUtc == slotUtc)
-                {
-                    key = entry.Key;
-                    break;
-                }
+                continue;
             }
+
+            yield return existing.TryGetValue(key, out var disposition)
+                ? ToState(disposition)
+                : FullSlotState.NotCreated;
         }
 
-        if (key is null || !existing.TryGetValue(key.Value, out var disposition))
+        foreach (var entry in existing)
         {
-            return CoveringFull.None;
-        }
+            if (entry.Key.PlanId != plan.Id
+                || entry.Key.BackupType != BackupType.Full
+                || entry.Key.SlotUtc < differentialSlot
+                || entry.Key.SlotUtc > nowUtc
+                || !seen.Add(entry.Key))
+            {
+                continue;
+            }
 
+            yield return ToState(entry.Value);
+        }
+    }
+
+    private static FullSlotState ToState(BackupSlotDisposition disposition)
+    {
         return disposition switch
         {
-            BackupSlotDisposition.Succeeded => CoveringFull.Covered,
-            BackupSlotDisposition.Pending => CoveringFull.Waiting,
-            BackupSlotDisposition.Failed => CoveringFull.Failed,
-            _ => throw new ArgumentOutOfRangeException(nameof(existing), disposition, "枚举值无效。"),
+            BackupSlotDisposition.Pending => FullSlotState.Pending,
+            BackupSlotDisposition.Uncertain => FullSlotState.Uncertain,
+            BackupSlotDisposition.Succeeded => FullSlotState.Succeeded,
+            BackupSlotDisposition.Failed => FullSlotState.Failed,
+            _ => throw new ArgumentOutOfRangeException(nameof(disposition), disposition, "枚举值无效。"),
         };
     }
 
-    private enum CoveringFull
+    private enum FullSlotState
     {
-        None = 0,
-        Waiting = 1,
-        Covered = 2,
-        Failed = 3
+        NotCreated = 0,
+        Pending = 1,
+        Uncertain = 2,
+        Succeeded = 3,
+        Failed = 4
     }
 }
