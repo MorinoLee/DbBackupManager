@@ -1,3 +1,6 @@
+using DbBackupManager.Domain.BackupPlans;
+using DbBackupManager.Domain.Configuration;
+
 namespace DbBackupManager.Application.TargetSql;
 
 public enum TargetSqlOutcome
@@ -39,6 +42,8 @@ public enum TargetSqlFailureCode
     Cancelled,
     ConnectionInterrupted,
     InvalidResponse,
+    BackupTypeNotValidated,
+    DifferentialBaseMissing,
 }
 
 public enum TargetSqlDatabaseState
@@ -251,6 +256,47 @@ public sealed class TargetSqlFullBackupRequest
 
     public int CommandTimeoutSeconds { get; }
 }
+
+public sealed class TargetSqlBackupRequest
+{
+    public TargetSqlBackupRequest(
+        string databaseName,
+        string localSqlFilePath,
+        BackupRunPurpose purpose,
+        bool useChecksum,
+        bool useCompression,
+        int commandTimeoutSeconds)
+    {
+        BackupType = BackupPlanRules.ToBackupType(purpose);
+        if (BackupType == BackupType.Log)
+        {
+            throw new ArgumentException("当前执行端口尚不支持日志备份。", nameof(purpose));
+        }
+
+        Purpose = purpose;
+        UseCopyOnly = BackupPlanRules.UseCopyOnly(purpose);
+        DatabaseName = TargetSqlContractValues.DatabaseName(databaseName, nameof(databaseName));
+        LocalSqlFilePath = TargetSqlContractValues.BackupFilePath(localSqlFilePath, nameof(localSqlFilePath));
+        UseChecksum = useChecksum;
+        UseCompression = useCompression;
+        CommandTimeoutSeconds = TargetSqlContractValues.Positive(commandTimeoutSeconds, 86_400, nameof(commandTimeoutSeconds));
+    }
+
+    public string DatabaseName { get; }
+    public string LocalSqlFilePath { get; }
+    public BackupRunPurpose Purpose { get; }
+    public BackupType BackupType { get; }
+    public bool UseCopyOnly { get; }
+    public bool UseChecksum { get; }
+    public bool UseCompression { get; }
+    public int CommandTimeoutSeconds { get; }
+}
+
+public sealed record TargetSqlBackupCompletion(
+    BackupType BackupType,
+    bool UsedCopyOnly,
+    bool UsedChecksum,
+    bool UsedCompression);
 
 public sealed class TargetSqlBackupVerificationRequest
 {

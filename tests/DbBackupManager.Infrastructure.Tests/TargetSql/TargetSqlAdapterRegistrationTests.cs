@@ -29,11 +29,13 @@ public sealed class TargetSqlAdapterRegistrationTests
         var probe = scope.ServiceProvider.GetRequiredService<ITargetSqlReadOnlyProbe>();
         var evidence = scope.ServiceProvider.GetRequiredService<ITargetSqlBackupEvidenceProbe>();
         var executor = scope.ServiceProvider.GetRequiredService<ITargetSqlBackupExecutor>();
+        var planExecutor = scope.ServiceProvider.GetRequiredService<ITargetSqlPlanBackupExecutor>();
 
         Assert.IsType<SqlClientTargetSqlReadOnlyProbe>(probe);
         Assert.IsType<SqlClientTargetSqlBackupExecutor>(executor);
         Assert.Same(probe, evidence);
         Assert.NotSame(probe, executor);
+        Assert.Same(executor, planExecutor);
         Assert.False(Directory.Exists(configuration[
             BusinessCredentialDataProtector.KeyRingPathConfigurationKey]!));
     }

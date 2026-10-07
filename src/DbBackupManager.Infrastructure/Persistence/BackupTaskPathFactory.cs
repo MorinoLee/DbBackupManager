@@ -1,14 +1,22 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using DbBackupManager.Application.FileStorage;
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
+internal sealed record BackupPlanPathInput(
+    BackupTaskIdentitySnapshot Identity,
+    BackupSourceSnapshot Source,
+    BackupRemoteTargetSnapshot? RemoteTarget,
+    BackupRunPurpose Purpose);
+
 internal static class BackupTaskPathFactory
 {
     internal const string CurrentVersion = "v2";
+    internal const string PlanVersion = "v3";
     internal const int MaximumSegmentLength = 80;
     internal const int MaximumSqlServerBackupPathLength = 259;
     internal const int MaximumStoredPathLength = 2_048;
@@ -53,47 +61,80 @@ internal static class BackupTaskPathFactory
             throw new InvalidOperationException("任务快照包含不支持的备份路径规则版本。");
         }
 
-        return CreateCurrent(snapshot, $"{preparedAtUtc:yyyyMMddHHmmss}_{attemptId:N}.bak");
+        if (snapshot.BackupType != BackupType.Full)
+        {
+            throw new InvalidOperationException("旧任务快照只支持完整备份。");
+        }
+
+        return CreatePaths(
+            new(snapshot.ServerId, snapshot.ServerName, snapshot.InstanceId, snapshot.InstanceName, snapshot.DatabaseId, snapshot.DatabaseName),
+            new(snapshot.LocalSqlBackupRootPath, snapshot.FileNameRuleVersion,
+                new(snapshot.SourceAccessProtocol, snapshot.SourceAccessHost, snapshot.SourceAccessPort, snapshot.SourceAccessBasePath,
+                    snapshot.SourceCredentialReferenceId, snapshot.SourceSftpHostKeyFingerprint)),
+            snapshot.StorageTargetId is { } targetId
+                ? new(targetId, new(snapshot.RemoteProtocol!.Value, snapshot.RemoteHost!, snapshot.RemotePort, snapshot.RemoteBasePath!,
+                    snapshot.RemoteCredentialReferenceId!.Value, snapshot.RemoteSftpHostKeyFingerprint))
+                : null,
+            BackupTypeSegment(snapshot.BackupType),
+            $"{preparedAtUtc:yyyyMMddHHmmss}_{attemptId:N}.bak");
     }
 
-    private static BackupAttemptPaths CreateCurrent(
-        BackupTaskSnapshot snapshot,
-        string fileName)
+    public static BackupAttemptPaths Create(BackupPlanPathInput input, Guid attemptId, DateTimeOffset preparedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(input.Identity);
+        ArgumentNullException.ThrowIfNull(input.Source);
+        if (attemptId == Guid.Empty)
+        {
+            throw new ArgumentException("备份尝试标识不能为空。", nameof(attemptId));
+        }
+
+        if (preparedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("备份路径时间必须使用 UTC。", nameof(preparedAtUtc));
+        }
+
+        if (input.Source.FileNameRuleVersion != PlanVersion)
+        {
+            throw new InvalidOperationException("计划备份路径必须显式选用 v3 规则。");
+        }
+
+        var backupType = BackupPlanRules.ToBackupType(input.Purpose);
+        if (backupType == BackupType.Log)
+        {
+            throw new InvalidOperationException("当前路径规则尚不支持日志备份。");
+        }
+
+        var suffix = BackupPlanRules.UseCopyOnly(input.Purpose) ? "COPYONLY"
+            : backupType == BackupType.Differential ? "DIFF" : "FULL";
+        return CreatePaths(input.Identity, input.Source, input.RemoteTarget, BackupTypeSegment(backupType),
+            $"{preparedAtUtc:yyyyMMddHHmmss}_{attemptId:N}_{suffix}.bak");
+    }
+
+    private static BackupAttemptPaths CreatePaths(
+        BackupTaskIdentitySnapshot identity, BackupSourceSnapshot source, BackupRemoteTargetSnapshot? remote,
+        string typeSegment, string fileName)
     {
         var relativeSegments = new[]
         {
-            BuildIdentitySegment(snapshot.ServerName, snapshot.ServerId),
-            BuildIdentitySegment(snapshot.InstanceName, snapshot.InstanceId),
-            BuildIdentitySegment(snapshot.DatabaseName, snapshot.DatabaseId),
-            BackupTypeSegment(snapshot.BackupType),
+            BuildIdentitySegment(identity.ServerName, identity.ServerId),
+            BuildIdentitySegment(identity.InstanceName, identity.InstanceId),
+            BuildIdentitySegment(identity.DatabaseName, identity.DatabaseId),
+            typeSegment,
         };
-        var localPath = BuildLocalPath(snapshot.LocalSqlBackupRootPath, relativeSegments, fileName);
-        var workerPath = BuildEndpointPath(
-            snapshot.SourceAccessProtocol,
-            snapshot.SourceAccessHost,
-            snapshot.SourceAccessBasePath,
-            relativeSegments,
-            fileName);
-
-        if (snapshot.StorageTargetId is null)
+        var localPath = BuildLocalPath(source.LocalSqlBackupRootPath, relativeSegments, fileName);
+        var endpoint = source.WorkerAccess;
+        var workerPath = BuildEndpointPath(endpoint.Protocol, endpoint.Host, endpoint.BasePath, relativeSegments, fileName);
+        if (remote is null)
         {
             return new BackupAttemptPaths(localPath, workerPath, null, null, null);
         }
 
-        var remoteFinal = BuildEndpointPath(
-            snapshot.RemoteProtocol!.Value,
-            snapshot.RemoteHost!,
-            snapshot.RemoteBasePath!,
-            relativeSegments,
-            fileName);
+        var target = remote.Endpoint;
+        var remoteFinal = BuildEndpointPath(target.Protocol, target.Host, target.BasePath, relativeSegments, fileName);
         var remotePartial = $"{remoteFinal}.part";
         EnsureLength(remotePartial, MaximumStoredPathLength);
-        return new BackupAttemptPaths(
-            localPath,
-            workerPath,
-            snapshot.StorageTargetId,
-            remotePartial,
-            remoteFinal);
+        return new BackupAttemptPaths(localPath, workerPath, remote.StorageTargetId, remotePartial, remoteFinal);
     }
 
     private static string BuildLocalPath(
@@ -154,6 +195,7 @@ internal static class BackupTaskPathFactory
     private static string BackupTypeSegment(BackupType backupType) => backupType switch
     {
         BackupType.Full => "full",
+        BackupType.Differential => "diff",
         _ => throw new InvalidOperationException("任务快照包含不支持的备份类型。"),
     };
 

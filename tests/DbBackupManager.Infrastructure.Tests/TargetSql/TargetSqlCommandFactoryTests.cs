@@ -1,5 +1,7 @@
 using System.Data;
 using DbBackupManager.Application.TargetSql;
+using DbBackupManager.Domain.BackupPlans;
+using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Infrastructure.TargetSql;
 using Microsoft.Data.SqlClient;
 
@@ -7,6 +9,46 @@ namespace DbBackupManager.Infrastructure.Tests.TargetSql;
 
 public sealed class TargetSqlCommandFactoryTests
 {
+    [Theory]
+    [InlineData(BackupRunPurpose.PlanFull, "WITH CHECKSUM, COMPRESSION;")]
+    [InlineData(BackupRunPurpose.PlanDifferential, "WITH DIFFERENTIAL, CHECKSUM, COMPRESSION;")]
+    [InlineData(BackupRunPurpose.AdHocCopyOnlyFull, "WITH COPY_ONLY, CHECKSUM, COMPRESSION;")]
+    public void PlanCommandUsesDomainPurposeAndProtectedSqlConstruction(BackupRunPurpose purpose, string options)
+    {
+        using var connection = new SqlConnection();
+        var request = new TargetSqlBackupRequest("Synthetic]Db", "synthetic.bak", purpose, true, true, 7200);
+        using var command = TargetSqlCommandFactory.CreateBackup(connection, request);
+        Assert.Equal($"BACKUP DATABASE [Synthetic]]Db]\nTO DISK = @backupPath\n{options}", command.CommandText);
+        Assert.Equal(7200, command.CommandTimeout);
+        var parameter = Assert.Single(command.Parameters.Cast<SqlParameter>());
+        Assert.Equal(SqlDbType.NVarChar, parameter.SqlDbType);
+        Assert.Equal(2048, parameter.Size);
+        Assert.Equal("synthetic.bak", parameter.Value);
+        Assert.DoesNotContain("INIT", command.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("FORMAT", command.CommandText, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, false, "WITH DIFFERENTIAL;")]
+    [InlineData(true, false, "WITH DIFFERENTIAL, CHECKSUM;")]
+    [InlineData(false, true, "WITH DIFFERENTIAL, COMPRESSION;")]
+    public void DifferentialAddsOnlyRequestedProtectionOptions(bool checksum, bool compression, string options)
+    {
+        using var connection = new SqlConnection();
+        using var command = TargetSqlCommandFactory.CreateBackup(connection,
+            new("SyntheticDatabase", "synthetic.bak", BackupRunPurpose.PlanDifferential, checksum, compression, 60));
+        Assert.EndsWith(options, command.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("COPY_ONLY", command.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SqlBoundaryRejectsDifferentialCombinedWithCopyOnly()
+    {
+        using var connection = new SqlConnection();
+        Assert.Throws<ArgumentException>(() => TargetSqlCommandFactory.CreateDatabaseBackup(
+            connection, "SyntheticDatabase", "synthetic.bak", BackupType.Differential, true, true, false, 60));
+    }
+
     [Fact]
     public void ProbeCommandsUseOnlySqlServer2008R2MetadataAndCatalogFields()
     {
