@@ -1,7 +1,9 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Domain.Entities;
 using DbBackupManager.Domain.Notifications;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 
@@ -32,6 +34,10 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
 
     public DbSet<BackupPolicy> BackupPolicies => Set<BackupPolicy>();
 
+    public DbSet<BackupPlan> BackupPlans => Set<BackupPlan>();
+
+    public DbSet<BackupPlanVersion> BackupPlanVersions => Set<BackupPlanVersion>();
+
     public DbSet<BackupTask> BackupTasks => Set<BackupTask>();
 
     public DbSet<BackupTaskSnapshot> BackupTaskSnapshots => Set<BackupTaskSnapshot>();
@@ -54,16 +60,55 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
         PrepareEntries();
-        return base.SaveChanges(acceptAllChangesOnSuccess);
+        try
+        {
+            return base.SaveChanges(acceptAllChangesOnSuccess);
+        }
+        catch (DbUpdateException exception) when (IsPlanVersionNumberConflict(exception))
+        {
+            foreach (var entry in ChangeTracker.Entries<BackupPlan>().Where(item => item.State == EntityState.Modified))
+            {
+                if (PlanHasChanged(entry, entry.GetDatabaseValues()))
+                {
+                    throw new DbUpdateConcurrencyException("备份计划已被其他上下文修改，请重新读取后再修改。", exception);
+                }
+            }
+
+            throw;
+        }
     }
 
-    public override Task<int> SaveChangesAsync(
+    public override async Task<int> SaveChangesAsync(
         bool acceptAllChangesOnSuccess,
         CancellationToken cancellationToken = default)
     {
         PrepareEntries();
-        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        try
+        {
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsPlanVersionNumberConflict(exception))
+        {
+            foreach (var entry in ChangeTracker.Entries<BackupPlan>().Where(item => item.State == EntityState.Modified))
+            {
+                if (PlanHasChanged(entry, await entry.GetDatabaseValuesAsync(cancellationToken)))
+                {
+                    throw new DbUpdateConcurrencyException("备份计划已被其他上下文修改，请重新读取后再修改。", exception);
+                }
+            }
+
+            throw;
+        }
     }
+
+    // 循环外键要求先插入新版本，版本号冲突可能早于计划指针的 rowversion 检查发生。
+    private static bool IsPlanVersionNumberConflict(DbUpdateException exception) =>
+        exception.InnerException is SqlException { Number: 2601 or 2627 } sqlException
+        && sqlException.Message.Contains("UX_BackupPlanVersions_PlanId_Number", StringComparison.Ordinal);
+
+    private static bool PlanHasChanged(EntityEntry<BackupPlan> entry, PropertyValues? stored) =>
+        stored is null || !entry.OriginalValues.GetValue<byte[]>(nameof(BackupPlan.RowVersion))
+            .SequenceEqual(stored.GetValue<byte[]>(nameof(BackupPlan.RowVersion)));
 
     private void PrepareEntries()
     {
@@ -86,6 +131,14 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
             if (entry.State is EntityState.Added or EntityState.Modified)
             {
                 entry.Property(x => x.UpdatedAtUtc).CurrentValue = now;
+            }
+        }
+
+        foreach (var entry in ChangeTracker.Entries<BackupPlanVersion>())
+        {
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+            {
+                throw new InvalidOperationException("备份计划版本只能追加，不能修改或删除。");
             }
         }
 

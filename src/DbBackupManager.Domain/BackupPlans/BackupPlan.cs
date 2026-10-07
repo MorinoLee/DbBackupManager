@@ -134,7 +134,13 @@ public sealed class BackupPlan : ConcurrentEntity
 
     public bool IsPaused { get; private set; }
 
-    public Guid CurrentVersionId { get; private set; }
+    private Guid? _currentVersionId;
+
+    public Guid CurrentVersionId
+    {
+        get => _currentVersionId ?? throw new InvalidOperationException("当前版本尚未在事务内补齐。");
+        private set => _currentVersionId = value == Guid.Empty ? null : value;
+    }
 
     public BackupPlanVersion CurrentVersion => _versions.Single(version => version.Id == CurrentVersionId);
 
