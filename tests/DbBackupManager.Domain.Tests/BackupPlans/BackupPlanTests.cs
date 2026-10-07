@@ -22,7 +22,7 @@ public sealed class BackupPlanTests
         Assert.IsNotType<List<BackupPlanVersion>>(history);
         Assert.Throws<InvalidCastException>(() => (List<BackupPlanVersion>)history);
 
-        plan.Revise(SecondVersionId, FullDefinition(recoveryWindowDays: 30), CreatedAt.AddHours(1));
+        plan.Revise(SecondVersionId, FullDefinition(localRecoveryWindowDays: 30), CreatedAt.AddHours(1));
 
         Assert.Same(history, plan.Versions);
         Assert.Equal(2, history.Count);
@@ -104,16 +104,17 @@ public sealed class BackupPlanTests
         var original = plan.CurrentVersion;
         var revisedAt = CreatedAt.AddHours(2);
 
-        var created = plan.Revise(SecondVersionId, FullDefinition(recoveryWindowDays: 30), revisedAt);
+        var created = plan.Revise(SecondVersionId, FullDefinition(localRecoveryWindowDays: 30), revisedAt);
 
         Assert.True(created);
         Assert.Equal(BackupPlanMode.Full, original.Mode);
-        Assert.Equal(14, original.RecoveryWindowDays);
+        Assert.Equal(14, original.LocalRecoveryWindowDays);
+        Assert.Null(original.RemoteRecoveryWindowDays);
         Assert.Equal(CreatedAt, original.EffectiveFromUtc);
         Assert.Equal(1, original.Number);
         Assert.Equal(SecondVersionId, plan.CurrentVersionId);
         Assert.Equal(2, plan.CurrentVersion.Number);
-        Assert.Equal(30, plan.CurrentVersion.RecoveryWindowDays);
+        Assert.Equal(30, plan.CurrentVersion.LocalRecoveryWindowDays);
         Assert.Equal(revisedAt, plan.SupersededAtUtc(FirstVersionId));
         Assert.Null(plan.SupersededAtUtc(SecondVersionId));
     }
@@ -135,7 +136,7 @@ public sealed class BackupPlanTests
     {
         var plan = CreatePlan();
 
-        Assert.Throws<ArgumentException>(() => plan.Revise(SecondVersionId, FullDefinition(recoveryWindowDays: 30), CreatedAt));
+        Assert.Throws<ArgumentException>(() => plan.Revise(SecondVersionId, FullDefinition(localRecoveryWindowDays: 30), CreatedAt));
         Assert.Equal(FirstVersionId, plan.CurrentVersionId);
     }
 
@@ -145,7 +146,7 @@ public sealed class BackupPlanTests
         var plan = CreatePlan();
         var secondAt = CreatedAt.AddHours(1);
         var thirdAt = CreatedAt.AddHours(3);
-        plan.Revise(SecondVersionId, FullDefinition(recoveryWindowDays: 21), secondAt);
+        plan.Revise(SecondVersionId, FullDefinition(localRecoveryWindowDays: 21), secondAt);
         plan.Revise(ThirdVersionId, ChainDefinition(), thirdAt);
 
         Assert.Equal(secondAt, plan.SupersededAtUtc(FirstVersionId));
@@ -159,7 +160,7 @@ public sealed class BackupPlanTests
     public void FullPlanRejectsDifferentialAndLogSchedules()
     {
         Assert.Throws<ArgumentException>(() => FullDefinition(differential: WeekdayDifferential()));
-        Assert.Throws<ArgumentException>(() => FullDefinition(log: new LogBackupSchedule(15)));
+        Assert.Throws<ArgumentException>(() => FullDefinition(log: new LogBackupInterval(15)));
     }
 
     [Fact]
@@ -169,11 +170,12 @@ public sealed class BackupPlanTests
             BackupPlanMode.FullAndDifferential,
             NightlyFull(),
             differentialSchedule: null,
-            logSchedule: null,
+            logInterval: null,
             "UTC",
             BackupStorageMode.LocalOnly,
             storageTargetId: null,
-            recoveryWindowDays: 14,
+            localRecoveryWindowDays: 14,
+            remoteRecoveryWindowDays: null,
             useChecksum: true,
             useCompression: false,
             backupTimeoutMinutes: 120,
@@ -185,6 +187,147 @@ public sealed class BackupPlanTests
     public void LocalPlanRejectsARemoteTarget()
     {
         Assert.Throws<ArgumentException>(() => FullDefinition(storageTargetId: Guid.NewGuid()));
+    }
+
+    [Theory]
+    [InlineData(BackupStorageMode.LocalOnly, 14, null, false)]
+    [InlineData(BackupStorageMode.LocalAndRemote, 14, 30, true)]
+    [InlineData(BackupStorageMode.RemoteOnly, null, 30, true)]
+    public void StorageModeAcceptsMatchingRecoveryWindows(
+        BackupStorageMode storageMode,
+        int? localWindow,
+        int? remoteWindow,
+        bool requiresTarget)
+    {
+        var definition = Definition(storageMode, localWindow, remoteWindow, requiresTarget ? Guid.NewGuid() : null);
+
+        Assert.Equal(localWindow, definition.LocalRecoveryWindowDays);
+        Assert.Equal(remoteWindow, definition.RemoteRecoveryWindowDays);
+    }
+
+    [Theory]
+    [InlineData(BackupStorageMode.LocalOnly, null, null, false)]
+    [InlineData(BackupStorageMode.LocalOnly, 0, null, false)]
+    [InlineData(BackupStorageMode.LocalOnly, 36501, null, false)]
+    [InlineData(BackupStorageMode.LocalOnly, 14, 7, false)]
+    [InlineData(BackupStorageMode.LocalAndRemote, 14, null, true)]
+    [InlineData(BackupStorageMode.LocalAndRemote, null, 14, true)]
+    [InlineData(BackupStorageMode.LocalAndRemote, 14, 14, false)]
+    [InlineData(BackupStorageMode.RemoteOnly, 14, 14, true)]
+    [InlineData(BackupStorageMode.RemoteOnly, null, null, true)]
+    public void StorageModeRejectsMismatchedRecoveryWindows(
+        BackupStorageMode storageMode,
+        int? localWindow,
+        int? remoteWindow,
+        bool requiresTarget)
+    {
+        Assert.ThrowsAny<ArgumentException>(() =>
+            Definition(storageMode, localWindow, remoteWindow, requiresTarget ? Guid.NewGuid() : null));
+    }
+
+    [Fact]
+    public void UnchangedLogIntervalKeepsTheAnchorWhenStorageOrTimeoutChanges()
+    {
+        var plan = BackupPlan.Create(
+            PlanId,
+            DatabaseId,
+            "日志",
+            FirstVersionId,
+            ChainDefinition(),
+            CreatedAt);
+        var originalAnchor = plan.CurrentVersion.LogSchedule!.Value.AnchorUtc;
+        var revisedAt = CreatedAt.AddHours(3);
+
+        var created = plan.Revise(
+            SecondVersionId,
+            new BackupPlanDefinition(
+                BackupPlanMode.FullAndDifferentialAndLog,
+                ChainDefinition().FullSchedule,
+                ChainDefinition().DifferentialSchedule,
+                new LogBackupInterval(15),
+                "UTC",
+                BackupStorageMode.LocalOnly,
+                storageTargetId: null,
+                localRecoveryWindowDays: 14,
+                remoteRecoveryWindowDays: null,
+                useChecksum: true,
+                useCompression: true,
+                backupTimeoutMinutes: 90,
+                verifyTimeoutMinutes: 60,
+                transferTimeoutMinutes: 60),
+            revisedAt);
+
+        Assert.True(created);
+        Assert.Equal(CreatedAt, originalAnchor);
+        Assert.Equal(CreatedAt, plan.Versions.Single(version => version.Id == FirstVersionId).LogSchedule!.Value.AnchorUtc);
+        Assert.Equal(CreatedAt, plan.CurrentVersion.LogSchedule!.Value.AnchorUtc);
+        Assert.Equal(90, plan.CurrentVersion.BackupTimeoutMinutes);
+        Assert.Equal(revisedAt, plan.CurrentVersion.EffectiveFromUtc);
+    }
+
+    [Fact]
+    public void ChangedLogIntervalResetsTheAnchorToTheNewEffectiveTime()
+    {
+        var plan = BackupPlan.Create(
+            PlanId,
+            DatabaseId,
+            "日志",
+            FirstVersionId,
+            ChainDefinition(),
+            CreatedAt);
+        var revisedAt = CreatedAt.AddHours(3);
+
+        plan.Revise(
+            SecondVersionId,
+            new BackupPlanDefinition(
+                BackupPlanMode.FullAndDifferentialAndLog,
+                ChainDefinition().FullSchedule,
+                ChainDefinition().DifferentialSchedule,
+                new LogBackupInterval(30),
+                "UTC",
+                BackupStorageMode.LocalOnly,
+                storageTargetId: null,
+                localRecoveryWindowDays: 14,
+                remoteRecoveryWindowDays: null,
+                useChecksum: true,
+                useCompression: true,
+                backupTimeoutMinutes: 120,
+                verifyTimeoutMinutes: 60,
+                transferTimeoutMinutes: 60),
+            revisedAt);
+
+        Assert.Equal(CreatedAt, plan.Versions.Single(version => version.Id == FirstVersionId).LogSchedule!.Value.AnchorUtc);
+        Assert.Equal(revisedAt, plan.CurrentVersion.LogSchedule!.Value.AnchorUtc);
+        Assert.Equal(30, plan.CurrentVersion.LogSchedule.Value.IntervalMinutes);
+    }
+
+    [Fact]
+    public void LogAnchorMustBeUtc()
+    {
+        Assert.Throws<ArgumentException>(() => new LogBackupSchedule(15, new DateTimeOffset(2026, 10, 6, 10, 0, 0, TimeSpan.FromHours(8))));
+    }
+
+    private static BackupPlanDefinition Definition(
+        BackupStorageMode storageMode,
+        int? localWindow,
+        int? remoteWindow,
+        Guid? storageTargetId)
+    {
+        return new BackupPlanDefinition(
+            BackupPlanMode.Full,
+            NightlyFull(),
+            differentialSchedule: null,
+            logInterval: null,
+            "UTC",
+            storageMode,
+            storageTargetId,
+            localWindow,
+            remoteWindow,
+            useChecksum: true,
+            useCompression: false,
+            backupTimeoutMinutes: 120,
+            verifyTimeoutMinutes: 60,
+            transferTimeoutMinutes: 60);
     }
 
     private static BackupPlan CreatePlan(
@@ -202,9 +345,9 @@ public sealed class BackupPlanTests
     }
 
     private static BackupPlanDefinition FullDefinition(
-        int recoveryWindowDays = 14,
+        int localRecoveryWindowDays = 14,
         RecurringBackupSchedule? differential = null,
-        LogBackupSchedule? log = null,
+        LogBackupInterval? log = null,
         Guid? storageTargetId = null)
     {
         return new BackupPlanDefinition(
@@ -215,7 +358,8 @@ public sealed class BackupPlanTests
             "UTC",
             BackupStorageMode.LocalOnly,
             storageTargetId,
-            recoveryWindowDays,
+            localRecoveryWindowDays,
+            remoteRecoveryWindowDays: null,
             useChecksum: true,
             useCompression: false,
             backupTimeoutMinutes: 120,
@@ -229,11 +373,12 @@ public sealed class BackupPlanTests
             BackupPlanMode.FullAndDifferentialAndLog,
             new RecurringBackupSchedule(BackupScheduleType.Weekly, new TimeOnly(2, 0), BackupWeekdays.Sunday),
             WeekdayDifferential(),
-            new LogBackupSchedule(15),
+            new LogBackupInterval(15),
             "UTC",
             BackupStorageMode.LocalOnly,
             storageTargetId: null,
-            recoveryWindowDays: 14,
+            localRecoveryWindowDays: 14,
+            remoteRecoveryWindowDays: null,
             useChecksum: true,
             useCompression: true,
             backupTimeoutMinutes: 120,

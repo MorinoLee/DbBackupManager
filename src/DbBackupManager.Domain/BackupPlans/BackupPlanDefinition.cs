@@ -48,9 +48,9 @@ public readonly record struct RecurringBackupSchedule
     }
 }
 
-public readonly record struct LogBackupSchedule
+public readonly record struct LogBackupInterval
 {
-    public LogBackupSchedule(int intervalMinutes)
+    public LogBackupInterval(int intervalMinutes)
     {
         IntervalMinutes = intervalMinutes;
         Validate();
@@ -64,17 +64,38 @@ public readonly record struct LogBackupSchedule
     }
 }
 
+public readonly record struct LogBackupSchedule
+{
+    public LogBackupSchedule(int intervalMinutes, DateTimeOffset anchorUtc)
+    {
+        IntervalMinutes = intervalMinutes;
+        AnchorUtc = anchorUtc;
+        Validate();
+    }
+
+    public int IntervalMinutes { get; }
+
+    public DateTimeOffset AnchorUtc { get; }
+
+    public void Validate()
+    {
+        ConfigurationValues.RequirePositive(IntervalMinutes, 1_440, nameof(IntervalMinutes));
+        ConfigurationValues.RequireUtc(AnchorUtc, nameof(AnchorUtc));
+    }
+}
+
 public sealed record BackupPlanDefinition
 {
     public BackupPlanDefinition(
         BackupPlanMode mode,
         RecurringBackupSchedule fullSchedule,
         RecurringBackupSchedule? differentialSchedule,
-        LogBackupSchedule? logSchedule,
+        LogBackupInterval? logInterval,
         string timeZoneId,
         BackupStorageMode storageMode,
         Guid? storageTargetId,
-        int recoveryWindowDays,
+        int? localRecoveryWindowDays,
+        int? remoteRecoveryWindowDays,
         bool useChecksum,
         bool useCompression,
         int backupTimeoutMinutes,
@@ -84,40 +105,21 @@ public sealed record BackupPlanDefinition
         ConfigurationValues.RequireDefined(mode, nameof(mode));
         fullSchedule.Validate();
         differentialSchedule?.Validate();
-        logSchedule?.Validate();
+        logInterval?.Validate();
         RequireSchedule(mode, BackupType.Differential, differentialSchedule.HasValue, "差异备份");
-        RequireSchedule(mode, BackupType.Log, logSchedule.HasValue, "日志备份");
+        RequireSchedule(mode, BackupType.Log, logInterval.HasValue, "日志备份");
         ConfigurationValues.RequireDefined(storageMode, nameof(storageMode));
-        if (recoveryWindowDays is < 1 or > 36_500)
-        {
-            throw new ArgumentOutOfRangeException(nameof(recoveryWindowDays), "恢复窗口必须介于 1 与 36500 天之间。");
-        }
-
-        switch (storageMode)
-        {
-            case BackupStorageMode.LocalOnly:
-                if (storageTargetId is not null)
-                {
-                    throw new ArgumentException("仅本地模式不能配置远程存储目标。", nameof(storageTargetId));
-                }
-
-                break;
-            case BackupStorageMode.LocalAndRemote:
-            case BackupStorageMode.RemoteOnly:
-                ConfigurationValues.RequireId(storageTargetId ?? Guid.Empty, nameof(storageTargetId));
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(storageMode), storageMode, "枚举值无效。");
-        }
+        ValidateWindows(storageMode, storageTargetId, localRecoveryWindowDays, remoteRecoveryWindowDays);
 
         Mode = mode;
         FullSchedule = fullSchedule;
         DifferentialSchedule = differentialSchedule;
-        LogSchedule = logSchedule;
+        LogInterval = logInterval;
         TimeZoneId = ConfigurationValues.RequireTimeZoneId(timeZoneId, nameof(timeZoneId));
         StorageMode = storageMode;
         StorageTargetId = storageTargetId;
-        RecoveryWindowDays = recoveryWindowDays;
+        LocalRecoveryWindowDays = localRecoveryWindowDays;
+        RemoteRecoveryWindowDays = remoteRecoveryWindowDays;
         UseChecksum = useChecksum;
         UseCompression = useCompression;
         BackupTimeoutMinutes = ConfigurationValues.RequirePositive(backupTimeoutMinutes, 1_440, nameof(backupTimeoutMinutes));
@@ -131,7 +133,7 @@ public sealed record BackupPlanDefinition
 
     public RecurringBackupSchedule? DifferentialSchedule { get; }
 
-    public LogBackupSchedule? LogSchedule { get; }
+    public LogBackupInterval? LogInterval { get; }
 
     public string TimeZoneId { get; }
 
@@ -139,7 +141,9 @@ public sealed record BackupPlanDefinition
 
     public Guid? StorageTargetId { get; }
 
-    public int RecoveryWindowDays { get; }
+    public int? LocalRecoveryWindowDays { get; }
+
+    public int? RemoteRecoveryWindowDays { get; }
 
     public bool UseChecksum { get; }
 
@@ -161,6 +165,49 @@ public sealed record BackupPlanDefinition
 
         throw new ArgumentException(
             expected ? $"该计划模式必须配置{label}时间。" : $"该计划模式不能配置{label}时间。",
-            backupType == BackupType.Differential ? nameof(DifferentialSchedule) : nameof(LogSchedule));
+            backupType == BackupType.Differential ? nameof(DifferentialSchedule) : nameof(LogInterval));
+    }
+
+    private static void ValidateWindows(
+        BackupStorageMode storageMode,
+        Guid? storageTargetId,
+        int? localRecoveryWindowDays,
+        int? remoteRecoveryWindowDays)
+    {
+        static void RequireWindow(int? value, string parameterName)
+        {
+            if (value is null || value is < 1 or > 36_500)
+            {
+                throw new ArgumentOutOfRangeException(parameterName, "恢复窗口必须介于 1 与 36500 天之间。");
+            }
+        }
+
+        switch (storageMode)
+        {
+            case BackupStorageMode.LocalOnly:
+                if (storageTargetId is not null || remoteRecoveryWindowDays is not null)
+                {
+                    throw new ArgumentException("仅本地模式不能配置远程存储目标或远端恢复窗口。", nameof(storageMode));
+                }
+
+                RequireWindow(localRecoveryWindowDays, nameof(localRecoveryWindowDays));
+                break;
+            case BackupStorageMode.LocalAndRemote:
+                ConfigurationValues.RequireId(storageTargetId ?? Guid.Empty, nameof(storageTargetId));
+                RequireWindow(localRecoveryWindowDays, nameof(localRecoveryWindowDays));
+                RequireWindow(remoteRecoveryWindowDays, nameof(remoteRecoveryWindowDays));
+                break;
+            case BackupStorageMode.RemoteOnly:
+                ConfigurationValues.RequireId(storageTargetId ?? Guid.Empty, nameof(storageTargetId));
+                if (localRecoveryWindowDays is not null)
+                {
+                    throw new ArgumentException("仅远程模式不能配置本地恢复窗口。", nameof(localRecoveryWindowDays));
+                }
+
+                RequireWindow(remoteRecoveryWindowDays, nameof(remoteRecoveryWindowDays));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(storageMode), storageMode, "枚举值无效。");
+        }
     }
 }

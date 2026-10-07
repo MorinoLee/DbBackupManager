@@ -15,6 +15,7 @@ public sealed class BackupPlanVersion : ConcurrentEntity
         Guid planId,
         int number,
         BackupPlanDefinition definition,
+        LogBackupSchedule? logSchedule,
         DateTimeOffset effectiveFromUtc)
         : base(id)
     {
@@ -29,11 +30,12 @@ public sealed class BackupPlanVersion : ConcurrentEntity
         Mode = definition.Mode;
         FullSchedule = definition.FullSchedule;
         DifferentialSchedule = definition.DifferentialSchedule;
-        LogSchedule = definition.LogSchedule;
+        LogSchedule = logSchedule;
         TimeZoneId = definition.TimeZoneId;
         StorageMode = definition.StorageMode;
         StorageTargetId = definition.StorageTargetId;
-        RecoveryWindowDays = definition.RecoveryWindowDays;
+        LocalRecoveryWindowDays = definition.LocalRecoveryWindowDays;
+        RemoteRecoveryWindowDays = definition.RemoteRecoveryWindowDays;
         UseChecksum = definition.UseChecksum;
         UseCompression = definition.UseCompression;
         BackupTimeoutMinutes = definition.BackupTimeoutMinutes;
@@ -60,7 +62,9 @@ public sealed class BackupPlanVersion : ConcurrentEntity
 
     public Guid? StorageTargetId { get; private set; }
 
-    public int RecoveryWindowDays { get; private set; }
+    public int? LocalRecoveryWindowDays { get; private set; }
+
+    public int? RemoteRecoveryWindowDays { get; private set; }
 
     public bool UseChecksum { get; private set; }
 
@@ -80,16 +84,27 @@ public sealed class BackupPlanVersion : ConcurrentEntity
         return Mode == definition.Mode
             && FullSchedule.Equals(definition.FullSchedule)
             && Nullable.Equals(DifferentialSchedule, definition.DifferentialSchedule)
-            && Nullable.Equals(LogSchedule, definition.LogSchedule)
+            && LogIntervalsMatch(LogSchedule, definition.LogInterval)
             && string.Equals(TimeZoneId, definition.TimeZoneId, StringComparison.Ordinal)
             && StorageMode == definition.StorageMode
             && StorageTargetId == definition.StorageTargetId
-            && RecoveryWindowDays == definition.RecoveryWindowDays
+            && LocalRecoveryWindowDays == definition.LocalRecoveryWindowDays
+            && RemoteRecoveryWindowDays == definition.RemoteRecoveryWindowDays
             && UseChecksum == definition.UseChecksum
             && UseCompression == definition.UseCompression
             && BackupTimeoutMinutes == definition.BackupTimeoutMinutes
             && VerifyTimeoutMinutes == definition.VerifyTimeoutMinutes
             && TransferTimeoutMinutes == definition.TransferTimeoutMinutes;
+    }
+
+    private static bool LogIntervalsMatch(LogBackupSchedule? current, LogBackupInterval? requested)
+    {
+        if (current is null || requested is null)
+        {
+            return current is null && requested is null;
+        }
+
+        return current.Value.IntervalMinutes == requested.Value.IntervalMinutes;
     }
 }
 
@@ -134,13 +149,15 @@ public sealed class BackupPlan : ConcurrentEntity
         DateTimeOffset nowUtc)
     {
         ArgumentNullException.ThrowIfNull(definition);
+        var effectiveFromUtc = ConfigurationValues.RequireUtc(nowUtc, nameof(nowUtc));
         var plan = new BackupPlan(id, databaseId, name);
         var version = new BackupPlanVersion(
             initialVersionId,
             id,
             number: 1,
             definition,
-            ConfigurationValues.RequireUtc(nowUtc, nameof(nowUtc)));
+            ResolveLogSchedule(definition, previous: null, effectiveFromUtc),
+            effectiveFromUtc);
         plan._versions.Add(version);
         plan.CurrentVersionId = version.Id;
         return plan;
@@ -183,7 +200,13 @@ public sealed class BackupPlan : ConcurrentEntity
             throw new ArgumentException("计划版本标识已存在。", nameof(versionId));
         }
 
-        var version = new BackupPlanVersion(versionId, Id, _versions.Count + 1, definition, effectiveFromUtc);
+        var version = new BackupPlanVersion(
+            versionId,
+            Id,
+            _versions.Count + 1,
+            definition,
+            ResolveLogSchedule(definition, CurrentVersion, effectiveFromUtc),
+            effectiveFromUtc);
         _versions.Add(version);
         CurrentVersionId = version.Id;
         return true;
@@ -199,6 +222,25 @@ public sealed class BackupPlan : ConcurrentEntity
         }
 
         return index == ordered.Length - 1 ? null : ordered[index + 1].EffectiveFromUtc;
+    }
+
+    private static LogBackupSchedule? ResolveLogSchedule(
+        BackupPlanDefinition definition,
+        BackupPlanVersion? previous,
+        DateTimeOffset effectiveFromUtc)
+    {
+        if (definition.LogInterval is not { } interval)
+        {
+            return null;
+        }
+
+        if (previous?.LogSchedule is { } previousLog
+            && previousLog.IntervalMinutes == interval.IntervalMinutes)
+        {
+            return previousLog;
+        }
+
+        return new LogBackupSchedule(interval.IntervalMinutes, effectiveFromUtc);
     }
 }
 
