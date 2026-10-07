@@ -1,4 +1,5 @@
 using DbBackupManager.Domain.BackupPlans;
+using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Domain.Entities;
@@ -13,6 +14,10 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
 {
     public DbSet<WorkerHeartbeat> WorkerHeartbeats => Set<WorkerHeartbeat>();
     public DbSet<BackupFile> BackupFiles => Set<BackupFile>();
+
+    public DbSet<BackupSet> BackupSets => Set<BackupSet>();
+
+    public DbSet<BackupSetEvidence> BackupSetEvidence => Set<BackupSetEvidence>();
 
     public DbSet<BackupFileStateChange> BackupFileStateChanges => Set<BackupFileStateChange>();
 
@@ -116,7 +121,7 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
 
         foreach (var entry in ChangeTracker.Entries<ConcurrentEntity>())
         {
-            if (entry.Entity is AdminUser or BackupTask or BackupAttempt or BackupFile
+            if (entry.Entity is AdminUser or BackupTask or BackupAttempt or BackupFile or BackupSet
                     or Domain.Notifications.NotificationOutbox or Domain.Notifications.SmtpSettings
                 && entry.State == EntityState.Deleted)
             {
@@ -141,6 +146,13 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
                 throw new InvalidOperationException("备份计划版本只能追加，不能修改或删除。");
             }
         }
+
+        foreach (var entry in ChangeTracker.Entries<BackupSetEvidence>())
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+                throw new InvalidOperationException("备份集证据只能追加，不能修改或删除。");
+
+        foreach (var entry in ChangeTracker.Entries<BackupSet>().Where(x => x.State == EntityState.Modified))
+            ValidateBackupSetChange(entry);
 
         foreach (var entry in ChangeTracker.Entries<AuditRecord>())
         {
@@ -289,6 +301,7 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
             nameof(BackupFile.TaskId),
             nameof(BackupFile.AttemptId),
             nameof(BackupFile.DatabaseId),
+            nameof(BackupFile.BackupSetId),
             nameof(BackupFile.Location),
             nameof(BackupFile.DatabaseServerId),
             nameof(BackupFile.StorageTargetId),
@@ -340,5 +353,45 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private static void ValidateBackupSetChange(EntityEntry<BackupSet> entry)
+    {
+        foreach (var name in new[] { nameof(BackupSet.TaskId), nameof(BackupSet.AttemptId), nameof(BackupSet.DatabaseId) })
+        {
+            var property = entry.Property(name);
+            if (property.IsModified && !Equals(property.OriginalValue, property.CurrentValue))
+                throw new InvalidOperationException("备份集来源身份不能修改。");
+        }
+        foreach (var field in entry.ComplexProperty(x => x.Metadata).ComplexProperties)
+        {
+            var state = field.Property("State");
+            var value = field.Property("Value");
+            if ((BackupMetadataState)state.OriginalValue! != BackupMetadataState.Unknown
+                && (!Equals(state.OriginalValue, state.CurrentValue) || !Equals(value.OriginalValue, value.CurrentValue)))
+                throw new InvalidOperationException("已确认的备份集事实不能覆盖。");
+        }
+        foreach (var name in new[] { nameof(BackupSet.SqlSuccessObserved), nameof(BackupSet.HasMetadataConflict) })
+            if (entry.Property(name).OriginalValue is true && entry.Property(name).CurrentValue is false)
+                throw new InvalidOperationException("已观察到的 SQL 成功或事实冲突不能静默清除。");
+        var dependency = entry.Property(x => x.BaseBackupSetId);
+        if (dependency.OriginalValue is not null && dependency.OriginalValue != dependency.CurrentValue)
+            throw new InvalidOperationException("已确认的备份集依赖不能覆盖。");
+        var count = entry.Property(x => x.ReconciliationCount);
+        if (count.CurrentValue < count.OriginalValue)
+            throw new InvalidOperationException("备份集核对次数不能倒退。");
+        var completion = entry.ComplexProperty(x => x.Completion);
+        var source = completion.Property(x => x.Source);
+        var time = completion.Property(x => x.CompletedAtUtc);
+        var reason = completion.Property(x => x.ReasonCode);
+        if (source.OriginalValue != BackupCompletionTimeSource.Unknown
+            && !(source.OriginalValue == BackupCompletionTimeSource.SqlLocalTime
+                && source.CurrentValue == BackupCompletionTimeSource.PlatformObserved)
+            && (source.OriginalValue != source.CurrentValue || time.OriginalValue != time.CurrentValue
+                || reason.OriginalValue != reason.CurrentValue))
+            throw new InvalidOperationException("已确认完成时间只能从 SQL 推定提升为平台观察事实。");
+        entry.Entity.Metadata.Validate();
+        entry.Entity.Assessment.Validate();
+        BackupSetCodes.ValidateCompletion(entry.Entity.Completion);
     }
 }

@@ -67,6 +67,15 @@ public sealed class BackupFile : ConcurrentEntity
 
     public Guid DatabaseId { get; private set; }
 
+    public Guid? BackupSetId { get; private set; }
+
+    public void AssociateBackupSet(Guid backupSetId)
+    {
+        if (BackupSetId is not null || RowVersion.Length != 0)
+            throw new InvalidOperationException("备份集关联只能在新副本登记时指定。");
+        BackupSetId = BackupTaskValues.RequireId(backupSetId, nameof(backupSetId));
+    }
+
     public BackupFileLocation Location { get; private set; }
 
     public Guid? DatabaseServerId { get; private set; }

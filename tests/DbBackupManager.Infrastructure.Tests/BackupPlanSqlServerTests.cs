@@ -201,6 +201,10 @@ public sealed class BackupPlanSqlServerTests(PlatformDatabaseSqlServerFixture da
             await migrator.MigrateAsync();
             Assert.Equal(2, await PlanTableCountAsync(context));
             Assert.Equal(migrations, (await context.Database.GetAppliedMigrationsAsync()).ToArray());
+            // 单独验证计划迁移的 Down，先回退后续的空迁移。
+            var planMigration = migrations.Single(item => item.EndsWith("_AddBackupPlans", StringComparison.Ordinal));
+            await migrator.MigrateAsync(planMigration);
+            var planMigrations = (await context.Database.GetAppliedMigrationsAsync()).ToArray();
             var databaseId = await AddManagedDatabaseAsync(temporaryDatabase);
             var plan = CreatePlan(databaseId, BackupPlanMode.Full);
             await Store(temporaryDatabase).AddAsync(plan);
@@ -209,7 +213,7 @@ public sealed class BackupPlanSqlServerTests(PlatformDatabaseSqlServerFixture da
             Assert.Equal(51000, exception.Number);
             Assert.Contains("已写入备份计划", exception.Message, StringComparison.Ordinal);
             Assert.Equal(2, await PlanTableCountAsync(context));
-            Assert.Equal(migrations, (await context.Database.GetAppliedMigrationsAsync()).ToArray());
+            Assert.Equal(planMigrations, (await context.Database.GetAppliedMigrationsAsync()).ToArray());
             var stored = await context.BackupPlans.Include(item => item.Versions).SingleAsync(item => item.Id == plan.Id);
             Assert.Equal(plan.CurrentVersionId, stored.CurrentVersionId);
             Assert.Single(stored.Versions);
