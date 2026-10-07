@@ -171,7 +171,7 @@ public sealed class BackupPlanScheduleTests
     {
         var plan = ChainPlan();
         var revisedAt = Slot(2);
-        plan.Revise(SecondVersionId, ChainDefinition(recoveryWindowDays: 21), revisedAt);
+        plan.Revise(SecondVersionId, ChainDefinition(localRecoveryWindowDays: 21), revisedAt);
 
         Assert.True(BackupPlanSchedule.VersionOwnsSlot(plan, FirstVersionId, revisedAt));
         Assert.False(BackupPlanSchedule.VersionOwnsSlot(plan, SecondVersionId, revisedAt));
@@ -204,11 +204,12 @@ public sealed class BackupPlanScheduleTests
                 BackupPlanMode.Full,
                 new RecurringBackupSchedule(BackupScheduleType.Daily, new TimeOnly(2, 0), BackupWeekdays.None),
                 differentialSchedule: null,
-                logSchedule: null,
+                logInterval: null,
                 "UTC",
                 BackupStorageMode.LocalOnly,
                 storageTargetId: null,
-                recoveryWindowDays: 14,
+                localRecoveryWindowDays: 14,
+                remoteRecoveryWindowDays: null,
                 useChecksum: true,
                 useCompression: false,
                 backupTimeoutMinutes: 120,
@@ -262,7 +263,7 @@ public sealed class BackupPlanScheduleTests
     {
         var plan = ChainPlan();
         var revisedAt = Slot(2);
-        plan.Revise(SecondVersionId, ChainDefinition(recoveryWindowDays: 21), revisedAt);
+        plan.Revise(SecondVersionId, ChainDefinition(localRecoveryWindowDays: 21), revisedAt);
         var earlier = revisedAt.AddMinutes(-30);
         var later = revisedAt.AddHours(2);
         var work = BackupPlanSchedule.SelectDue(
@@ -390,7 +391,7 @@ public sealed class BackupPlanScheduleTests
             EffectiveFrom);
     }
 
-    private static BackupPlanDefinition ChainDefinition(int recoveryWindowDays = 14)
+    private static BackupPlanDefinition ChainDefinition(int localRecoveryWindowDays = 14)
     {
         return new BackupPlanDefinition(
             BackupPlanMode.FullAndDifferential,
@@ -404,11 +405,12 @@ public sealed class BackupPlanScheduleTests
                     | BackupWeekdays.Thursday
                     | BackupWeekdays.Friday
                     | BackupWeekdays.Saturday),
-            logSchedule: null,
+            logInterval: null,
             "UTC",
             BackupStorageMode.LocalOnly,
             storageTargetId: null,
-            recoveryWindowDays,
+            localRecoveryWindowDays,
+            remoteRecoveryWindowDays: null,
             useChecksum: true,
             useCompression: false,
             backupTimeoutMinutes: 120,
