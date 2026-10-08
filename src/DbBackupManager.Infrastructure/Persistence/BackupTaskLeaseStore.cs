@@ -66,12 +66,13 @@ internal sealed class BackupTaskLeaseStore(BackupTaskPersistence persistence)
                     return replayResult;
                 }
 
+                // 计划执行尚未接入；旧 FULL 入口只领取旧策略任务，避免错误执行新用途。
                 var tasks = requiredTaskId is { } exactTaskId
                     ? context.BackupTasks.FromSqlInterpolated(
-                        $"SELECT TOP (1) * FROM [BackupTasks] WITH (UPDLOCK, READPAST, ROWLOCK) WHERE [Id] = {exactTaskId} AND [Status] = 'Pending'")
+                        $"SELECT TOP (1) * FROM [BackupTasks] WITH (UPDLOCK, READPAST, ROWLOCK) WHERE [Id] = {exactTaskId} AND [Status] = 'Pending' AND [PolicyId] IS NOT NULL")
                     : context.BackupTasks.FromSqlRaw(
                         "SELECT TOP (1) * FROM [BackupTasks] WITH (UPDLOCK, READPAST, ROWLOCK) "
-                        + "WHERE [Status] = 'Pending' ORDER BY [CreatedAtUtc], [Id]");
+                        + "WHERE [Status] = 'Pending' AND [PolicyId] IS NOT NULL ORDER BY [CreatedAtUtc], [Id]");
                 var task = await tasks
                     .AsTracking()
                     .SingleOrDefaultAsync(cancellationToken);

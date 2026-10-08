@@ -10,7 +10,7 @@ using Microsoft.EntityFrameworkCore.ChangeTracking;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
-public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> options) : DbContext(options)
+public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext> options) : DbContext(options)
 {
     public DbSet<WorkerHeartbeat> WorkerHeartbeats => Set<WorkerHeartbeat>();
     public DbSet<BackupFile> BackupFiles => Set<BackupFile>();
@@ -117,6 +117,7 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
 
     private void PrepareEntries()
     {
+        PrepareTaskIdentityEntries();
         var now = DateTimeOffset.UtcNow;
 
         foreach (var entry in ChangeTracker.Entries<ConcurrentEntity>())

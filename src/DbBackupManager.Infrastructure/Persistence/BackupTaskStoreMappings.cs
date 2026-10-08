@@ -72,7 +72,9 @@ internal static class BackupTaskStoreMappings
                 snapshot.BackupTimeoutMinutes,
                 snapshot.VerifyTimeoutMinutes,
                 snapshot.TransferTimeoutMinutes,
-                snapshot.TimeZoneId));
+                snapshot.TimeZoneId),
+            snapshot.BackupType,
+            snapshot.Purpose);
     }
 
     public static BackupAttemptModel ToAttemptModel(this BackupAttempt attempt)

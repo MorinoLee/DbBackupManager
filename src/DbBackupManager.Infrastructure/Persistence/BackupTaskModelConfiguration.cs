@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using Microsoft.EntityFrameworkCore;
@@ -11,6 +12,16 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
     {
         builder.ToTable("BackupTasks", table =>
         {
+            table.HasCheckConstraint("CK_BackupTasks_Identity",
+                "([PolicyId] IS NOT NULL AND [PlanId] IS NULL AND [PlanVersionId] IS NULL) OR "
+                + "([PolicyId] IS NULL AND [PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL)");
+            table.HasCheckConstraint("CK_BackupTasks_BackupType",
+                "[BackupType] IS NOT NULL AND [BackupType] IN ('Full', 'Differential', 'Log') "
+                + "AND ([PolicyId] IS NULL OR [BackupType] = 'Full')");
+            table.HasCheckConstraint("CK_BackupTasks_CoveredDifferentialSlot",
+                "[CoveredDifferentialSlotUtc] IS NULL OR ([PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL "
+                + "AND [PolicyId] IS NULL AND [BackupType] IS NOT NULL AND [BackupType] = 'Full' "
+                + "AND DATEPART(TZOFFSET, [CoveredDifferentialSlotUtc]) = 0)");
             table.HasCheckConstraint(
                 "CK_BackupTasks_Trigger",
                 "([TriggerType] = 'Scheduled' AND [ScheduledSlotAtUtc] IS NOT NULL) OR "
@@ -69,6 +80,9 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
                 + "([Status] NOT IN ('Running', 'NeedsAttention') AND [LeasePurpose] IS NULL)");
         });
         builder.ConfigureConcurrency();
+        builder.Property(x => x.BackupType).HasConversion<string>().HasMaxLength(20)
+            .HasDefaultValue(BackupType.Full).HasSentinel(BackupType.Full).IsRequired();
+        builder.Property(x => x.CoveredDifferentialSlotUtc).HasPrecision(7);
         builder.Property(x => x.TriggerType).HasConversion<string>().HasMaxLength(20).IsRequired();
         builder.Property(x => x.ScheduledSlotAtUtc).HasPrecision(7);
         builder.Property(x => x.Status).HasConversion<string>().HasMaxLength(30).IsRequired();
@@ -85,8 +99,13 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
         builder.Property(x => x.LeaseExpiresAtUtc).HasPrecision(7);
         builder.HasIndex(x => new { x.PolicyId, x.ScheduledSlotAtUtc })
             .IsUnique()
-            .HasFilter("[ScheduledSlotAtUtc] IS NOT NULL")
+            .HasFilter("[PolicyId] IS NOT NULL AND [ScheduledSlotAtUtc] IS NOT NULL")
             .HasDatabaseName("UX_BackupTasks_PolicyId_ScheduledSlotAtUtc");
+        builder.HasIndex(x => new { x.PlanId, x.PlanVersionId, x.BackupType, x.ScheduledSlotAtUtc })
+            .IsUnique()
+            .HasFilter("[PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL "
+                + "AND [BackupType] IS NOT NULL AND [ScheduledSlotAtUtc] IS NOT NULL")
+            .HasDatabaseName("UX_BackupTasks_PlanVersion_Type_Slot");
         builder.HasIndex(x => x.LeaseToken)
             .IsUnique()
             .HasFilter("[LeaseToken] IS NOT NULL")
@@ -107,6 +126,11 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
         builder.HasOne<BackupPolicy>()
             .WithMany()
             .HasForeignKey(x => x.PolicyId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<BackupPlanVersion>()
+            .WithMany()
+            .HasForeignKey(x => new { x.PlanId, x.PlanVersionId })
+            .HasPrincipalKey(x => new { x.PlanId, PlanVersionId = x.Id })
             .OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<BackupAttempt>()
             .WithMany()
@@ -162,7 +186,17 @@ internal sealed class BackupTaskSnapshotConfiguration
                 + "AND [RemoteRetentionDays] BETWEEN 1 AND 36500)");
             table.HasCheckConstraint(
                 "CK_BackupTaskSnapshots_BackupType",
-                "[BackupType] = 'Full'");
+                "[BackupType] IS NOT NULL AND [BackupType] IN ('Full', 'Differential', 'Log')");
+            table.HasCheckConstraint("CK_BackupTaskSnapshots_Purpose",
+                "([Purpose] IS NULL AND [BackupType] IS NOT NULL AND [BackupType] = 'Full') OR "
+                + "([Purpose] IS NOT NULL AND [BackupType] IS NOT NULL AND [UseCopyOnly] IS NOT NULL AND "
+                + "(([Purpose] = 'PlanFull' AND [BackupType] = 'Full' AND [UseCopyOnly] = 0) OR "
+                + "([Purpose] = 'PlanDifferential' AND [BackupType] = 'Differential' AND [UseCopyOnly] = 0) OR "
+                + "([Purpose] = 'PlanLog' AND [BackupType] = 'Log' AND [UseCopyOnly] = 0) OR "
+                + "([Purpose] = 'AdHocCopyOnlyFull' AND [BackupType] = 'Full' AND [UseCopyOnly] = 1)))");
+            table.HasCheckConstraint("CK_BackupTaskSnapshots_PlanPathVersion",
+                "[Purpose] IS NULL OR ([Purpose] IS NOT NULL AND [FileNameRuleVersion] IS NOT NULL "
+                + "AND [FileNameRuleVersion] = 'v3')");
             table.HasCheckConstraint(
                 "CK_BackupTaskSnapshots_Timeouts",
                 "[ConnectionTimeoutSeconds] BETWEEN 1 AND 300 "
@@ -180,6 +214,7 @@ internal sealed class BackupTaskSnapshotConfiguration
         builder.Property(x => x.AllowLegacyTls).IsRequired();
         builder.Property(x => x.LegacyTlsReason).HasMaxLength(500);
         builder.Property(x => x.BackupType).HasConversion<string>().HasMaxLength(20).IsRequired();
+        builder.Property(x => x.Purpose).HasConversion<string>().HasMaxLength(30);
         builder.Property(x => x.LocalSqlBackupRootPath).HasMaxLength(2048).IsRequired();
         builder.Property(x => x.FileNameRuleVersion).HasMaxLength(50).IsRequired();
         builder.Property(x => x.SourceAccessProtocol)
