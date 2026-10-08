@@ -43,7 +43,7 @@ public static class DifferentialBaselineRules
             return Mismatch(DifferentialBaselineReason.DatabaseBackupLsnMismatch);
         }
 
-        return ResolveFull(actual, managedFulls, externalFull);
+        return ResolveFull(actual.BaseBackupSetGuid, managedFulls, externalFull, full => FullProblem(actual, full));
     }
 
     public static DifferentialBaselineDecision EvaluateActiveBaseline(
@@ -54,27 +54,44 @@ public static class DifferentialBaselineRules
     {
         ArgumentNullException.ThrowIfNull(active);
         ArgumentNullException.ThrowIfNull(expectedDatabase);
-        ArgumentNullException.ThrowIfNull(managedFulls);
-        if (active.DataFileBases.Count == 0)
-        {
-            return Unknown(DifferentialBaselineReason.MissingFields);
-        }
-
+        ValidateCandidates(managedFulls, externalFull);
         foreach (var fileBase in active.DataFileBases)
         {
-            ValidateInputs(expectedDatabase, fileBase, managedFulls, externalFull);
+            ArgumentNullException.ThrowIfNull(fileBase);
         }
 
-        if (active.DataFileBases.Any(fileBase => fileBase.Status == BaselineEvidenceStatus.SourceConflict))
+        if (active.Status == BaselineEvidenceStatus.SourceConflict
+            || active.DataFileBases.Any(fileBase => fileBase.Status == BaselineEvidenceStatus.SourceConflict))
         {
             return Mismatch(DifferentialBaselineReason.SourceConflict);
         }
 
+        if (EvidenceProblem(active.Status) is { } activeProblem)
+        {
+            return activeProblem;
+        }
+
+        if (active.DataFileBases.Count == 0 || !CompleteIdentity(expectedDatabase)
+            || !CompleteIdentity(active.Database) || !KnownGuid(active.CurrentRecoveryForkId))
+        {
+            return Unknown(DifferentialBaselineReason.MissingFields);
+        }
+
+        if (expectedDatabase != active.Database)
+        {
+            return Mismatch(DifferentialBaselineReason.DatabaseIdentityMismatch);
+        }
+
         foreach (var fileBase in active.DataFileBases)
         {
-            if ((EvidenceProblem(fileBase.Status) ?? ReferenceProblem(expectedDatabase, fileBase)) is { } problem)
+            if (EvidenceProblem(fileBase.Status) is { } problem)
             {
                 return problem;
+            }
+
+            if (!KnownGuid(fileBase.BaseBackupSetGuid) || fileBase.BaseLsn is null)
+            {
+                return Unknown(DifferentialBaselineReason.MissingFields);
             }
         }
 
@@ -85,12 +102,8 @@ public static class DifferentialBaselineRules
             return Unknown(DifferentialBaselineReason.MultipleBases);
         }
 
-        if (active.DataFileBases.Any(fileBase => fileBase.Branch != current.Branch))
-        {
-            return Mismatch(DifferentialBaselineReason.RecoveryBranchMismatch);
-        }
-
-        return ResolveFull(current, managedFulls, externalFull);
+        return ResolveFull(current.BaseBackupSetGuid, managedFulls, externalFull,
+            full => ActiveFullProblem(active, current, full));
     }
 
     private static DifferentialBaselineDecision? ReferenceProblem(
@@ -114,18 +127,19 @@ public static class DifferentialBaselineRules
     }
 
     private static DifferentialBaselineDecision ResolveFull(
-        DifferentialBaseEvidence actual,
+        Guid? baseBackupSetGuid,
         IReadOnlyList<ManagedFullBackupCandidate> managedFulls,
-        FullBackupBaselineEvidence? external)
+        FullBackupBaselineEvidence? external,
+        Func<FullBackupBaselineEvidence, DifferentialBaselineDecision?> fullProblem)
     {
         // 外部历史也是证据：同一 GUID 的矛盾不能被已登记的受管 FULL 掩盖。
-        if (external is not null && external.BackupSetGuid == actual.BaseBackupSetGuid
-            && FullProblem(actual, external) is { } externalProblem)
+        if (external is not null && external.BackupSetGuid == baseBackupSetGuid
+            && fullProblem(external) is { } externalProblem)
         {
             return externalProblem;
         }
 
-        var matches = managedFulls.Where(full => full.Evidence.BackupSetGuid == actual.BaseBackupSetGuid).ToArray();
+        var matches = managedFulls.Where(full => full.Evidence.BackupSetGuid == baseBackupSetGuid).ToArray();
         if (matches.Length > 1)
         {
             return Mismatch(DifferentialBaselineReason.DuplicateManagedGuid);
@@ -134,14 +148,14 @@ public static class DifferentialBaselineRules
         if (matches.Length == 1)
         {
             var full = matches[0];
-            return FullProblem(actual, full.Evidence)
+            return fullProblem(full.Evidence)
                 ?? new DifferentialBaselineDecision(
                     DifferentialBaselineConclusion.Verified,
                     DifferentialBaselineReason.ManagedFullVerified,
                     full.BackupSetId);
         }
 
-        if (external is not null && external.BackupSetGuid == actual.BaseBackupSetGuid)
+        if (external is not null && external.BackupSetGuid == baseBackupSetGuid)
         {
             return new DifferentialBaselineDecision(
                 DifferentialBaselineConclusion.Unmanaged,
@@ -156,6 +170,54 @@ public static class DifferentialBaselineRules
     private static DifferentialBaselineDecision? FullProblem(
         DifferentialBaseEvidence actual,
         FullBackupBaselineEvidence full)
+    {
+        if (FullEvidenceProblem(full) is { } problem)
+        {
+            return problem;
+        }
+
+        if (actual.Database != full.Database)
+        {
+            return Mismatch(DifferentialBaselineReason.DatabaseIdentityMismatch);
+        }
+
+        if (actual.Branch != full.Branch)
+        {
+            return Mismatch(DifferentialBaselineReason.RecoveryBranchMismatch);
+        }
+
+        return actual.BaseLsn != full.CheckpointLsn
+            ? Mismatch(DifferentialBaselineReason.LsnMismatch)
+            : null;
+    }
+
+    private static DifferentialBaselineDecision? ActiveFullProblem(
+        ActiveDifferentialBaselineEvidence active,
+        ActiveDataFileBaselineEvidence fileBase,
+        FullBackupBaselineEvidence full)
+    {
+        if (FullEvidenceProblem(full) is { } problem)
+        {
+            return problem;
+        }
+
+        if (active.Database != full.Database)
+        {
+            return Mismatch(DifferentialBaselineReason.DatabaseIdentityMismatch);
+        }
+
+        if (full.Branch.FirstRecoveryForkId != full.Branch.RecoveryForkId
+            || full.Branch.RecoveryForkId != active.CurrentRecoveryForkId)
+        {
+            return Mismatch(DifferentialBaselineReason.RecoveryBranchMismatch);
+        }
+
+        return fileBase.BaseLsn != full.CheckpointLsn
+            ? Mismatch(DifferentialBaselineReason.LsnMismatch)
+            : null;
+    }
+
+    private static DifferentialBaselineDecision? FullEvidenceProblem(FullBackupBaselineEvidence full)
     {
         if (EvidenceProblem(full.Status) is { } problem)
         {
@@ -178,19 +240,7 @@ public static class DifferentialBaselineRules
             return Unknown(DifferentialBaselineReason.MissingFields);
         }
 
-        if (actual.Database != full.Database)
-        {
-            return Mismatch(DifferentialBaselineReason.DatabaseIdentityMismatch);
-        }
-
-        if (actual.Branch != full.Branch)
-        {
-            return Mismatch(DifferentialBaselineReason.RecoveryBranchMismatch);
-        }
-
-        return actual.BaseLsn != full.CheckpointLsn
-            ? Mismatch(DifferentialBaselineReason.LsnMismatch)
-            : null;
+        return null;
     }
 
     private static DifferentialBaselineDecision? EvidenceProblem(BaselineEvidenceStatus status) => status switch
@@ -214,6 +264,13 @@ public static class DifferentialBaselineRules
         ArgumentNullException.ThrowIfNull(actual);
         ArgumentNullException.ThrowIfNull(actual.Database);
         ArgumentNullException.ThrowIfNull(actual.Branch);
+        ValidateCandidates(managedFulls, external);
+    }
+
+    private static void ValidateCandidates(
+        IReadOnlyList<ManagedFullBackupCandidate> managedFulls,
+        FullBackupBaselineEvidence? external)
+    {
         ArgumentNullException.ThrowIfNull(managedFulls);
         foreach (var full in managedFulls)
         {

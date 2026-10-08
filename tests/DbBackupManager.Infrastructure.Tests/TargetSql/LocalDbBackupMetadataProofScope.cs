@@ -146,14 +146,30 @@ internal sealed class LocalDbBackupMetadataProofScope(ITestOutputHelper output) 
             """, Connection);
         await using var reader = await command.ExecuteReaderAsync();
         var dataFiles = new List<ProofDataFile>();
+        BackupDatabaseIdentity? database = null;
+        Guid? currentRecoveryForkId = null;
+        Guid? diagnosticFirstRecoveryForkId = null;
         while (await reader.ReadAsync())
         {
+            var rowDatabase = new BackupDatabaseIdentity(GuidValue(reader, "database_guid"), GuidValue(reader, "family_guid"));
+            var rowCurrentFork = GuidValue(reader, "recovery_fork_guid");
+            var rowFirstFork = GuidValue(reader, "first_recovery_fork_guid");
+            if (database is null)
+            {
+                database = rowDatabase;
+                currentRecoveryForkId = rowCurrentFork;
+                diagnosticFirstRecoveryForkId = rowFirstFork;
+            }
+            else
+            {
+                Assert.Equal(database, rowDatabase);
+                Assert.Equal(currentRecoveryForkId, rowCurrentFork);
+                Assert.Equal(diagnosticFirstRecoveryForkId, rowFirstFork);
+            }
+
             var file = new ProofDataFile(
                 reader.GetInt32(reader.GetOrdinal("file_id")), GuidValue(reader, "file_guid"),
-                new DifferentialBaseEvidence(
-                    new(GuidValue(reader, "database_guid"), GuidValue(reader, "family_guid")),
-                    new(GuidValue(reader, "first_recovery_fork_guid"), GuidValue(reader, "recovery_fork_guid")),
-                    GuidValue(reader, "differential_base_guid"), LsnValue(reader, "differential_base_lsn")),
+                new ActiveDataFileBaselineEvidence(GuidValue(reader, "differential_base_guid"), LsnValue(reader, "differential_base_lsn")),
                 LocalTimeValue(reader, "differential_base_time"));
             output.WriteLine("活动数据文件：{0}", file);
             dataFiles.Add(file);
@@ -161,7 +177,11 @@ internal sealed class LocalDbBackupMetadataProofScope(ITestOutputHelper output) 
 
         Assert.Equal(2, dataFiles.Count);
         Assert.All(dataFiles, file => Assert.NotNull(file.FileGuid));
-        return new ProofActiveBaseline(dataFiles);
+        Assert.NotNull(database);
+        // 目录起始分支只诊断，不反填当前分支，也不要求它在所有版本上为 NULL。
+        output.WriteLine("数据库当前状态：{0}; recovery_fork_guid={1}; first_recovery_fork_guid（仅诊断）={2}",
+            database, currentRecoveryForkId, diagnosticFirstRecoveryForkId);
+        return new ProofActiveBaseline(database, currentRecoveryForkId, diagnosticFirstRecoveryForkId, dataFiles);
     }
 
     public async ValueTask DisposeAsync()
@@ -312,9 +332,13 @@ internal sealed record ProofMetadata(
 
 internal sealed record ProofBackup(string Label, string Path, ProofMetadata Header, ProofMetadata History);
 
-internal sealed record ProofDataFile(int FileId, Guid? FileGuid, DifferentialBaseEvidence Evidence, DateTime? BaseTimeRaw);
+internal sealed record ProofDataFile(int FileId, Guid? FileGuid, ActiveDataFileBaselineEvidence Evidence, DateTime? BaseTimeRaw);
 
-internal sealed record ProofActiveBaseline(IReadOnlyList<ProofDataFile> Files)
+internal sealed record ProofActiveBaseline(
+    BackupDatabaseIdentity Database,
+    Guid? CurrentRecoveryForkId,
+    Guid? DiagnosticFirstRecoveryForkId,
+    IReadOnlyList<ProofDataFile> Files)
 {
-    public ActiveDifferentialBaselineEvidence Evidence => new(Files.Select(file => file.Evidence));
+    public ActiveDifferentialBaselineEvidence Evidence => new(Database, CurrentRecoveryForkId, Files.Select(file => file.Evidence));
 }

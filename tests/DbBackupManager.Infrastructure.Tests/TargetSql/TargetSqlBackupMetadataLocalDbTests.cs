@@ -214,14 +214,17 @@ public sealed class TargetSqlBackupMetadataLocalDbTests(ITestOutputHelper output
 
     private void AssertActive(ProofBackup full, ProofActiveBaseline active)
     {
+        Check(() => Assert.Multiple(
+            () => Assert.Equal(full.Header.Database, active.Database),
+            () => Assert.NotNull(active.CurrentRecoveryForkId),
+            () => Assert.Equal(full.Header.Branch.FirstRecoveryForkId, active.CurrentRecoveryForkId),
+            () => Assert.Equal(full.Header.Branch.RecoveryForkId, active.CurrentRecoveryForkId)));
         Check(() => Assert.All(active.Files, file =>
         {
             Assert.NotNull(file.BaseTimeRaw);
             Assert.Multiple(
                 () => Assert.Equal(full.Header.BackupSetGuid, file.Evidence.BaseBackupSetGuid),
-                () => Assert.Equal(full.Header.CheckpointLsn, file.Evidence.BaseLsn),
-                () => Assert.Equal(full.Header.Database, file.Evidence.Database),
-                () => Assert.Equal(full.Header.Branch, file.Evidence.Branch));
+                () => Assert.Equal(full.Header.CheckpointLsn, file.Evidence.BaseLsn));
         }));
         AssertActiveDecision(full, active, DifferentialBaselineConclusion.Verified, DifferentialBaselineReason.ManagedFullVerified);
     }
