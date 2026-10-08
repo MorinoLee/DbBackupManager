@@ -45,6 +45,8 @@ public static class PlatformDatabaseServiceCollectionExtensions
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddScoped<IBackupPlanTaskCreationStore, BackupPlanTaskCreationStore>();
         services.TryAddScoped<BackupPlanTaskCreationService>();
+        services.TryAddScoped<IBackupPlanSchedulingStore, BackupPlanSchedulingStore>();
+        services.TryAddScoped<BackupPlanScheduler>();
         services.TryAddScoped<IBackupSetRegistrationStore, BackupSetRegistrationStore>();
         services.TryAddScoped<BackupSetRegistrationService>();
         services.TryAddScoped<IBackupMetadataReconciliationLookup, BackupMetadataReconciliationLookup>();
