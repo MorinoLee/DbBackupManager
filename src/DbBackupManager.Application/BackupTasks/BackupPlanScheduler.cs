@@ -106,8 +106,9 @@ public static class BackupPlanSlotDispositionRules
             return BackupSlotDisposition.Succeeded;
         if (status == BackupTaskStatus.NeedsAttention) return BackupSlotDisposition.Uncertain;
         if (status == BackupTaskStatus.Pending) return BackupSlotDisposition.Pending;
-        if (status == BackupTaskStatus.Failed && current.SqlStatus == BackupInvocationStatus.ConfirmedFailed
-            && attempts.All(x => x.SqlStatus is BackupInvocationStatus.ConfirmedFailed or BackupInvocationStatus.Prepared))
+        // 后续失败不能抹掉历史成功或矛盾证据；Prepared 也不证明该 Attempt 明确失败。
+        if (status == BackupTaskStatus.Failed && attempts.All(x => x.SqlStatus == BackupInvocationStatus.ConfirmedFailed
+                && !x.ContradictoryEvidence && !x.MetadataPassed && !x.LocalVerified))
             return BackupSlotDisposition.Failed;
         return status is BackupTaskStatus.Pending or BackupTaskStatus.Running
             && current.SqlStatus is BackupInvocationStatus.Prepared or BackupInvocationStatus.Running

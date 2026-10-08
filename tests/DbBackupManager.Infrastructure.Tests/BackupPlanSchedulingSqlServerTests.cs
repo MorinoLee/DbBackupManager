@@ -108,6 +108,60 @@ public sealed class BackupPlanSchedulingSqlServerTests(PlatformDatabaseSqlServer
         Assert.Equal(Now.AddHours(-1), scheduled.Tasks[0].CoveredDifferentialSlotUtc);
     }
 
+    [Theory]
+    [InlineData("contradictory_sql", "failed", BackupSlotDisposition.Uncertain)]
+    [InlineData("metadata_against_failure", "failed", BackupSlotDisposition.Uncertain)]
+    [InlineData("failed", "failed", BackupSlotDisposition.Failed)]
+    [InlineData("contradictory_sql", "remote_failed", BackupSlotDisposition.Succeeded)]
+    public async Task HistoricalAttemptEvidenceSurvivesPersistedRetry(string earlierOutcome, string currentOutcome,
+        BackupSlotDisposition expected)
+    {
+        var plan = await PlanAsync(4, 3);
+        var full = await SeedTask(plan, BackupRunPurpose.PlanFull, Now);
+        await Finish(full.TaskId, earlierOutcome);
+        // 显式准备重试夹具；调度本身不得创建或重试 Attempt。
+        await Finish(full.TaskId, currentOutcome, retry: true);
+        BackupSlotDisposition actual;
+        await using (var db = database.CreateContext())
+        {
+            var task = await db.BackupTasks.SingleAsync(x => x.Id == full.TaskId);
+            var attempts = await db.BackupAttempts.Where(x => x.TaskId == full.TaskId).OrderBy(x => x.AttemptNumber).ToArrayAsync();
+            Assert.Equal(2, attempts.Length);
+            Assert.Equal(attempts[1].Id, task.CurrentBackupAttemptId);
+            var sets = await db.BackupSets.Where(x => x.TaskId == full.TaskId).ToArrayAsync();
+            var evidence = await db.BackupSetEvidence.Where(x => x.TaskId == full.TaskId).ToArrayAsync();
+            if (earlierOutcome == "contradictory_sql")
+                Assert.True(Assert.Single(sets, x => x.AttemptId == attempts[0].Id).SqlSuccessObserved);
+            if (earlierOutcome == "metadata_against_failure")
+                Assert.NotNull(Assert.Single(sets, x => x.AttemptId == attempts[0].Id).Metadata.BackupSetGuid.Value);
+            var facts = attempts.Select(attempt =>
+            {
+                var set = sets.SingleOrDefault(x => x.AttemptId == attempt.Id);
+                return new BackupPlanAttemptFacts(attempt.Id, attempt.BackupInvocationStatus,
+                    BackupPlanSchedulingStore.MetadataPassed(set, evidence.Where(x => x.AttemptId == attempt.Id).ToArray()),
+                    attempt.LocalVerifiedAtUtc is not null,
+                    attempt.BackupInvocationStatus == BackupInvocationStatus.ConfirmedFailed
+                        && set is not null && (set.SqlSuccessObserved || set.Metadata.BackupSetGuid.Value is not null));
+            }).ToArray();
+            actual = BackupPlanSlotDispositionRules.Evaluate(task.Status, task.CurrentBackupAttemptId, facts,
+                currentStage: task.CurrentStage);
+        }
+        var before = await Counts(plan.Id);
+        var createDiff = expected == BackupSlotDisposition.Failed;
+        var result = await Schedule(plan.Id);
+        Assert.Equal(createDiff ? BackupPlanSchedulingCode.Created : BackupPlanSchedulingCode.NoWork, result.Code);
+        Assert.Equal(expected, actual);
+        if (createDiff) Assert.Equal(BackupType.Differential, Assert.Single(result.Tasks).BackupType);
+        else Assert.Equal(before, await Counts(plan.Id));
+        var after = await Counts(plan.Id);
+        Assert.Equal(BackupPlanSchedulingCode.NoWork, (await Schedule(plan.Id)).Code);
+        Assert.Equal(after, await Counts(plan.Id));
+        await using var verify = database.CreateContext();
+        Assert.Equal(1, await verify.BackupTasks.CountAsync(x => x.PlanId == plan.Id && x.BackupType == BackupType.Full));
+        Assert.Equal(createDiff ? 1 : 0, await verify.BackupTasks.CountAsync(x => x.PlanId == plan.Id && x.BackupType == BackupType.Differential));
+        Assert.Equal(2, await verify.BackupAttempts.CountAsync(x => x.TaskId == full.TaskId));
+    }
+
     [Fact]
     public async Task FailedLatestFullDoesNotLetAbandonedOlderFullSlotsSuppressWeeklyDiff()
     {
@@ -440,7 +494,7 @@ public sealed class BackupPlanSchedulingSqlServerTests(PlatformDatabaseSqlServer
         Assert.Equal(BackupPlanTaskCreationCode.Created, result.Code);
         return result.Task!;
     }
-    private async Task Finish(Guid taskId, string outcome, PlatformDbContext? existing = null)
+    private async Task Finish(Guid taskId, string outcome, PlatformDbContext? existing = null, bool retry = false)
     {
         await using var owned = existing is null ? database.CreateContext() : null;
         var db = existing ?? owned!;
@@ -457,8 +511,15 @@ public sealed class BackupPlanSchedulingSqlServerTests(PlatformDatabaseSqlServer
         }
         var id = Guid.NewGuid();
         var at = task.ScheduledSlotAtUtc ?? Now.AddHours(-2);
+        var number = 1;
+        if (retry)
+        {
+            at = at.AddMinutes(5);
+            Assert.Equal(BackupAttemptHandling.CreateNew, task.RetryFailed(snapshot.StorageMode, at));
+            number = await db.BackupAttempts.CountAsync(x => x.TaskId == taskId) + 1;
+        }
         var paths = new BackupAttemptPaths($@"D:\Synthetic\{id:N}_FULL.bak", $@"\\synthetic\share\{id:N}_FULL.bak", null, null, null);
-        var attempt = new BackupAttempt(id, taskId, 1, at, paths);
+        var attempt = new BackupAttempt(id, taskId, number, at, paths);
         var lease = Guid.NewGuid();
         task.ClaimExecution(snapshot.StorageMode, id, lease, "合成事实", at, at.AddMinutes(10));
         attempt.MarkBackupRunning(at);

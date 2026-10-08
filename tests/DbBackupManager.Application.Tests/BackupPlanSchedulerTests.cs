@@ -146,6 +146,49 @@ public sealed class BackupPlanSchedulerTests
     }
 
     [Theory]
+    [InlineData(BackupInvocationStatus.ConfirmedFailed, false, false, true)]
+    [InlineData(BackupInvocationStatus.ConfirmedFailed, true, false, false)]
+    [InlineData(BackupInvocationStatus.ConfirmedFailed, false, true, false)]
+    [InlineData(BackupInvocationStatus.Succeeded, false, false, false)]
+    [InlineData(BackupInvocationStatus.Prepared, false, false, false)]
+    [InlineData(BackupInvocationStatus.Indeterminate, false, false, false)]
+    public void EarlierAttemptEvidenceSurvivesLaterConfirmedFailure(BackupInvocationStatus earlierSql,
+        bool metadata, bool local, bool contradictory)
+    {
+        var earlier = Guid.NewGuid();
+        var current = Guid.NewGuid();
+        var disposition = BackupPlanSlotDispositionRules.Evaluate(BackupTaskStatus.Failed, current,
+            [new(earlier, earlierSql, metadata, local, contradictory), new(current, BackupInvocationStatus.ConfirmedFailed, false, false)]);
+        Assert.Equal(BackupSlotDisposition.Uncertain, disposition);
+        var plan = Plan(4, 3);
+        Assert.Empty(Select(plan, new Dictionary<BackupScheduleSlotKey, BackupSlotDisposition>
+        { [Key(plan, BackupType.Full, Now)] = disposition }));
+    }
+
+    [Fact]
+    public void AllAttemptsExplicitlyFailedStillAllowOlderDiff()
+    {
+        var earlier = Guid.NewGuid();
+        var current = Guid.NewGuid();
+        var disposition = BackupPlanSlotDispositionRules.Evaluate(BackupTaskStatus.Failed, current,
+            [new(earlier, BackupInvocationStatus.ConfirmedFailed, false, false), new(current, BackupInvocationStatus.ConfirmedFailed, false, false)]);
+        Assert.Equal(BackupSlotDisposition.Failed, disposition);
+        var plan = Plan(4, 3);
+        Assert.Equal(BackupType.Differential, Assert.Single(Select(plan,
+            new Dictionary<BackupScheduleSlotKey, BackupSlotDisposition>
+            { [Key(plan, BackupType.Full, Now)] = disposition })).Key.BackupType);
+    }
+
+    [Fact]
+    public void CurrentCompleteSuccessRemainsSuccessfulDespiteEarlierContradiction()
+    {
+        var earlier = Guid.NewGuid();
+        var current = Guid.NewGuid();
+        Assert.Equal(BackupSlotDisposition.Succeeded, BackupPlanSlotDispositionRules.Evaluate(BackupTaskStatus.Failed, current,
+            [new(earlier, BackupInvocationStatus.ConfirmedFailed, false, false, true), new(current, BackupInvocationStatus.Succeeded, true, true)]));
+    }
+
+    [Theory]
     [InlineData(BackupTaskStage.Transfer)]
     [InlineData(BackupTaskStage.ValidateCopy)]
     [InlineData(BackupTaskStage.Cleanup)]
