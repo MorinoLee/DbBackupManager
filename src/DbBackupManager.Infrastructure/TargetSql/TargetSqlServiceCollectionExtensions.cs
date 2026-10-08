@@ -29,6 +29,7 @@ public static class TargetSqlServiceCollectionExtensions
         services.TryAddSingleton<ITargetSqlBackupClientSessionFactory, SqlClientTargetSqlBackupSessionFactory>();
         services.TryAddSingleton<ITargetSqlBackupCommandObserver, NoOpTargetSqlBackupCommandObserver>();
         services.TryAddScoped<SqlClientTargetSqlReadOnlyProbe>();
+        services.TryAddScoped<ITargetSqlBackupMetadataReader, SqlClientTargetSqlBackupMetadataReader>();
         services.TryAddScoped<ITargetSqlReadOnlyProbe>(provider =>
             provider.GetRequiredService<SqlClientTargetSqlReadOnlyProbe>());
         services.TryAddScoped<ITargetSqlBackupEvidenceProbe>(provider =>

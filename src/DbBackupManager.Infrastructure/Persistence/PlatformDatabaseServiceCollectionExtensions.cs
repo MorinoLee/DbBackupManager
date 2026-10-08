@@ -44,6 +44,8 @@ public static class PlatformDatabaseServiceCollectionExtensions
         services.TryAddScoped<IBackupTaskExecutionStore, BackupTaskExecutionStore>();
         services.TryAddScoped<IBackupSetRegistrationStore, BackupSetRegistrationStore>();
         services.TryAddScoped<BackupSetRegistrationService>();
+        services.TryAddScoped<IBackupMetadataReconciliationLookup, BackupMetadataReconciliationLookup>();
+        services.TryAddScoped<BackupMetadataReconciliationService>();
         services.TryAddScoped<IWorkerHeartbeatStore, BackupManagement.WorkerHeartbeatStore>();
 
         return services;
