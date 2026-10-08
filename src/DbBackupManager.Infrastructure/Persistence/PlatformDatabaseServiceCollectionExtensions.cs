@@ -42,6 +42,9 @@ public static class PlatformDatabaseServiceCollectionExtensions
         services.RemoveAll<PlatformDbContext>();
         services.TryAddScoped<IAdminIdentityStore, AdminIdentityStore>();
         services.TryAddScoped<IBackupTaskExecutionStore, BackupTaskExecutionStore>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddScoped<IBackupPlanTaskCreationStore, BackupPlanTaskCreationStore>();
+        services.TryAddScoped<BackupPlanTaskCreationService>();
         services.TryAddScoped<IBackupSetRegistrationStore, BackupSetRegistrationStore>();
         services.TryAddScoped<BackupSetRegistrationService>();
         services.TryAddScoped<IBackupMetadataReconciliationLookup, BackupMetadataReconciliationLookup>();
