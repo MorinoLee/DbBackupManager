@@ -57,6 +57,9 @@ internal sealed class BackupTaskLeaseStore(BackupTaskPersistence persistence)
                             BackupTaskStoreResultCode.StateMismatch);
                     }
 
+                    if (await context.BackupTasks.AnyAsync(x => x.Id == replay.TaskId
+                        && (x.PlanId != null || x.PolicyId == null), cancellationToken))
+                        return new BackupTaskStoreResult<BackupExecutionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
                     var replayResult = await ReplayClaimAsync(
                         context,
                         replay,
@@ -82,6 +85,9 @@ internal sealed class BackupTaskLeaseStore(BackupTaskPersistence persistence)
                     return new BackupTaskStoreResult<BackupExecutionWorkItem>(
                         BackupTaskStoreResultCode.NotFound);
                 }
+
+                if (task.PlanId is not null || task.PolicyId is null)
+                    return new BackupTaskStoreResult<BackupExecutionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
 
                 var snapshot = await context.BackupTaskSnapshots.SingleAsync(
                     item => item.TaskId == task.Id,
@@ -197,6 +203,9 @@ internal sealed class BackupTaskLeaseStore(BackupTaskPersistence persistence)
                     return new BackupTaskStoreResult<LeaseHandle>(BackupTaskStoreResultCode.NotFound);
                 }
 
+                if (task.PlanId is not null || task.PolicyId is null)
+                    return new BackupTaskStoreResult<LeaseHandle>(BackupTaskStoreResultCode.StateMismatch);
+
                 if (HasSameLeaseIdentity(task, lease)
                     && task.LeaseExpiresAtUtc == expiresAtUtc
                     && expiresAtUtc > utcNow)
@@ -273,7 +282,7 @@ internal sealed class BackupTaskLeaseStore(BackupTaskPersistence persistence)
 
         await using var context = await persistence.CreateDbContextAsync(cancellationToken);
         return await context.BackupTasks
-            .Where(task => task.Status == BackupTaskStatus.Running
+            .Where(task => task.PolicyId != null && task.PlanId == null && task.Status == BackupTaskStatus.Running
                 && task.LeasePurpose == BackupLeasePurpose.Execution
                 && task.LeaseExpiresAtUtc <= utcNow)
             .OrderBy(task => task.LeaseExpiresAtUtc)
@@ -291,6 +300,9 @@ internal sealed class BackupTaskLeaseStore(BackupTaskPersistence persistence)
         {
             return await persistence.ExecuteWithStrategyAsync(async context =>
             {
+                if (await context.BackupTasks.AnyAsync(x => x.Id == command.TaskId
+                    && (x.PlanId != null || x.PolicyId == null), cancellationToken))
+                    return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.StateMismatch);
                 var replay = await ReadMutationAsync(
                     context,
                     command.MutationId,
@@ -310,6 +322,9 @@ internal sealed class BackupTaskLeaseStore(BackupTaskPersistence persistence)
                     return new BackupTaskStoreResult<BackupTaskStateModel>(
                         BackupTaskStoreResultCode.NotFound);
                 }
+
+                if (task.PlanId is not null || task.PolicyId is null)
+                    return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.StateMismatch);
 
                 var snapshot = await context.BackupTaskSnapshots.SingleAsync(
                     item => item.TaskId == task.Id,
@@ -390,6 +405,8 @@ internal sealed class BackupTaskLeaseStore(BackupTaskPersistence persistence)
         var task = await context.BackupTasks.SingleAsync(
             item => item.Id == replay.TaskId,
             cancellationToken);
+        if (task.PlanId is not null || task.PolicyId is null)
+            return new BackupTaskStoreResult<BackupExecutionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
         if (task.LeaseToken != command.LeaseToken
             || task.CurrentBackupAttemptId != replay.BackupAttemptId)
         {

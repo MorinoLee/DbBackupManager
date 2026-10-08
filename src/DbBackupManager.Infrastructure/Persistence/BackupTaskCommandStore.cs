@@ -13,7 +13,7 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
 {
     private const string CreatedReason = "task.created";
 
-    private const string CancellationReason = "task.cancellation_requested";
+    internal const string CancellationReason = "task.cancellation_requested";
 
     private const string RetryReason = "task.retry_requested";
 
@@ -176,6 +176,7 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
             "backup.task.retry",
             (task, storageMode) =>
             {
+                if (task.PlanId is not null || task.PolicyId is null) return BackupTaskStoreResultCode.StateMismatch;
                 task.RetryFailed(storageMode, command.OccurredAtUtc);
                 return BackupTaskStoreResultCode.Succeeded;
             },
@@ -226,6 +227,9 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
                 if ((requireActor && command.ActorAdminUserId is null)
                     || !await IsActorValidAsync(context, command.ActorAdminUserId, command.ActorSecurityStamp, cancellationToken))
                     return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.AuthenticationRequired);
+                if (reason != CancellationReason && await context.BackupTasks.AnyAsync(
+                    x => x.Id == command.TaskId && (x.PlanId != null || x.PolicyId == null), cancellationToken))
+                    return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.StateMismatch);
                 var replay = await ReadMutationAsync(
                     context,
                     command.MutationId,
@@ -269,6 +273,8 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
                         task.ToStateModel());
                 }
 
+                if (mutationResult != BackupTaskStoreResultCode.Succeeded)
+                    return new BackupTaskStoreResult<BackupTaskStateModel>(mutationResult);
                 context.AddRange(
                     CreateStateChange(
                         command.MutationId,

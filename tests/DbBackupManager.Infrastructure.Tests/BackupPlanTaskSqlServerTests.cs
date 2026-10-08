@@ -262,6 +262,9 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
             var graph = await GraphAsync(temporary);
             var task = Task(graph.Plan, BackupRunPurpose.PlanFull, Slot, Slot.AddMinutes(-30));
             await SaveAsync(temporary, task, Snapshot(graph, task, BackupRunPurpose.PlanFull));
+            // 后续迁移各自拥有事务；先退到本项要验证的迁移，避免把较新迁移的合法 Down 算作历史变化。
+            var identityMigration = db.Database.GetMigrations().Single(x => x.EndsWith("_AddBackupTaskPlanIdentity", StringComparison.Ordinal));
+            await migrator.MigrateAsync(identityMigration);
             var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
             Assert.Equal(51003, error.Number);
