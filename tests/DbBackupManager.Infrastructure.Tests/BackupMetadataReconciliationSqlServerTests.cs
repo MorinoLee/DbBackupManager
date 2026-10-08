@@ -32,7 +32,7 @@ public sealed class BackupMetadataReconciliationSqlServerTests(PlatformDatabaseS
         Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await service.CommitAsync(preparedFull)).Code);
         Guid policy;
         await using (var context = database.CreateContext())
-            policy = await context.BackupTasks.Where(x => x.Id == fullWork.Task.TaskId).Select(x => x.PolicyId).SingleAsync();
+            policy = await context.BackupTasks.Where(x => x.Id == fullWork.Task.TaskId).Select(x => x.PolicyId).SingleAsync() ?? throw new InvalidOperationException("合成旧任务缺少策略身份。");
         await sql.ChangeAsync();
         var diff = await sql.BackupAsync("diff", Domain.BackupPlans.BackupRunPurpose.PlanDifferential);
         var diffWork = await BackupSetTestData.WorkAsync(database, policy);
@@ -85,7 +85,7 @@ public sealed class BackupMetadataReconciliationSqlServerTests(PlatformDatabaseS
         await BackupSetTestData.RegisterAsync(database, full);
         Guid policy;
         await using (var db = database.CreateContext())
-            policy = await db.BackupTasks.Where(x => x.Id == fullWork.Task.TaskId).Select(x => x.PolicyId).SingleAsync();
+            policy = await db.BackupTasks.Where(x => x.Id == fullWork.Task.TaskId).Select(x => x.PolicyId).SingleAsync() ?? throw new InvalidOperationException("合成旧任务缺少策略身份。");
         var work = await BackupSetTestData.WorkAsync(database, policy);
         var metadata = full.Metadata with
         {

@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.Configuration;
 
 namespace DbBackupManager.Domain.BackupTasks;
@@ -69,6 +70,38 @@ public sealed class BackupTaskSnapshot
     }
 
     public Guid TaskId { get; private set; }
+
+    // 旧策略快照保持空值，不把旧 COPY_ONLY 开关反推为计划用途。
+    public BackupRunPurpose? Purpose { get; private set; }
+
+    public static BackupTaskSnapshot ForPlan(
+        BackupTask task, BackupPlanVersion version, string planName, BackupRunPurpose purpose,
+        BackupTaskIdentitySnapshot identity, BackupSqlTargetSnapshot sqlTarget,
+        BackupSourceSnapshot source, BackupRemoteTargetSnapshot? remoteTarget = null)
+    {
+        ArgumentNullException.ThrowIfNull(task);
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(version);
+        if (task.PlanId is null || task.PlanVersionId is null || task.PolicyId is not null
+            || task.PlanId != version.PlanId || task.PlanVersionId != version.Id
+            || task.BackupType != BackupPlanRules.ToBackupType(purpose)
+            || purpose != BackupRunPurpose.AdHocCopyOnlyFull && !BackupPlanRules.Includes(version.Mode, task.BackupType))
+            throw new ArgumentException("计划任务身份与用途不一致。", nameof(task));
+        if (purpose == BackupRunPurpose.AdHocCopyOnlyFull && task.TriggerType != BackupTaskTriggerType.Manual
+            || task.CoveredDifferentialSlotUtc is not null && purpose != BackupRunPurpose.PlanFull)
+            throw new ArgumentException("用途与任务触发方式或取代时隙不一致。", nameof(purpose));
+        if (source.FileNameRuleVersion != "v3")
+            throw new ArgumentException("计划任务快照必须显式使用 v3 路径规则。", nameof(source));
+        if (remoteTarget?.StorageTargetId != version.StorageTargetId)
+            throw new ArgumentException("远端配置与计划版本不一致。", nameof(remoteTarget));
+        var snapshot = new BackupTaskSnapshot(task.Id, planName, identity, sqlTarget, source,
+            new(version.StorageMode, remoteTarget, version.LocalRecoveryWindowDays, version.RemoteRecoveryWindowDays,
+                version.UseChecksum, version.UseCompression, BackupPlanRules.UseCopyOnly(purpose),
+                version.BackupTimeoutMinutes, version.VerifyTimeoutMinutes, version.TransferTimeoutMinutes, version.TimeZoneId));
+        snapshot.Purpose = purpose;
+        snapshot.BackupType = BackupPlanRules.ToBackupType(purpose);
+        return snapshot;
+    }
 
     public string PolicyName { get; private set; } = string.Empty;
 

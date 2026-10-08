@@ -391,7 +391,7 @@ public sealed class BackupSetSqlServerTests(PlatformDatabaseSqlServerFixture dat
             await temporary.InitializeAsync();
             await using var db = temporary.CreateContext();
             var migrations = db.Database.GetMigrations().ToArray();
-            var previous = migrations[^2];
+            var previous = migrations.Single(x => x.EndsWith("_AddBackupPlans", StringComparison.Ordinal));
             var migrator = db.GetService<IMigrator>();
             await migrator.MigrateAsync(previous);
             Assert.Equal(0, await TableCountAsync(db));
@@ -402,11 +402,15 @@ public sealed class BackupSetSqlServerTests(PlatformDatabaseSqlServerFixture dat
             var work = await BackupSetTestData.WorkAsync(temporary);
             var command = BackupSetTestData.Command(work);
             Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await BackupSetTestData.RegisterAsync(temporary, command)).Code);
+            // 后续兼容迁移可以先独立回退；以下实际检验备份集迁移自身的守卫及历史保留。
+            var setMigration = migrations.Single(x => x.EndsWith("_AddBackupSets", StringComparison.Ordinal));
+            await migrator.MigrateAsync(setMigration);
+            var setHistory = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
             Assert.Equal(51001, error.Number);
             Assert.Equal(2, await TableCountAsync(db));
             Assert.True(await HasAssociationColumnAsync(db));
-            Assert.Equal(migrations, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
+            Assert.Equal(setHistory, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
             Assert.Equal(command.Metadata, (await db.BackupSets.SingleAsync()).Metadata);
         }
         finally { await temporary.DisposeAsync(); }

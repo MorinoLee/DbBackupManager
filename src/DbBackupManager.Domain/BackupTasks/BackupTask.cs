@@ -1,3 +1,5 @@
+using DbBackupManager.Domain.BackupPlans;
+using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Domain.Entities;
 
 namespace DbBackupManager.Domain.BackupTasks;
@@ -5,6 +7,10 @@ namespace DbBackupManager.Domain.BackupTasks;
 public sealed class BackupTask : ConcurrentEntity
 {
     private BackupTask()
+    {
+    }
+
+    private BackupTask(Guid id) : base(id)
     {
     }
 
@@ -27,7 +33,40 @@ public sealed class BackupTask : ConcurrentEntity
         CurrentStage = BackupTaskStage.Backup;
     }
 
-    public Guid PolicyId { get; private set; }
+    public static BackupTask ForPlan(
+        Guid id, Guid planId, Guid planVersionId, BackupRunPurpose purpose,
+        BackupTaskTriggerType triggerType, DateTimeOffset? scheduledSlotAtUtc,
+        DateTimeOffset? coveredDifferentialSlotUtc = null)
+    {
+        BackupTaskValues.RequireDefined(triggerType, nameof(triggerType));
+        ValidateTrigger(triggerType, scheduledSlotAtUtc);
+        var type = BackupPlanRules.ToBackupType(purpose);
+        if (purpose == BackupRunPurpose.AdHocCopyOnlyFull && triggerType != BackupTaskTriggerType.Manual)
+            throw new ArgumentException("临时 COPY_ONLY 备份只能手动触发。", nameof(purpose));
+        if (coveredDifferentialSlotUtc is not null && purpose != BackupRunPurpose.PlanFull)
+            throw new ArgumentException("只有计划普通 FULL 可以取代 DIFF 时隙。", nameof(coveredDifferentialSlotUtc));
+        return new BackupTask(id)
+        {
+            PlanId = BackupTaskValues.RequireId(planId, nameof(planId)),
+            PlanVersionId = BackupTaskValues.RequireId(planVersionId, nameof(planVersionId)),
+            BackupType = type,
+            TriggerType = triggerType,
+            ScheduledSlotAtUtc = BackupTaskValues.OptionalUtc(scheduledSlotAtUtc, nameof(scheduledSlotAtUtc)),
+            CoveredDifferentialSlotUtc = BackupTaskValues.OptionalUtc(coveredDifferentialSlotUtc, nameof(coveredDifferentialSlotUtc)),
+            Status = BackupTaskStatus.Pending,
+            CurrentStage = BackupTaskStage.Backup
+        };
+    }
+
+    public Guid? PolicyId { get; private set; }
+
+    public Guid? PlanId { get; private set; }
+
+    public Guid? PlanVersionId { get; private set; }
+
+    public BackupType BackupType { get; private set; } = BackupType.Full;
+
+    public DateTimeOffset? CoveredDifferentialSlotUtc { get; private set; }
 
     public BackupTaskTriggerType TriggerType { get; private set; }
 

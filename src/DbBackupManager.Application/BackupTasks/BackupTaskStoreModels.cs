@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 
@@ -160,7 +161,9 @@ public sealed record BackupTaskSnapshotModel(
     string LocalSqlBackupRootPath,
     string FileNameRuleVersion,
     BackupFileEndpointModel WorkerSourceEndpoint,
-    BackupTaskPolicyModel Policy);
+    BackupTaskPolicyModel Policy,
+    BackupType BackupType = BackupType.Full,
+    BackupRunPurpose? Purpose = null);
 
 public sealed class LeaseHandle
 {
