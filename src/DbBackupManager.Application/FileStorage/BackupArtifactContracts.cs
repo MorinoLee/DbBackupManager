@@ -32,7 +32,8 @@ public sealed record VerifiedBackupTransferReceipt(BackupContentEvidence SourceC
     BackupContentEvidence PartialReadBackContent)
 {
     public bool MatchesVerifiedSource(BackupContentEvidence frozenSource) =>
-        frozenSource.MatchesContent(SourceContent) && frozenSource.MatchesContent(SentContent)
+        frozenSource.MatchesContent(SourceContent) && frozenSource.PreservesKnownObjectId(SourceContent)
+        && frozenSource.MatchesContent(SentContent)
         && frozenSource.MatchesContent(PartialReadBackContent);
 }
 public sealed record VerifiedBackupRenameReceipt(BackupContentEvidence BeforeRename, BackupContentEvidence FinalReadBack,
@@ -41,6 +42,7 @@ public sealed record VerifiedBackupRenameReceipt(BackupContentEvidence BeforeRen
     public bool CanRegisterAvailable(BackupContentEvidence frozenSource, BackupFileEndpointInput endpoint, string path) =>
         !PartialExists && FinalExists && frozenSource.MatchesContent(BeforeRename)
         && frozenSource.MatchesContent(FinalReadBack) && frozenSource.MatchesContent(FinalHandle.Content)
+        && BeforeRename.PreservesKnownObjectId(FinalReadBack) && FinalReadBack.PreservesKnownObjectId(FinalHandle.Content)
         && FinalHandle.GuardsExactPathUntilCommit && FinalHandle.Content.Protection == BackupObjectProtection.GuardedUntilCommit
         && FinalHandle.Endpoint.Protocol == endpoint.Protocol && FinalHandle.Endpoint.Host == endpoint.Host
         && FinalHandle.Endpoint.Port == endpoint.Port && FinalHandle.Endpoint.RootPath == endpoint.RootPath

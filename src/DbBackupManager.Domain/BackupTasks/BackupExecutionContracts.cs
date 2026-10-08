@@ -43,6 +43,9 @@ public sealed record BackupContentEvidence
         && LengthBytes is > 0 && DigestHex is { Length: 64 }
         && DigestHex.All(c => char.IsAsciiHexDigit(c) && !char.IsUpper(c))
         && LengthBytes == other.LengthBytes && DigestHex == other.DigestHex;
+
+    public bool PreservesKnownObjectId(BackupContentEvidence later) =>
+        StableObjectId is null || StableObjectId == later.StableObjectId;
 }
 
 public sealed record BackupExecutionFacts

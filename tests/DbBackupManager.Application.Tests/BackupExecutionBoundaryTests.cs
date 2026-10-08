@@ -59,6 +59,29 @@ public sealed class BackupExecutionBoundaryTests
     }
 
     [Fact]
+    public async Task MatchingContentCannotHideChangedOrMissingKnownObjectIdentity()
+    {
+        var original = Content with { StableObjectId = "synthetic-original" };
+        var replaced = Content with { StableObjectId = "synthetic-replacement" };
+        Assert.False(new VerifiedBackupTransferReceipt(replaced, Content, Content).MatchesVerifiedSource(original));
+        Assert.False(new VerifiedBackupTransferReceipt(Content, Content, Content).MatchesVerifiedSource(original));
+        // 源对象与远端副本的标识自然不同，不能跨对象比较。
+        Assert.True(new VerifiedBackupTransferReceipt(original, replaced, replaced).MatchesVerifiedSource(original));
+        await using var handle = new Handle(replaced);
+        Assert.False(new VerifiedBackupRenameReceipt(original, replaced, false, true, handle)
+            .CanRegisterAvailable(Content, Endpoint, handle.Path));
+        handle.Content = original;
+        Assert.False(new VerifiedBackupRenameReceipt(original, Content, false, true, handle)
+            .CanRegisterAvailable(Content, Endpoint, handle.Path));
+        handle.Content = replaced;
+        Assert.False(new VerifiedBackupRenameReceipt(original, original, false, true, handle)
+            .CanRegisterAvailable(Content, Endpoint, handle.Path));
+        handle.Content = Content;
+        Assert.False(new VerifiedBackupRenameReceipt(original, original, false, true, handle)
+            .CanRegisterAvailable(Content, Endpoint, handle.Path));
+    }
+
+    [Fact]
     public async Task UnsupportedProtectionCannotRegisterAvailableEvenWithMatchingDigest()
     {
         await using var handle = new Handle(Content with { Protection = BackupObjectProtection.Unsupported });
