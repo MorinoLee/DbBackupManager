@@ -135,9 +135,9 @@ public sealed class DifferentialBaselineRulesTests
     {
         var differential = Differential();
         var external = Full() with { BackupSetGuid = Id(102), CheckpointLsn = OtherLsn };
-        var current = Reference() with { BaseBackupSetGuid = external.BackupSetGuid, BaseLsn = OtherLsn };
+        var current = FileBase() with { BaseBackupSetGuid = external.BackupSetGuid, BaseLsn = OtherLsn };
         var before = Dependency(differential);
-        var active = DifferentialBaselineRules.EvaluateActiveBaseline(Database, new(current), [Managed()], external);
+        var active = DifferentialBaselineRules.EvaluateActiveBaseline(Database, Active(current), [Managed()], external);
         var after = Dependency(differential, [Managed()], external);
 
         Assert.Equal(before, after);
@@ -171,7 +171,7 @@ public sealed class DifferentialBaselineRulesTests
     [Fact]
     public void MatchingDataFileBasesIdentifyOneActiveManagedFull()
     {
-        var active = new ActiveDifferentialBaselineEvidence([Reference(), Reference()]);
+        var active = Active(FileBase(), FileBase());
         var result = DifferentialBaselineRules.EvaluateActiveBaseline(Database, active, [Managed()]);
         AssertDecision(result, DifferentialBaselineConclusion.Verified, DifferentialBaselineReason.ManagedFullVerified);
         Assert.Equal(ManagedId, result.ManagedFullId);
@@ -180,8 +180,8 @@ public sealed class DifferentialBaselineRulesTests
     [Fact]
     public void DifferentDataFileBaseGuidsOrLsnsAreUnknown()
     {
-        var differentGuid = new ActiveDifferentialBaselineEvidence([Reference(), Reference() with { BaseBackupSetGuid = Id(103) }]);
-        var differentLsn = new ActiveDifferentialBaselineEvidence([Reference(), Reference() with { BaseLsn = OtherLsn }]);
+        var differentGuid = Active(FileBase(), FileBase() with { BaseBackupSetGuid = Id(103) });
+        var differentLsn = Active(FileBase(), FileBase() with { BaseLsn = OtherLsn });
         AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, differentGuid, [Managed()]),
             DifferentialBaselineConclusion.Unknown, DifferentialBaselineReason.MultipleBases);
         AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, differentLsn, [Managed()]),
@@ -191,8 +191,8 @@ public sealed class DifferentialBaselineRulesTests
     [Fact]
     public void EmptyOrPartiallyUnknownDataFileEvidenceCannotBeHealthy()
     {
-        var empty = new ActiveDifferentialBaselineEvidence(Array.Empty<DifferentialBaseEvidence>());
-        var incomplete = new ActiveDifferentialBaselineEvidence([Reference(), Reference() with { BaseLsn = null }]);
+        var empty = Active();
+        var incomplete = Active(FileBase(), FileBase() with { BaseLsn = null });
         AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, empty, [Managed()]),
             DifferentialBaselineConclusion.Unknown, DifferentialBaselineReason.MissingFields);
         AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, incomplete, [Managed()]),
@@ -202,11 +202,11 @@ public sealed class DifferentialBaselineRulesTests
     [Fact]
     public void DataFileEvidenceIsASnapshotThatCannotBeModifiedByItsCaller()
     {
-        var files = new List<DifferentialBaseEvidence> { Reference() };
-        var active = new ActiveDifferentialBaselineEvidence(files);
-        files.Add(Reference() with { BaseLsn = OtherLsn });
+        var files = new List<ActiveDataFileBaselineEvidence> { FileBase() };
+        var active = new ActiveDifferentialBaselineEvidence(Database, Branch.RecoveryForkId, files);
+        files.Add(FileBase() with { BaseLsn = OtherLsn });
         Assert.Single(active.DataFileBases);
-        Assert.Throws<NotSupportedException>(() => ((IList<DifferentialBaseEvidence>)active.DataFileBases).Clear());
+        Assert.Throws<NotSupportedException>(() => ((IList<ActiveDataFileBaselineEvidence>)active.DataFileBases).Clear());
     }
 
     [Theory]
@@ -220,7 +220,7 @@ public sealed class DifferentialBaselineRulesTests
     {
         var actual = Reference() with { Status = status };
         AssertDecision(Dependency(Differential() with { ActualBase = actual }), conclusion, reason);
-        AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, new(actual), [Managed()]), conclusion, reason);
+        AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, Active(FileBase() with { Status = status }), [Managed()]), conclusion, reason);
         AssertDecision(Dependency(Differential(), [Managed(Full() with { Status = status })]), conclusion, reason);
         AssertDecision(Dependency(Differential(), [], Full() with { Status = status }), conclusion, reason);
     }
@@ -244,8 +244,6 @@ public sealed class DifferentialBaselineRulesTests
     {
         AssertDecision(Dependency(Differential() with { ActualBase = actual }),
             DifferentialBaselineConclusion.Unknown, DifferentialBaselineReason.MissingFields);
-        AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, new(actual), [Managed()]),
-            DifferentialBaselineConclusion.Unknown, DifferentialBaselineReason.MissingFields);
     }
 
     public static TheoryData<FullBackupBaselineEvidence> IncompleteFulls => new()
@@ -264,6 +262,8 @@ public sealed class DifferentialBaselineRulesTests
     public void MissingFullFieldsAreUnknown(FullBackupBaselineEvidence full)
     {
         AssertDecision(Dependency(Differential(), [Managed(full)]),
+            DifferentialBaselineConclusion.Unknown, DifferentialBaselineReason.MissingFields);
+        AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, Active(FileBase()), [Managed(full)]),
             DifferentialBaselineConclusion.Unknown, DifferentialBaselineReason.MissingFields);
     }
 
@@ -300,10 +300,10 @@ public sealed class DifferentialBaselineRulesTests
     [Fact]
     public void ActiveManagedBaseUsesTheSameIdentityGuidAndLsnRules()
     {
-        AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, new(Reference()), [Managed()]),
+        AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database, Active(FileBase()), [Managed()]),
             DifferentialBaselineConclusion.Verified, DifferentialBaselineReason.ManagedFullVerified);
         AssertDecision(DifferentialBaselineRules.EvaluateActiveBaseline(Database,
-                new(Reference() with { BaseLsn = OtherLsn }), [Managed()]),
+                Active(FileBase() with { BaseLsn = OtherLsn }), [Managed()]),
             DifferentialBaselineConclusion.Mismatch, DifferentialBaselineReason.LsnMismatch);
     }
 
@@ -326,6 +326,11 @@ public sealed class DifferentialBaselineRulesTests
     private static DifferentialBackupEvidence Differential() => new(Reference(), BackupType.Differential, false, Checkpoint);
 
     private static DifferentialBaseEvidence Reference() => new(Database, Branch, FullGuid, Checkpoint);
+
+    private static ActiveDataFileBaselineEvidence FileBase() => new(FullGuid, Checkpoint);
+
+    private static ActiveDifferentialBaselineEvidence Active(params ActiveDataFileBaselineEvidence[] files) =>
+        new(Database, Branch.RecoveryForkId, files);
 
     private static FullBackupBaselineEvidence Full() => new(FullGuid, Database, Branch, BackupType.Full, false, Checkpoint);
 

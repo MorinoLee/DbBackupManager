@@ -68,20 +68,35 @@ public sealed record FullBackupBaselineEvidence(
 
 public sealed record ManagedFullBackupCandidate(Guid BackupSetId, FullBackupBaselineEvidence Evidence);
 
+public sealed record ActiveDataFileBaselineEvidence(
+    Guid? BaseBackupSetGuid,
+    BackupLsn? BaseLsn,
+    BaselineEvidenceStatus Status = BaselineEvidenceStatus.Complete);
+
 public sealed class ActiveDifferentialBaselineEvidence
 {
-    public ActiveDifferentialBaselineEvidence(DifferentialBaseEvidence currentBase)
-        : this([currentBase])
+    public ActiveDifferentialBaselineEvidence(
+        BackupDatabaseIdentity database,
+        Guid? currentRecoveryForkId,
+        IEnumerable<ActiveDataFileBaselineEvidence> dataFileBases,
+        BaselineEvidenceStatus status = BaselineEvidenceStatus.Complete)
     {
-    }
-
-    public ActiveDifferentialBaselineEvidence(IEnumerable<DifferentialBaseEvidence> dataFileBases)
-    {
+        ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(dataFileBases);
+        Database = database;
+        CurrentRecoveryForkId = currentRecoveryForkId;
         DataFileBases = Array.AsReadOnly(dataFileBases.ToArray());
+        Status = status;
     }
 
-    public IReadOnlyList<DifferentialBaseEvidence> DataFileBases { get; }
+    public BackupDatabaseIdentity Database { get; }
+
+    // 当前数据库状态只有活动分支，不表示某次备份的起止分支。
+    public Guid? CurrentRecoveryForkId { get; }
+
+    public IReadOnlyList<ActiveDataFileBaselineEvidence> DataFileBases { get; }
+
+    public BaselineEvidenceStatus Status { get; }
 }
 
 public sealed record DifferentialBaselineDecision
