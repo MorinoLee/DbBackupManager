@@ -1,3 +1,4 @@
+using DbBackupManager.Application.BackupSets;
 using DbBackupManager.Application.TargetSql;
 using DbBackupManager.Infrastructure.Persistence;
 using DbBackupManager.Infrastructure.TargetSql;
@@ -30,6 +31,10 @@ public sealed class TargetSqlAdapterRegistrationTests
         var evidence = scope.ServiceProvider.GetRequiredService<ITargetSqlBackupEvidenceProbe>();
         var executor = scope.ServiceProvider.GetRequiredService<ITargetSqlBackupExecutor>();
         var planExecutor = scope.ServiceProvider.GetRequiredService<ITargetSqlPlanBackupExecutor>();
+        var metadata = scope.ServiceProvider.GetRequiredService<ITargetSqlBackupMetadataReader>();
+        Assert.IsType<SqlClientTargetSqlBackupMetadataReader>(metadata);
+        Assert.NotNull(scope.ServiceProvider.GetRequiredService<BackupMetadataReconciliationService>());
+        Assert.IsType<BackupMetadataReconciliationLookup>(scope.ServiceProvider.GetRequiredService<IBackupMetadataReconciliationLookup>());
 
         Assert.IsType<SqlClientTargetSqlReadOnlyProbe>(probe);
         Assert.IsType<SqlClientTargetSqlBackupExecutor>(executor);

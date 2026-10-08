@@ -108,7 +108,7 @@ internal static class SqlClientTargetSqlConnectionFactory
     }
 }
 
-internal sealed class SqlClientTargetSqlSession(SqlConnection connection) : ITargetSqlClientSession
+internal sealed partial class SqlClientTargetSqlSession(SqlConnection connection) : ITargetSqlClientSession
 {
     private readonly SqlConnection _connection = connection
         ?? throw new ArgumentNullException(nameof(connection));

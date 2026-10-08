@@ -21,6 +21,7 @@ internal sealed class LocalDbBackupMetadataProofScope(ITestOutputHelper output) 
     public SqlConnection Connection { get; private set; } = null!;
 
     public SqlConnection NewConnection() => new(ConnectionString(DatabaseName));
+    public SqlConnection NewMetadataConnection() => new(ConnectionString("master"));
 
     public async Task InitializeAsync()
     {
@@ -124,7 +125,46 @@ internal sealed class LocalDbBackupMetadataProofScope(ITestOutputHelper output) 
         WriteMetadata(label, "HEADERONLY", header);
         WriteMetadata(label, "msdb", history);
         Assert.Equal(header, history);
-        return new ProofBackup(label, path, header, history);
+        var adapted = await ReadAdapterAsync(path);
+        output.WriteLine("适配器 HEADERONLY：{0}; {1}; {2}", adapted.Header.Status, adapted.Header.FailureCode,
+            string.Join(", ", adapted.Header.Issues));
+        output.WriteLine("适配器 msdb：{0}; {1}; {2}", adapted.History.Status, adapted.History.FailureCode,
+            string.Join(", ", adapted.History.Issues));
+        Assert.Equal(BaselineEvidenceStatus.Complete, adapted.Header.Status);
+        Assert.Equal(BaselineEvidenceStatus.Complete, adapted.History.Status);
+        Assert.Equal(adapted.Header.Metadata, adapted.History.Metadata);
+        AssertAdapterMetadata(header, adapted.Header.Metadata);
+        AssertAdapterMetadata(history, adapted.History.Metadata);
+        Assert.Equal(2, adapted.Active.Baseline.DataFileBases.Count);
+        Assert.All(adapted.ReferencedFulls, full => Assert.Equal(BaselineEvidenceStatus.Complete, full.Status));
+        return new ProofBackup(label, path, header, history, adapted);
+    }
+
+    public Task<TargetSqlBackupMetadataEvidence> ReadAdapterAsync(string path, int timeoutSeconds = 60, CancellationToken cancellationToken = default) =>
+        new SqlClientTargetSqlBackupMetadataReader(new MetadataTestCredentialResolver(), new MetadataTestSessionFactory(NewMetadataConnection))
+            .ReadAsync(new("synthetic-sql", Guid.NewGuid(), true, false, null, 30),
+                new(Guid.NewGuid(), DatabaseName, path, timeoutSeconds), cancellationToken);
+
+    private static void AssertAdapterMetadata(ProofMetadata proof, BackupSetMetadata actual)
+    {
+        Assert.Equal(proof.BackupSetGuid, actual.BackupSetGuid.Value);
+        Assert.Equal(proof.Database.DatabaseGuid, actual.DatabaseGuid.Value);
+        Assert.Equal(proof.Database.FamilyGuid, actual.FamilyGuid.Value);
+        Assert.Equal(proof.Branch.FirstRecoveryForkId, actual.FirstRecoveryForkId.Value);
+        Assert.Equal(proof.Branch.RecoveryForkId, actual.RecoveryForkId.Value);
+        Assert.Equal(proof.Type, actual.Type.Value);
+        Assert.Equal(proof.IsCopyOnly, actual.IsCopyOnly.Value);
+        Assert.Equal(proof.HasChecksums, actual.HasBackupChecksums.Value);
+        Assert.Equal(proof.FirstLsn, actual.FirstLsn.Value);
+        Assert.Equal(proof.LastLsn, actual.LastLsn.Value);
+        Assert.Equal(proof.CheckpointLsn, actual.CheckpointLsn.Value);
+        Assert.Equal(proof.DatabaseBackupLsn, actual.DatabaseBackupLsn.Value);
+        Assert.Equal(proof.DifferentialBaseLsn, actual.DifferentialBaseLsn.Value);
+        Assert.Equal(proof.DifferentialBaseGuid, actual.DifferentialBaseGuid.Value);
+        Assert.Equal(proof.StartedLocal, actual.SqlStartedLocal.Value);
+        Assert.Equal(proof.FinishedLocal, actual.SqlFinishedLocal.Value);
+        if (proof.Type == BackupType.Full)
+            Assert.Equal(BackupMetadataState.NotApplicable, actual.DifferentialBaseLsn.State);
     }
 
     private void WriteMetadata(string label, string source, ProofMetadata metadata) => output.WriteLine(
@@ -330,7 +370,8 @@ internal sealed record ProofMetadata(
         new(Database, Branch, DifferentialBaseGuid, DifferentialBaseLsn), Type, IsCopyOnly, DatabaseBackupLsn);
 }
 
-internal sealed record ProofBackup(string Label, string Path, ProofMetadata Header, ProofMetadata History);
+internal sealed record ProofBackup(string Label, string Path, ProofMetadata Header, ProofMetadata History,
+    TargetSqlBackupMetadataEvidence Adapted);
 
 internal sealed record ProofDataFile(int FileId, Guid? FileGuid, ActiveDataFileBaselineEvidence Evidence, DateTime? BaseTimeRaw);
 

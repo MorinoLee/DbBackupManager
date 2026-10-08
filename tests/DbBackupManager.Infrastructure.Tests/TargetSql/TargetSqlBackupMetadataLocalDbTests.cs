@@ -105,7 +105,10 @@ public sealed class TargetSqlBackupMetadataLocalDbTests(ITestOutputHelper output
         var external = await scope.BackupAsync("later_external", BackupRunPurpose.PlanFull, external: true);
         var reread = await scope.ReadBackupAsync(diff.Label, diff.Path);
 
-        Assert.Equal(diff, reread);
+        Assert.Equal(diff.Header, reread.Header);
+        Assert.Equal(diff.History, reread.History);
+        Assert.NotEqual(diff.Adapted.Active.Baseline.DataFileBases[0].BaseBackupSetGuid,
+            reread.Adapted.Active.Baseline.DataFileBases[0].BaseBackupSetGuid);
         AssertRelationship(managed, reread);
         AssertDependency(managed, reread, DifferentialBaselineConclusion.Verified, DifferentialBaselineReason.ManagedFullVerified, external);
         var active = await scope.ReadActiveAsync();
@@ -167,6 +170,12 @@ public sealed class TargetSqlBackupMetadataLocalDbTests(ITestOutputHelper output
     {
         Check(() => AssertSourceRelationship(full.Header, diff.Header));
         Check(() => AssertSourceRelationship(full.History, diff.History));
+        foreach (var pair in new[] { (full.Adapted.Header.Metadata, diff.Adapted.Header.Metadata),
+            (full.Adapted.History.Metadata, diff.Adapted.History.Metadata) })
+            Check(() => Assert.Multiple(
+                () => Assert.Equal(pair.Item1.BackupSetGuid.Value, pair.Item2.DifferentialBaseGuid.Value),
+                () => Assert.Equal(pair.Item1.CheckpointLsn.Value, pair.Item2.DifferentialBaseLsn.Value),
+                () => Assert.Equal(pair.Item2.DifferentialBaseLsn.Value, pair.Item2.DatabaseBackupLsn.Value)));
     }
 
     private static void AssertSourceRelationship(ProofMetadata full, ProofMetadata diff)
