@@ -52,7 +52,25 @@ internal sealed class BackupArtifactDeletionGuard(IDbContextFactory<PlatformDbCo
         };
         var expectedEndpoint = new BackupFileEndpointInput(endpointModel.Protocol, endpointModel.Host, endpointModel.Port,
             endpointModel.BasePath, endpointModel.CredentialReferenceId, endpointModel.SftpHostKeyFingerprint);
-        return matches && SameEndpoint(expectedEndpoint, request.Endpoint) ? new(true) : new(false, "artifact.owner_unknown");
+        if (!matches || !SameEndpoint(expectedEndpoint, request.Endpoint)) return new(false, "artifact.owner_unknown");
+        // 未以 FileId 删除的暂存路径也可能已有登记，不能绕过备份集或矛盾归属保护。
+        var registered = await context.BackupFiles.Where(file => file.Path == request.Path
+            && (file.TaskId == task.Id || file.AttemptId == attempt.Id
+                || file.Protocol == request.Endpoint.Protocol
+                    && (owner.Role == BackupArtifactPathRole.RemoteOnlySource && file.Location == BackupFileLocation.Local
+                        && file.DatabaseServerId == snapshot.ServerId
+                        || owner.Role == BackupArtifactPathRole.RemotePartial && file.Location == BackupFileLocation.Remote
+                        && file.StorageTargetId == snapshot.StorageTargetId)))
+            .ToArrayAsync(cancellationToken);
+        if (registered.Any(file => file.BackupSetId is not null)) return new(false, "plan.copy.protected");
+        foreach (var file in registered)
+            if (file.TaskId != task.Id || file.AttemptId != attempt.Id
+                || file.Protocol != request.Endpoint.Protocol
+                || owner.Role == BackupArtifactPathRole.RemoteOnlySource && file.Location != BackupFileLocation.Local
+                || owner.Role == BackupArtifactPathRole.RemotePartial && file.Location != BackupFileLocation.Remote
+                || await BackupArtifactProtection.IsProtectedAsync(context, file.Id, cancellationToken))
+                return new(false, "artifact.owner_unknown");
+        return new(true);
     }
 
     private static bool SameEndpoint(BackupFileEndpointInput a, BackupFileEndpointInput b) =>

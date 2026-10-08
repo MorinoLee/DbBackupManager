@@ -42,6 +42,22 @@ internal sealed class BackupInvocationAuthorizationStore(IDbContextFactory<Platf
             $"SELECT * FROM [ManagedDatabases] WITH (UPDLOCK,HOLDLOCK) WHERE [Id] = {databaseId}").SingleAsync(token);
     }
 
+    // 调用者先持有数据库协调锁；与旧恢复结果原子保存，不能把恢复后的状态当成调用终止证据。
+    internal static async Task PreserveLegacyBlockAsync(PlatformDbContext context, Guid databaseId,
+        BackupAttempt attempt, CancellationToken token)
+    {
+        if (attempt.BackupInvocationStatus is not (BackupInvocationStatus.Running or BackupInvocationStatus.Indeterminate)
+            || await context.BackupInvocationAuthorizations.AnyAsync(x => x.TaskId == attempt.TaskId && x.AttemptId == attempt.Id, token))
+            return;
+        var startedAt = attempt.BackupStartedAtUtc ?? throw new InvalidOperationException("遗留调用缺少开始事实。");
+        if (!await context.BackupPlanExecutionOperations.AnyAsync(x => x.Id == attempt.Id, token))
+            context.BackupPlanExecutionOperations.Add(new(attempt.Id, attempt.TaskId, attempt.Id,
+                BackupExecutionOperationKind.SqlResult, 1, attempt.Id, startedAt));
+        // Unknown 的标识只绑定此遗留 Attempt；不是原会话身份，也不返回可消费的调用权。
+        context.BackupInvocationAuthorizations.Add(new(attempt.Id, databaseId, attempt.TaskId, attempt.Id,
+            attempt.Id, attempt.Id, startedAt, new() { CallerIncarnationId = attempt.Id }));
+    }
+
     internal static async Task<BackupExecutionContractResult<BackupInvocationAuthorizationModel>> AuthorizeCoreAsync(
         PlatformDbContext context, LeaseHandle lease, AuthorizeBackupInvocation command, DateTimeOffset now, CancellationToken token)
     {
