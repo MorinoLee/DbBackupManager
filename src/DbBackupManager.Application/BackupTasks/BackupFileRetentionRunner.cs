@@ -76,6 +76,8 @@ public sealed class BackupFileRetentionRunner(
             return;
         }
 
+        if (refreshed.Code == BackupTaskStoreResultCode.Protected) return;
+
         var work = refreshed.Value ?? claimed;
         if (refreshed.Code == BackupTaskStoreResultCode.ConfigurationUnavailable)
         {
@@ -136,7 +138,8 @@ public sealed class BackupFileRetentionRunner(
                     work.Path,
                     work.LengthBytes,
                     metadata.Identity,
-                    options.DeleteTimeoutSeconds),
+                    options.DeleteTimeoutSeconds,
+                    new(work.TaskId, null, work.FileId, BackupArtifactPathRole.RegisteredFile, work.LeaseToken, work.RowVersion)),
                 cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

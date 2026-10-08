@@ -20,6 +20,33 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
     public Task DisposeAsync() => Task.CompletedTask;
     private readonly FakeAdapters _adapters = new();
 
+    [Theory]
+    [InlineData("success")]
+    [InlineData("failure")]
+    [InlineData("uncertain")]
+    public async Task LegacyActualBackupEntryReleasesOnlyWithDefiniteTerminalResponse(string outcome)
+    {
+        using var provider = database.CreateServiceProvider();
+        var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var store = new BackupTaskExecutionStore(factory);
+        var seed = await SeedAsync(store);
+        _adapters.Unknown = outcome == "uncertain";
+        _adapters.ConfirmedFailure = outcome == "failure";
+        Assert.True(await Runner(store, factory).RunTaskOnceAsync(seed.TaskId, CancellationToken.None));
+        await using var db = database.CreateContext();
+        var authorization = await db.BackupInvocationAuthorizations.SingleAsync();
+        Assert.Equal(outcome != "uncertain", authorization.TerminalObservedAtUtc is not null);
+        Assert.Equal(BackupExecutionOperationState.Applied, (await db.BackupPlanExecutionOperations.SingleAsync()).State);
+        var next = Guid.NewGuid();
+        Assert.True((await store.CreateTaskAsync(new(next, seed.PolicyId, BackupTaskTriggerType.Manual,
+            null, Guid.NewGuid(), DateTimeOffset.UtcNow, seed.Actor.AdminUserId, seed.Actor.SecurityStamp))).IsSucceeded);
+        await Runner(store, factory).RunTaskOnceAsync(next, CancellationToken.None);
+        Assert.Equal(outcome == "uncertain" ? 1 : 2, _adapters.Backups);
+        if (outcome == "uncertain")
+            Assert.Equal(BackupTaskStatus.NeedsAttention, (await store.FindTaskAsync(seed.TaskId))!.Status);
+        Assert.Equal(outcome == "uncertain" ? 1 : 2, await db.BackupInvocationAuthorizations.CountAsync());
+    }
+
     [Fact]
     public async Task RejectedPreparationCountsAsWorkWithoutCallingAdapters()
     {
@@ -1155,8 +1182,9 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
         IBackupFileStorageProbe, IBackupDirectoryPreparer, IBackupFileTransferExecutor,
         IBackupFileDeletionExecutor
     {
+        private readonly HashSet<string> _invokedPaths = new(StringComparer.Ordinal);
         public int Backups, Verifications, IdentityInspections, DirectoryPreparations;
-        public bool Unknown, ExistsInitially, Empty, VerificationUnknown,
+        public bool Unknown, ConfirmedFailure, ExistsInitially, Empty, VerificationUnknown,
             DirectoryPreparationFails;
         public TargetSqlBackupIdentityStatus IdentityStatus = TargetSqlBackupIdentityStatus.CompletedMatching;
         public int DelayMilliseconds;
@@ -1165,9 +1193,11 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
         public async Task<TargetSqlResult<TargetSqlFullBackupCompletion>> ExecuteFullBackupAsync(TargetSqlConnectionInput c, TargetSqlFullBackupRequest r, CancellationToken token = default)
         {
             Interlocked.Increment(ref Backups);
+            _invokedPaths.Add(r.LocalSqlFilePath);
             if (BeforeComplete is not null) await BeforeComplete(token);
             if (DelayMilliseconds > 0) await Task.Delay(DelayMilliseconds, token);
-            return Unknown ? TargetSqlResult.Indeterminate<TargetSqlFullBackupCompletion>(TargetSqlFailureCode.ConnectionInterrupted, TargetSqlFailurePhase.BackupExecution)
+            return ConfirmedFailure ? TargetSqlResult.ConfirmedFailure<TargetSqlFullBackupCompletion>(TargetSqlFailureCode.CommandRejected, TargetSqlFailurePhase.BackupExecution)
+                : Unknown ? TargetSqlResult.Indeterminate<TargetSqlFullBackupCompletion>(TargetSqlFailureCode.ConnectionInterrupted, TargetSqlFailurePhase.BackupExecution)
                 : TargetSqlResult.Succeeded(new TargetSqlFullBackupCompletion(true, true, false));
         }
         public Task<TargetSqlResult<TargetSqlBackupVerification>> VerifyBackupAsync(TargetSqlConnectionInput c, TargetSqlBackupVerificationRequest r, CancellationToken token = default)
@@ -1180,7 +1210,7 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
                 : TargetSqlResult.Succeeded(new TargetSqlBackupVerification(true)));
         }
         public Task<BackupFileProbeResult> InspectAsync(BackupTaskSnapshotModel s, BackupAttemptModel a, CancellationToken token)
-        { SmbBackupSourceProbe.ValidatePath(s, a); return Task.FromResult(new BackupFileProbeResult(true, ExistsInitially || Backups > 0, Backups > 0 ? Empty ? 0 : 4096 : null)); }
+        { SmbBackupSourceProbe.ValidatePath(s, a); return Task.FromResult(new BackupFileProbeResult(true, ExistsInitially || _invokedPaths.Contains(a.LocalSqlFilePath), _invokedPaths.Contains(a.LocalSqlFilePath) ? Empty ? 0 : 4096 : null)); }
         public Task<TargetSqlResult<TargetSqlServerInfo>> ProbeServerAsync(TargetSqlConnectionInput c, CancellationToken token = default) => throw new NotSupportedException();
         public Task<TargetSqlResult<TargetSqlDatabaseCatalog>> DiscoverDatabasesAsync(TargetSqlConnectionInput c, CancellationToken token = default) => throw new NotSupportedException();
         public Task<TargetSqlResult<TargetSqlBackupIdentity>> InspectBackupIdentityAsync(

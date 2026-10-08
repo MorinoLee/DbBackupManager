@@ -19,6 +19,10 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
 
     public DbSet<BackupSetEvidence> BackupSetEvidence => Set<BackupSetEvidence>();
 
+    public DbSet<BackupPlanExecutionOperation> BackupPlanExecutionOperations => Set<BackupPlanExecutionOperation>();
+    public DbSet<BackupPlanExecutionObservation> BackupPlanExecutionObservations => Set<BackupPlanExecutionObservation>();
+    public DbSet<BackupInvocationAuthorization> BackupInvocationAuthorizations => Set<BackupInvocationAuthorization>();
+
     public DbSet<BackupFileStateChange> BackupFileStateChanges => Set<BackupFileStateChange>();
 
     public DbSet<TaskEvent> TaskEvents => Set<TaskEvent>();
@@ -117,6 +121,7 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
 
     private void PrepareEntries()
     {
+        PrepareExecutionContractEntries();
         PrepareTaskIdentityEntries();
         var now = DateTimeOffset.UtcNow;
 
@@ -247,6 +252,11 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
             nameof(BackupAttempt.LocalVerifiedAtUtc),
             nameof(BackupAttempt.RemoteValidatedAtUtc),
             nameof(BackupAttempt.LocalCleanupCompletedAtUtc),
+            nameof(BackupAttempt.ExpectedDatabaseGuid),
+            nameof(BackupAttempt.ExpectedFamilyGuid),
+            nameof(BackupAttempt.AdmittedFullBackupSetId),
+            nameof(BackupAttempt.AdmissionRecoveryForkId),
+            nameof(BackupAttempt.AdmissionObservedAtUtc),
         ];
 
         foreach (var propertyName in immutableProperties)
@@ -344,10 +354,10 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
         }
     }
 
-    private static void RejectChangedProperty(
-        EntityEntry<BackupAttempt> entry,
+    private static void RejectChangedProperty<TEntity>(
+        EntityEntry<TEntity> entry,
         string propertyName,
-        string message)
+        string message) where TEntity : class
     {
         var property = entry.Property(propertyName);
         if (property.IsModified && !Equals(property.OriginalValue, property.CurrentValue))

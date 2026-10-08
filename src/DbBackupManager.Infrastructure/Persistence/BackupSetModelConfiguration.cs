@@ -129,9 +129,9 @@ internal static class BackupSetMapping
         builder.Property(x => x.ReasonCode).HasColumnName("BaselineReasonCode").HasMaxLength(100);
     }
 
-    internal static void CheckMetadata<TEntity>(TableBuilder<TEntity> table) where TEntity : class
+    internal static void CheckMetadata<TEntity>(TableBuilder<TEntity> table, string? tableName = null) where TEntity : class
     {
-        var name = typeof(TEntity) == typeof(BackupSet) ? "BackupSets" : "BackupSetEvidence";
+        var name = tableName ?? (typeof(TEntity) == typeof(BackupSet) ? "BackupSets" : "BackupSetEvidence");
         table.HasCheckConstraint($"CK_{name}_BackupSetGuid", "([BackupSetGuidState] = 'Known' AND [BackupSetGuid] IS NOT NULL AND [BackupSetGuid] <> '00000000-0000-0000-0000-000000000000') "
             + "OR ([BackupSetGuidState] IN ('Unknown') AND [BackupSetGuid] IS NULL)");
         table.HasCheckConstraint($"CK_{name}_DatabaseGuid", "([DatabaseGuidState] = 'Known' AND [DatabaseGuid] IS NOT NULL AND [DatabaseGuid] <> '00000000-0000-0000-0000-000000000000') "
