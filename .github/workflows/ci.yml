@@ -222,7 +222,21 @@ jobs:
         run: dotnet restore tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj
 
       - name: 运行 Infrastructure 测试
-        run: dotnet test tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj --configuration Release --no-restore
+        run: >-
+          dotnet test tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj
+          --configuration Release --no-restore
+          --logger "console;verbosity=normal" --logger "trx;LogFileName=infrastructure.trx"
+          --results-directory TestResults/infrastructure
+          --blame-hang --blame-hang-timeout 5m --blame-hang-dump-type none
+
+      - name: 保留 Infrastructure 测试与无响应诊断
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: infrastructure-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: TestResults/infrastructure/
+          if-no-files-found: warn
+          retention-days: 30
 
   web:
     name: Web 重测试
