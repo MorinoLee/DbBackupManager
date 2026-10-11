@@ -69,6 +69,39 @@ public sealed class BackupAttempt : ConcurrentEntity
 
     public string? OutcomeCode { get; private set; }
 
+    public Guid? ExpectedDatabaseGuid { get; private set; }
+    public Guid? ExpectedFamilyGuid { get; private set; }
+    public Guid? AdmittedFullBackupSetId { get; private set; }
+    public Guid? AdmissionRecoveryForkId { get; private set; }
+    public DateTimeOffset? AdmissionObservedAtUtc { get; private set; }
+
+    public void BindSqlIdentity(Guid databaseGuid, Guid familyGuid)
+    {
+        BackupTaskValues.RequireId(databaseGuid, nameof(databaseGuid));
+        BackupTaskValues.RequireId(familyGuid, nameof(familyGuid));
+        if (ExpectedDatabaseGuid == databaseGuid && ExpectedFamilyGuid == familyGuid) return;
+        if (ExpectedDatabaseGuid is not null || ExpectedFamilyGuid is not null
+            || BackupInvocationStatus != BackupInvocationStatus.Prepared)
+            throw new InvalidOperationException("SQL 身份只能在调用前固定，不能反填或覆盖。");
+        ExpectedDatabaseGuid = databaseGuid;
+        ExpectedFamilyGuid = familyGuid;
+    }
+
+    public void AdmitDifferential(Guid fullBackupSetId, Guid recoveryForkId, DateTimeOffset observedAtUtc)
+    {
+        BackupTaskValues.RequireId(fullBackupSetId, nameof(fullBackupSetId));
+        BackupTaskValues.RequireId(recoveryForkId, nameof(recoveryForkId));
+        BackupTaskValues.RequireUtc(observedAtUtc, nameof(observedAtUtc));
+        if (AdmittedFullBackupSetId == fullBackupSetId && AdmissionRecoveryForkId == recoveryForkId
+            && AdmissionObservedAtUtc == observedAtUtc) return;
+        if (BackupInvocationStatus != BackupInvocationStatus.Prepared || ExpectedDatabaseGuid is null
+            || AdmittedFullBackupSetId is not null)
+            throw new InvalidOperationException("差异准入只能在身份固定且尚未调用时写入一次。");
+        AdmittedFullBackupSetId = fullBackupSetId;
+        AdmissionRecoveryForkId = recoveryForkId;
+        AdmissionObservedAtUtc = observedAtUtc;
+    }
+
     public void MarkBackupRunning(DateTimeOffset startedAtUtc)
     {
         if (BackupInvocationStatus != BackupInvocationStatus.Prepared)

@@ -334,7 +334,8 @@ public sealed class BackupFileDeleteRequest
         string path,
         long expectedLengthBytes,
         string? expectedIdentity,
-        int timeoutSeconds)
+        int timeoutSeconds,
+        BackupArtifactDeletionOwner? owner = null)
     {
         Endpoint = endpoint ?? throw new ArgumentNullException(nameof(endpoint));
         Path = BackupFileStorageValues.ExactPath(path, nameof(path));
@@ -345,6 +346,7 @@ public sealed class BackupFileDeleteRequest
             ? null
             : BackupFileStorageValues.Text(expectedIdentity, 256, nameof(expectedIdentity));
         TimeoutSeconds = BackupFileStorageValues.Timeout(timeoutSeconds, nameof(timeoutSeconds));
+        Owner = owner;
     }
 
     public BackupFileEndpointInput Endpoint { get; }
@@ -354,6 +356,7 @@ public sealed class BackupFileDeleteRequest
     public long ExpectedLengthBytes { get; }
 
     public string? ExpectedIdentity { get; }
+    public BackupArtifactDeletionOwner? Owner { get; }
 
     public int TimeoutSeconds { get; }
 }

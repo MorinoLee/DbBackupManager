@@ -271,6 +271,16 @@ internal sealed class BackupAttemptConfiguration : IEntityTypeConfiguration<Back
     {
         builder.ToTable("BackupAttempts", table =>
         {
+            table.HasCheckConstraint("CK_BackupAttempts_SqlIdentity",
+                "([ExpectedDatabaseGuid] IS NULL AND [ExpectedFamilyGuid] IS NULL) OR "
+                + "([ExpectedDatabaseGuid] IS NOT NULL AND [ExpectedFamilyGuid] IS NOT NULL "
+                + "AND [ExpectedDatabaseGuid] <> '00000000-0000-0000-0000-000000000000' AND [ExpectedFamilyGuid] <> '00000000-0000-0000-0000-000000000000')");
+            table.HasCheckConstraint("CK_BackupAttempts_DifferentialAdmission",
+                "([AdmittedFullBackupSetId] IS NULL AND [AdmissionRecoveryForkId] IS NULL AND [AdmissionObservedAtUtc] IS NULL) OR "
+                + "([AdmittedFullBackupSetId] IS NOT NULL AND [AdmissionRecoveryForkId] IS NOT NULL AND [AdmissionObservedAtUtc] IS NOT NULL "
+                + "AND [ExpectedDatabaseGuid] IS NOT NULL AND [ExpectedFamilyGuid] IS NOT NULL "
+                + "AND [AdmittedFullBackupSetId] <> '00000000-0000-0000-0000-000000000000' "
+                + "AND [AdmissionRecoveryForkId] <> '00000000-0000-0000-0000-000000000000' AND DATEPART(TZOFFSET,[AdmissionObservedAtUtc]) = 0)");
             table.HasCheckConstraint("CK_BackupAttempts_AttemptNumber", "[AttemptNumber] > 0");
             table.HasCheckConstraint(
                 "CK_BackupAttempts_InvocationStatus",
@@ -374,6 +384,8 @@ internal sealed class BackupAttemptConfiguration : IEntityTypeConfiguration<Back
             .WithMany()
             .HasForeignKey(x => x.RemoteStorageTargetId)
             .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<DbBackupManager.Domain.BackupSets.BackupSet>()
+            .WithMany().HasForeignKey(x => x.AdmittedFullBackupSetId).OnDelete(DeleteBehavior.Restrict);
     }
 }
 

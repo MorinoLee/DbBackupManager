@@ -16,6 +16,8 @@ internal sealed class BackupRemoteStageExecutor(
         BackupExecutionWorkItem work,
         CancellationToken token)
     {
+        if (work.Snapshot.Purpose is not null || work.Snapshot.FileNameRuleVersion == "v3")
+            return new(BackupStageOutcome.Indeterminate, "plan.copy.protected");
         // 调用写入适配器前即标记开始；此后取消或抛异常时，外部结果必须交给恢复流程核对。
         var invoked = false;
         try
@@ -134,7 +136,9 @@ internal sealed class BackupRemoteStageExecutor(
                     work.Attempt.RemotePartialFilePath!,
                     part!.LengthBytes!.Value,
                     part.Identity,
-                    TimeoutSeconds(work)),
+                    TimeoutSeconds(work),
+                    new(work.Lease.TaskId, work.Lease.BackupAttemptId, null, BackupArtifactPathRole.RemotePartial,
+                        work.Lease.LeaseToken, work.Lease.RowVersion)),
                 token);
             if (!cleaned.IsSucceeded
                 && cleaned.Failure!.Code != BackupFileStorageFailureCode.FileNotFound)
@@ -238,7 +242,9 @@ internal sealed class BackupRemoteStageExecutor(
                 work.Attempt.WorkerSourceFilePath,
                 expected,
                 null,
-                TimeoutSeconds(work)),
+                TimeoutSeconds(work),
+                new(work.Lease.TaskId, work.Lease.BackupAttemptId, null, BackupArtifactPathRole.RemoteOnlySource,
+                    work.Lease.LeaseToken, work.Lease.RowVersion)),
             token);
         if (deleted.IsSucceeded
             || deleted.Failure?.Code == BackupFileStorageFailureCode.FileNotFound)

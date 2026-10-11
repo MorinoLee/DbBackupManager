@@ -212,7 +212,7 @@ internal sealed class BackupTaskPersistence(IDbContextFactory<PlatformDbContext>
         BackupTask task,
         CancellationToken cancellationToken)
     {
-        if (task.CurrentBackupAttemptId is null || task.LeaseToken is null)
+        if (task.PlanId is not null || task.PolicyId is null || task.CurrentBackupAttemptId is null || task.LeaseToken is null)
         {
             return null;
         }
@@ -247,6 +247,7 @@ internal sealed class BackupTaskPersistence(IDbContextFactory<PlatformDbContext>
         return new MutationRead(
             Found: true,
             Matches: change.TaskId == taskId
+                && (reason == BackupTaskCommandStore.CancellationReason || task.PlanId is null && task.PolicyId is not null)
                 && string.Equals(change.ReasonCode, reason, StringComparison.Ordinal),
             task);
     }

@@ -108,6 +108,8 @@ internal sealed class BackupFileRetentionStore(
         }
 
         DeletionCandidate? claimed;
+        if (await BackupArtifactProtection.IsProtectedAsync(context, file.Id, cancellationToken))
+            return new(BackupTaskStoreResultCode.Protected);
         if (file.Status == BackupFileStatus.DeletePending
             && file.DeletionLeaseExpiresAtUtc <= command.AcquiredAtUtc)
         {
@@ -154,6 +156,9 @@ internal sealed class BackupFileRetentionStore(
             return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.NotFound);
         }
 
+        if (await BackupArtifactProtection.IsProtectedAsync(context, file.Id, cancellationToken))
+            return new(BackupTaskStoreResultCode.Protected);
+
         if (file.Status != BackupFileStatus.DeletePending
             || file.DeletionLeaseToken != leaseToken
             || file.DeletionLeaseExpiresAtUtc is null
@@ -198,6 +203,8 @@ internal sealed class BackupFileRetentionStore(
                 await using var transaction = await context.Database.BeginTransactionAsync(
                     IsolationLevel.Serializable,
                     cancellationToken);
+                if (await BackupArtifactProtection.IsProtectedAsync(context, work.FileId, cancellationToken))
+                    return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.Protected);
                 var replay = await context.BackupFileStateChanges.SingleOrDefaultAsync(
                     change => change.MutationId == command.MutationId,
                     cancellationToken);
@@ -422,7 +429,7 @@ internal sealed class BackupFileRetentionStore(
         ClaimBackupFileDeletionCommand command,
         CancellationToken cancellationToken)
     {
-        var expiredLeases = await context.BackupFiles
+        var expiredLeases = await BackupArtifactProtection.EligibleLegacyFiles(context)
             .AsTracking()
             .Where(file => file.Status == BackupFileStatus.DeletePending
                 && file.DeletionLeaseExpiresAtUtc <= command.AcquiredAtUtc)
@@ -436,7 +443,7 @@ internal sealed class BackupFileRetentionStore(
             if (accepted is not null) return new(BackupTaskStoreResultCode.Succeeded, accepted);
         }
 
-        var failed = await context.BackupFiles
+        var failed = await BackupArtifactProtection.EligibleLegacyFiles(context)
             .AsTracking()
             .Where(file => file.Status == BackupFileStatus.DeleteFailed
                 && file.NextDeletionAttemptAtUtc <= command.AcquiredAtUtc)
@@ -450,7 +457,7 @@ internal sealed class BackupFileRetentionStore(
             if (accepted is not null) return new(BackupTaskStoreResultCode.Succeeded, accepted);
         }
 
-        var available = await context.BackupFiles
+        var available = await BackupArtifactProtection.EligibleLegacyFiles(context)
             .AsTracking()
             .Where(file => file.Status == BackupFileStatus.Available)
             .OrderBy(file => file.ValidatedAtUtc)
@@ -480,6 +487,7 @@ internal sealed class BackupFileRetentionStore(
         bool takeover,
         CancellationToken cancellationToken)
     {
+        if (await BackupArtifactProtection.IsProtectedAsync(context, file.Id, cancellationToken)) return null;
         var group = await LoadGroupAsync(context, file.RetentionGroup, cancellationToken);
         if (!BackupFileRetentionPolicy.HasProtectedAvailableCopy(group, file.Id))
         {
@@ -565,6 +573,8 @@ internal sealed class BackupFileRetentionStore(
                 BackupTaskStoreResultCode.StateMismatch);
         }
 
+        if (await BackupArtifactProtection.IsProtectedAsync(context, file.Id, cancellationToken))
+            return new(BackupTaskStoreResultCode.Protected);
         var endpoint = await TryCreateEndpointAsync(context, file, requireAccess, cancellationToken);
         if (endpoint is null)
         {
@@ -585,14 +595,14 @@ internal sealed class BackupFileRetentionStore(
         PlatformDbContext context,
         BackupFileRetentionGroup group,
         CancellationToken cancellationToken) =>
-        await context.BackupFiles
+        await BackupArtifactProtection.EligibleLegacyFiles(context)
             .AsTracking()
             .Where(file => file.DatabaseId == group.DatabaseId
                 && file.Location == group.Location
                 && file.StorageTargetId == group.StorageTargetId)
             .ToListAsync(cancellationToken);
 
-    private static async Task<BackupFileEndpointInput?> TryCreateEndpointAsync(
+    internal static async Task<BackupFileEndpointInput?> TryCreateEndpointAsync(
         PlatformDbContext context,
         BackupFile file,
         bool requireAccess,

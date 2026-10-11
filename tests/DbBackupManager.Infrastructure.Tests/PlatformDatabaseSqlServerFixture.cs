@@ -89,6 +89,9 @@ public sealed class PlatformDatabaseSqlServerFixture : IAsyncLifetime
             DELETE FROM [TaskEvents];
             DELETE FROM [BackupFileStateChanges];
             DELETE FROM [BackupFiles];
+            DELETE FROM [BackupInvocationAuthorizations];
+            DELETE FROM [BackupPlanExecutionObservations];
+            DELETE FROM [BackupPlanExecutionOperations];
             DELETE FROM [BackupTaskStateChanges];
             DELETE FROM [BackupTaskSnapshots];
             UPDATE [BackupTasks]

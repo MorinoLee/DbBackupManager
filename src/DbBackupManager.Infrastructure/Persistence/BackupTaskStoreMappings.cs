@@ -92,7 +92,8 @@ internal static class BackupTaskStoreMappings
             attempt.LocalVerifiedAtUtc,
             attempt.RemoteValidatedAtUtc,
             attempt.LocalCleanupCompletedAtUtc,
-            attempt.RowVersion);
+            attempt.RowVersion, attempt.ExpectedDatabaseGuid, attempt.ExpectedFamilyGuid,
+            attempt.AdmittedFullBackupSetId, attempt.AdmissionRecoveryForkId, attempt.AdmissionObservedAtUtc);
     }
 
     public static LeaseHandle ToLeaseHandle(this BackupTask task)

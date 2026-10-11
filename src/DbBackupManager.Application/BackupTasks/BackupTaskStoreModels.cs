@@ -15,6 +15,8 @@ public enum BackupTaskStoreResultCode
     StateMismatch,
     LeaseLost,
     ConcurrencyConflict,
+    DatabaseBlocked,
+    Protected,
 }
 
 public enum BackupStageOutcome
@@ -58,7 +60,9 @@ public sealed record BackupStageCommitCommand(
     DateTimeOffset? EvidenceAtUtc = null,
     long? SourceLengthBytes = null,
     string? ErrorCode = null,
-    string? ErrorMessage = null);
+    string? ErrorMessage = null,
+    BackupSqlOutcomeSource? SqlOutcomeSource = null,
+    bool? UsedCopyOnly = null, bool? UsedChecksum = null, bool? UsedCompression = null);
 
 public sealed record BackupTaskMutationCommand(
     Guid TaskId,
@@ -220,7 +224,12 @@ public sealed class BackupAttemptModel
         DateTimeOffset? localVerifiedAtUtc,
         DateTimeOffset? remoteValidatedAtUtc,
         DateTimeOffset? localCleanupCompletedAtUtc,
-        byte[] rowVersion)
+        byte[] rowVersion,
+        Guid? expectedDatabaseGuid = null,
+        Guid? expectedFamilyGuid = null,
+        Guid? admittedFullBackupSetId = null,
+        Guid? admissionRecoveryForkId = null,
+        DateTimeOffset? admissionObservedAtUtc = null)
     {
         ArgumentNullException.ThrowIfNull(rowVersion);
         Id = id;
@@ -236,8 +245,18 @@ public sealed class BackupAttemptModel
         RemoteValidatedAtUtc = remoteValidatedAtUtc;
         LocalCleanupCompletedAtUtc = localCleanupCompletedAtUtc;
         _rowVersion = [.. rowVersion];
+        ExpectedDatabaseGuid = expectedDatabaseGuid;
+        ExpectedFamilyGuid = expectedFamilyGuid;
+        AdmittedFullBackupSetId = admittedFullBackupSetId;
+        AdmissionRecoveryForkId = admissionRecoveryForkId;
+        AdmissionObservedAtUtc = admissionObservedAtUtc;
     }
 
+    public Guid? ExpectedDatabaseGuid { get; }
+    public Guid? ExpectedFamilyGuid { get; }
+    public Guid? AdmittedFullBackupSetId { get; }
+    public Guid? AdmissionRecoveryForkId { get; }
+    public DateTimeOffset? AdmissionObservedAtUtc { get; }
     public Guid Id { get; }
 
     public int AttemptNumber { get; }

@@ -117,6 +117,7 @@ public sealed class BackupTaskRunner(
             var refreshed = await RefreshAsync(work, stoppingToken);
             if (!refreshed.IsSucceeded || refreshed.Value is null) return true;
             work = refreshed.Value;
+            if (work.Snapshot.Purpose is not null || work.Snapshot.FileNameRuleVersion == "v3") return true;
             if (work.Task.CancellationRequestedAtUtc is not null
                 && !MustCompleteLocalVerification(work))
             {
@@ -215,7 +216,8 @@ public sealed class BackupTaskRunner(
                     result.ErrorCode,
                     result.ErrorCode is null
                         ? null
-                        : "备份阶段未完成，请根据错误分类检查后处理。"),
+                        : "备份阶段未完成，请根据错误分类检查后处理。",
+                    result.SqlOutcomeSource, result.UsedCopyOnly, result.UsedChecksum, result.UsedCompression),
                 stoppingToken);
             if (committed.Code != BackupTaskStoreResultCode.ConcurrencyConflict)
             {
@@ -312,7 +314,15 @@ public sealed class BackupTaskRunner(
                 invoked = true;
                 var result = await backup.ExecuteFullBackupAsync(target, new(s.Identity.DatabaseName, work.Attempt.LocalSqlFilePath,
                     s.Policy.UseCopyOnly, s.Policy.UseChecksum, s.Policy.UseCompression, s.Policy.BackupTimeoutMinutes * 60), token);
-                return Map(result);
+                var mapped = Map(result);
+                return mapped with
+                {
+                    SqlOutcomeSource = result.Outcome == TargetSqlOutcome.Indeterminate
+                    ? BackupSqlOutcomeSource.Unknown : BackupSqlOutcomeSource.PlatformResponse,
+                    UsedCopyOnly = result.Value?.UsedCopyOnly,
+                    UsedChecksum = result.Value?.UsedChecksum,
+                    UsedCompression = result.Value?.UsedCompression
+                };
             }
 
             if (!await guard.IsEnabledAsync(s, token))
@@ -341,9 +351,15 @@ public sealed class BackupTaskRunner(
             return new(BackupStageOutcome.ConfirmedFailed, "stage_not_supported");
         }
         catch (OperationCanceledException)
-        { return new(invoked ? BackupStageOutcome.Indeterminate : BackupStageOutcome.Cancelled, "execution_cancelled"); }
+        {
+            return new(invoked ? BackupStageOutcome.Indeterminate : BackupStageOutcome.Cancelled, "execution_cancelled",
+            SqlOutcomeSource: invoked ? BackupSqlOutcomeSource.Unknown : BackupSqlOutcomeSource.NotInvoked);
+        }
         catch (Exception)
-        { return new(invoked ? BackupStageOutcome.Indeterminate : BackupStageOutcome.ConfirmedFailed, "stage_adapter_failed"); }
+        {
+            return new(invoked ? BackupStageOutcome.Indeterminate : BackupStageOutcome.ConfirmedFailed, "stage_adapter_failed",
+            SqlOutcomeSource: invoked ? BackupSqlOutcomeSource.Unknown : BackupSqlOutcomeSource.NotInvoked);
+        }
     }
 
     private static BackupStageResult Map<T>(TargetSqlResult<T> result) where T : class => result.IsSucceeded

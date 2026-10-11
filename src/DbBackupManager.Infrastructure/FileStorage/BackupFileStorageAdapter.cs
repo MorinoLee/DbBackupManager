@@ -5,7 +5,8 @@ using DbBackupManager.Domain.Configuration;
 namespace DbBackupManager.Infrastructure.FileStorage;
 
 internal sealed class BackupFileStorageAdapter(
-    IEnumerable<IFileStorageProtocolSessionFactory> sessionFactories) :
+    IEnumerable<IFileStorageProtocolSessionFactory> sessionFactories,
+    IBackupArtifactDeletionGuard? deletionGuard = null) :
     IBackupFileStorageProbe,
     IBackupDirectoryPreparer,
     IBackupFileTransferExecutor,
@@ -203,6 +204,17 @@ internal sealed class BackupFileStorageAdapter(
         BackupFileDeleteRequest request,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        if (deletionGuard is not null)
+        {
+            var eligibility = await deletionGuard.EvaluateAsync(request, cancellationToken);
+            if (!eligibility.Allowed)
+                return BackupFileStorageResult.ConfirmedFailure<BackupFileMutationReceipt>(
+                    BackupFileStorageFailureCode.OperationRejected, BackupFileStorageFailurePhase.Delete);
+        }
+        else if (request.Owner is not null)
+            return BackupFileStorageResult.ConfirmedFailure<BackupFileMutationReceipt>(
+                BackupFileStorageFailureCode.OperationRejected, BackupFileStorageFailurePhase.Delete);
         var mutationStarted = false;
         try
         {

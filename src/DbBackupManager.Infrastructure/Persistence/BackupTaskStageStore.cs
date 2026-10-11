@@ -24,51 +24,36 @@ internal sealed class BackupTaskStageStore(BackupTaskPersistence persistence)
         {
             return await persistence.ExecuteWithStrategyAsync(async context =>
             {
-                var task = await context.BackupTasks.AsTracking().SingleOrDefaultAsync(
-                    item => item.Id == lease.TaskId,
-                    cancellationToken);
-                if (task is null)
+                var snapshot = await context.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == lease.TaskId, cancellationToken);
+                if (snapshot is null) return new BackupTaskStoreResult<LeaseHandle>(BackupTaskStoreResultCode.NotFound);
+                if (snapshot.Purpose is not null || snapshot.FileNameRuleVersion == "v3")
+                    return new BackupTaskStoreResult<LeaseHandle>(BackupTaskStoreResultCode.StateMismatch);
+                await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, snapshot.DatabaseId, cancellationToken);
+                var saved = await context.BackupInvocationAuthorizations.SingleOrDefaultAsync(x => x.TaskId == lease.TaskId && x.AttemptId == lease.BackupAttemptId, cancellationToken);
+                var command = new AuthorizeBackupInvocation(lease.BackupAttemptId, lease.BackupAttemptId,
+                    lease.BackupAttemptId, snapshot.DatabaseId, new() { CallerIncarnationId = lease.LeaseToken }, startedAtUtc, attemptRowVersion);
+                if (saved is not null) return new BackupTaskStoreResult<LeaseHandle>(
+                    BackupInvocationAuthorizationStore.Matches(BackupInvocationAuthorizationStore.Model(saved), lease, command)
+                        ? BackupTaskStoreResultCode.AlreadyApplied : BackupTaskStoreResultCode.ConcurrencyConflict);
+                var result = await BackupInvocationAuthorizationStore.AuthorizeCoreAsync(context, lease,
+                    command, DateTimeOffset.UtcNow, cancellationToken);
+                if (result.Code == BackupExecutionContractCode.Succeeded)
                 {
-                    return new BackupTaskStoreResult<LeaseHandle>(BackupTaskStoreResultCode.NotFound);
+                    await context.SaveChangesAsync(cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    return new BackupTaskStoreResult<LeaseHandle>(BackupTaskStoreResultCode.Succeeded, result.Value!.Lease);
                 }
-
-                var leaseError = ValidateLease(task, lease, startedAtUtc);
-                if (leaseError is not null)
+                return new BackupTaskStoreResult<LeaseHandle>(result.Code switch
                 {
-                    return new BackupTaskStoreResult<LeaseHandle>(leaseError.Value);
-                }
-
-                if (task.CurrentStage != BackupTaskStage.Backup)
-                {
-                    return new BackupTaskStoreResult<LeaseHandle>(
-                        BackupTaskStoreResultCode.StateMismatch);
-                }
-
-                var attempt = await context.BackupAttempts.AsTracking().SingleAsync(
-                    item => item.Id == lease.BackupAttemptId && item.TaskId == lease.TaskId,
-                    cancellationToken);
-                if (attempt.BackupInvocationStatus == BackupInvocationStatus.Running)
-                {
-                    return new BackupTaskStoreResult<LeaseHandle>(
-                        BackupTaskStoreResultCode.AlreadyApplied,
-                        task.ToLeaseHandle());
-                }
-
-                if (!attempt.RowVersion.SequenceEqual(attemptRowVersion)
-                    || attempt.BackupInvocationStatus != BackupInvocationStatus.Prepared)
-                {
-                    return new BackupTaskStoreResult<LeaseHandle>(
-                        BackupTaskStoreResultCode.ConcurrencyConflict);
-                }
-
-                attempt.MarkBackupRunning(startedAtUtc);
-                await context.SaveChangesAsync(cancellationToken);
-                return new BackupTaskStoreResult<LeaseHandle>(
-                    BackupTaskStoreResultCode.Succeeded,
-                    task.ToLeaseHandle());
+                    BackupExecutionContractCode.DatabaseBlocked => BackupTaskStoreResultCode.DatabaseBlocked,
+                    BackupExecutionContractCode.LeaseLost => BackupTaskStoreResultCode.LeaseLost,
+                    BackupExecutionContractCode.NotFound => BackupTaskStoreResultCode.NotFound,
+                    _ => BackupTaskStoreResultCode.ConcurrencyConflict
+                });
             }, cancellationToken);
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateException)
         {
             return new BackupTaskStoreResult<LeaseHandle>(
                 BackupTaskStoreResultCode.ConcurrencyConflict);
@@ -87,6 +72,21 @@ internal sealed class BackupTaskStageStore(BackupTaskPersistence persistence)
         {
             return await persistence.ExecuteWithStrategyAsync(async context =>
             {
+                var bindingSnapshot = await context.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == lease.TaskId, cancellationToken);
+                if (bindingSnapshot is null) return new BackupTaskStoreResult<BackupTaskTransitionModel>(BackupTaskStoreResultCode.NotFound);
+                if (bindingSnapshot.Purpose is not null || bindingSnapshot.FileNameRuleVersion == "v3")
+                    return new BackupTaskStoreResult<BackupTaskTransitionModel>(BackupTaskStoreResultCode.StateMismatch);
+                await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, bindingSnapshot.DatabaseId, cancellationToken);
+                _ = await context.BackupTasks.FromSqlInterpolated(
+                    $"SELECT * FROM [BackupTasks] WITH (UPDLOCK,HOLDLOCK) WHERE [Id] = {lease.TaskId}").AsTracking().SingleOrDefaultAsync(cancellationToken);
+                if (lease.Stage == BackupTaskStage.Backup)
+                {
+                    var savedOperation = await context.BackupPlanExecutionOperations.SingleOrDefaultAsync(x => x.Id == lease.BackupAttemptId, cancellationToken);
+                    if (savedOperation is { State: BackupExecutionOperationState.Applied or BackupExecutionOperationState.Frozen }
+                        && savedOperation.Facts != LegacySqlFacts(command))
+                        return new BackupTaskStoreResult<BackupTaskTransitionModel>(BackupTaskStoreResultCode.StateMismatch);
+                }
                 var replay = await ReadMutationAsync(
                     context,
                     command.MutationId,
@@ -124,6 +124,24 @@ internal sealed class BackupTaskStageStore(BackupTaskPersistence persistence)
 
                 try
                 {
+                    if (lease.Stage == BackupTaskStage.Backup)
+                    {
+                        var authorization = await context.BackupInvocationAuthorizations.AsTracking().SingleOrDefaultAsync(
+                            x => x.TaskId == task.Id && x.AttemptId == attempt.Id, cancellationToken);
+                        if (authorization is not null)
+                        {
+                            var operation = await context.BackupPlanExecutionOperations.AsTracking().SingleAsync(x => x.Id == authorization.SqlOperationId, cancellationToken);
+                            var facts = LegacySqlFacts(command);
+                            operation.Freeze(facts);
+                            // 在同一事务中先落实冻结边界，再应用阶段；任一步失败均回滚。
+                            await context.SaveChangesAsync(cancellationToken);
+                            if (facts.OriginalCallTerminated)
+                                authorization.RecordTermination(command.MutationId, operation.Id,
+                                    command.Outcome == BackupStageOutcome.Succeeded ? BackupInvocationTerminationKind.PlatformCompleted : BackupInvocationTerminationKind.PlatformConfirmedFailed,
+                                    command.EvidenceAtUtc ?? command.OccurredAtUtc, true, true);
+                            operation.MarkApplied();
+                        }
+                    }
                     ApplyStageOutcome(task, snapshot, attempt, lease, command);
                     RegisterSuccessfulStageFile(
                         context,
@@ -160,6 +178,7 @@ internal sealed class BackupTaskStageStore(BackupTaskPersistence persistence)
                     command.OccurredAtUtc,
                     command.ErrorCode);
                 await context.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
                 var nextLease = task.LeaseToken == lease.LeaseToken ? task.ToLeaseHandle() : null;
                 return new BackupTaskStoreResult<BackupTaskTransitionModel>(
                     BackupTaskStoreResultCode.Succeeded,
@@ -173,6 +192,14 @@ internal sealed class BackupTaskStageStore(BackupTaskPersistence persistence)
         }
         catch (DbUpdateException)
         {
+            await using var replayContext = await persistence.CreateDbContextAsync(cancellationToken);
+            if (lease.Stage == BackupTaskStage.Backup)
+            {
+                var saved = await replayContext.BackupPlanExecutionOperations.SingleOrDefaultAsync(x => x.Id == lease.BackupAttemptId, cancellationToken);
+                if (saved is { State: BackupExecutionOperationState.Frozen or BackupExecutionOperationState.Applied }
+                    && saved.Facts != LegacySqlFacts(command))
+                    return new(BackupTaskStoreResultCode.StateMismatch);
+            }
             return await persistence.ResolveTransitionReplayAsync(
                 lease.TaskId,
                 command.MutationId,
@@ -180,6 +207,32 @@ internal sealed class BackupTaskStageStore(BackupTaskPersistence persistence)
                 lease.LeaseToken,
                 cancellationToken);
         }
+    }
+
+    private static BackupExecutionFacts LegacySqlFacts(BackupStageCommitCommand command)
+    {
+        var terminal = command.Outcome is BackupStageOutcome.Succeeded or BackupStageOutcome.ConfirmedFailed
+            || command.Outcome == BackupStageOutcome.Cancelled && command.SqlOutcomeSource == BackupSqlOutcomeSource.NotInvoked;
+        return new()
+        {
+            Outcome = command.Outcome switch
+            {
+                BackupStageOutcome.Succeeded => BackupExecutionOutcome.Succeeded,
+                BackupStageOutcome.ConfirmedFailed => BackupExecutionOutcome.ConfirmedFailed,
+                BackupStageOutcome.Indeterminate => BackupExecutionOutcome.Indeterminate,
+                _ => BackupExecutionOutcome.Cancelled
+            },
+            SqlOutcomeSource = command.SqlOutcomeSource ?? (terminal ? BackupSqlOutcomeSource.PlatformResponse : BackupSqlOutcomeSource.Unknown),
+            UsedCopyOnly = command.UsedCopyOnly,
+            UsedChecksum = command.UsedChecksum,
+            UsedCompression = command.UsedCompression,
+            SqlSuccessObserved = command.Outcome == BackupStageOutcome.Succeeded,
+            PlatformCompletedAtUtc = command.Outcome == BackupStageOutcome.Succeeded ? command.EvidenceAtUtc ?? command.OccurredAtUtc : null,
+            EvidenceAtUtc = command.EvidenceAtUtc ?? command.OccurredAtUtc,
+            OriginalCallTerminated = terminal,
+            OriginalCallerCannotInvoke = terminal,
+            ReasonCode = command.ErrorCode
+        };
     }
 
     private static void ApplyStageOutcome(

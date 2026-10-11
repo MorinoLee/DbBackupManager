@@ -1187,6 +1187,15 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<DateTimeOffset?>("AdmissionObservedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid?>("AdmissionRecoveryForkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AdmittedFullBackupSetId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<int>("AttemptNumber")
                         .HasColumnType("int");
 
@@ -1206,6 +1215,12 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasPrecision(7)
                         .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid?>("ExpectedDatabaseGuid")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ExpectedFamilyGuid")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<DateTimeOffset?>("LocalCleanupCompletedAtUtc")
                         .HasPrecision(7)
@@ -1284,6 +1299,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                     b.HasAlternateKey("TaskId", "Id")
                         .HasName("AK_BackupAttempts_TaskId_Id");
 
+                    b.HasIndex("AdmittedFullBackupSetId");
+
                     b.HasIndex("LocalSqlFilePathHash")
                         .IsUnique()
                         .HasDatabaseName("UX_BackupAttempts_LocalSqlFilePathHash");
@@ -1306,6 +1323,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         {
                             t.HasCheckConstraint("CK_BackupAttempts_AttemptNumber", "[AttemptNumber] > 0");
 
+                            t.HasCheckConstraint("CK_BackupAttempts_DifferentialAdmission", "([AdmittedFullBackupSetId] IS NULL AND [AdmissionRecoveryForkId] IS NULL AND [AdmissionObservedAtUtc] IS NULL) OR ([AdmittedFullBackupSetId] IS NOT NULL AND [AdmissionRecoveryForkId] IS NOT NULL AND [AdmissionObservedAtUtc] IS NOT NULL AND [ExpectedDatabaseGuid] IS NOT NULL AND [ExpectedFamilyGuid] IS NOT NULL AND [AdmittedFullBackupSetId] <> '00000000-0000-0000-0000-000000000000' AND [AdmissionRecoveryForkId] <> '00000000-0000-0000-0000-000000000000' AND DATEPART(TZOFFSET,[AdmissionObservedAtUtc]) = 0)");
+
                             t.HasCheckConstraint("CK_BackupAttempts_EvidenceOrder", "([LocalVerifiedAtUtc] IS NULL OR [LocalVerifiedAtUtc] >= [BackupFinishedAtUtc]) AND ([RemoteValidatedAtUtc] IS NULL OR ([SourceLengthBytes] > 0 AND [RemoteStorageTargetId] IS NOT NULL AND [RemoteValidatedAtUtc] >= [LocalVerifiedAtUtc])) AND ([LocalCleanupCompletedAtUtc] IS NULL OR ([RemoteValidatedAtUtc] IS NOT NULL AND [LocalCleanupCompletedAtUtc] >= [RemoteValidatedAtUtc]))");
 
                             t.HasCheckConstraint("CK_BackupAttempts_InvocationStatus", "[BackupInvocationStatus] IN ('Prepared', 'Running', 'Succeeded', 'ConfirmedFailed', 'Indeterminate')");
@@ -1319,6 +1338,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("CK_BackupAttempts_RemotePaths", "([RemoteStorageTargetId] IS NULL AND [RemotePartialFilePath] IS NULL AND [RemoteFinalFilePath] IS NULL) OR ([RemoteStorageTargetId] IS NOT NULL AND LEN([RemotePartialFilePath]) > 0 AND LEN([RemoteFinalFilePath]) > 0 AND RIGHT([RemotePartialFilePath], 5) = '.part' AND [RemotePartialFilePath] <> [RemoteFinalFilePath])");
 
                             t.HasCheckConstraint("CK_BackupAttempts_RequiredPaths", "LEN([LocalSqlFilePath]) > 0 AND LEN([WorkerSourceFilePath]) > 0");
+
+                            t.HasCheckConstraint("CK_BackupAttempts_SqlIdentity", "([ExpectedDatabaseGuid] IS NULL AND [ExpectedFamilyGuid] IS NULL) OR ([ExpectedDatabaseGuid] IS NOT NULL AND [ExpectedFamilyGuid] IS NOT NULL AND [ExpectedDatabaseGuid] <> '00000000-0000-0000-0000-000000000000' AND [ExpectedFamilyGuid] <> '00000000-0000-0000-0000-000000000000')");
                         });
                 });
 
@@ -1546,6 +1567,1285 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("CK_BackupFileStateChanges_ReasonCode_NotEmpty", "LEN([ReasonCode]) > 0");
 
                             t.HasCheckConstraint("CK_BackupFileStateChanges_ToStatus", "[ToStatus] IN ('Available', 'DeletePending', 'DeleteFailed', 'Deleted', 'Missing')");
+                        });
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.BackupTasks.BackupInvocationAuthorization", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AttemptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("GrantedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("MutationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("SqlOperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("TerminalObservedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid?>("TerminationEvidenceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TerminationKind")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<Guid?>("TerminationMutationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.ComplexProperty(typeof(Dictionary<string, object>), "Binding", "DbBackupManager.Domain.BackupTasks.BackupInvocationAuthorization.Binding#BackupInvocationBinding", b1 =>
+                        {
+                            b1.IsRequired();
+
+                            b1.Property<Guid>("CallerIncarnationId")
+                                .HasColumnType("uniqueidentifier")
+                                .HasColumnName("CallerIncarnationId");
+
+                            b1.Property<Guid?>("ConnectionId")
+                                .HasColumnType("uniqueidentifier")
+                                .HasColumnName("ConnectionId");
+
+                            b1.Property<DateTime?>("SessionEstablishedLocal")
+                                .HasColumnType("datetime2(7)")
+                                .HasColumnName("SessionEstablishedLocal");
+
+                            b1.Property<int?>("SessionId")
+                                .HasColumnType("int")
+                                .HasColumnName("SessionId");
+
+                            b1.Property<string>("State")
+                                .IsRequired()
+                                .HasMaxLength(20)
+                                .HasColumnType("nvarchar(20)")
+                                .HasColumnName("BindingState");
+                        });
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DatabaseId")
+                        .IsUnique()
+                        .HasFilter("[TerminalObservedAtUtc] IS NULL");
+
+                    b.HasIndex("MutationId")
+                        .IsUnique();
+
+                    b.HasIndex("TerminationMutationId")
+                        .IsUnique()
+                        .HasFilter("[TerminationMutationId] IS NOT NULL");
+
+                    b.HasIndex("TaskId", "AttemptId")
+                        .IsUnique();
+
+                    b.HasIndex("TaskId", "AttemptId", "SqlOperationId");
+
+                    b.HasIndex("TaskId", "AttemptId", "TerminationEvidenceId");
+
+                    b.ToTable("BackupInvocationAuthorizations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_BackupInvocationAuthorizations_Binding", "[CallerIncarnationId] <> '00000000-0000-0000-0000-000000000000' AND (([BindingState] = 'Unknown' AND [SessionId] IS NULL AND [SessionEstablishedLocal] IS NULL AND [ConnectionId] IS NULL) OR ([BindingState] = 'Known' AND [SessionId] IS NOT NULL AND [SessionId] > 0 AND [SessionEstablishedLocal] IS NOT NULL AND ([ConnectionId] IS NULL OR ([ConnectionId] IS NOT NULL AND [ConnectionId] <> '00000000-0000-0000-0000-000000000000'))))");
+
+                            t.HasCheckConstraint("CK_BackupInvocationAuthorizations_GrantedAtUtc", "DATEPART(TZOFFSET,[GrantedAtUtc]) = 0");
+
+                            t.HasCheckConstraint("CK_BackupInvocationAuthorizations_Termination", "([TerminalObservedAtUtc] IS NULL AND [TerminationKind] IS NULL AND [TerminationEvidenceId] IS NULL AND [TerminationMutationId] IS NULL) OR ([TerminalObservedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[TerminalObservedAtUtc]) = 0 AND [TerminationKind] IS NOT NULL AND [TerminationKind] IN ('PlatformCompleted','PlatformConfirmedFailed','RecoveredTerminated') AND ([TerminationKind] <> 'RecoveredTerminated' OR [BindingState] = 'Known') AND [TerminationEvidenceId] IS NOT NULL AND [TerminationEvidenceId] <> '00000000-0000-0000-0000-000000000000' AND [TerminationMutationId] IS NOT NULL AND [TerminationMutationId] <> '00000000-0000-0000-0000-000000000000')");
+                        });
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("EntryNumber")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.ComplexProperty(typeof(Dictionary<string, object>), "Facts", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts", b1 =>
+                        {
+                            b1.IsRequired();
+
+                            b1.Property<Guid?>("ActualBaseBackupSetId")
+                                .HasColumnType("uniqueidentifier")
+                                .HasColumnName("ActualBaseBackupSetId");
+
+                            b1.Property<DateTimeOffset?>("EvidenceAtUtc")
+                                .HasColumnType("datetimeoffset")
+                                .HasColumnName("EvidenceAtUtc");
+
+                            b1.Property<bool>("OriginalCallTerminated")
+                                .HasColumnType("bit")
+                                .HasColumnName("OriginalCallTerminated");
+
+                            b1.Property<bool>("OriginalCallerCannotInvoke")
+                                .HasColumnType("bit")
+                                .HasColumnName("OriginalCallerCannotInvoke");
+
+                            b1.Property<string>("Outcome")
+                                .IsRequired()
+                                .HasMaxLength(20)
+                                .HasColumnType("nvarchar(20)")
+                                .HasColumnName("Outcome");
+
+                            b1.Property<DateTimeOffset?>("PlatformCompletedAtUtc")
+                                .HasColumnType("datetimeoffset")
+                                .HasColumnName("PlatformCompletedAtUtc");
+
+                            b1.Property<string>("ReasonCode")
+                                .HasMaxLength(100)
+                                .HasColumnType("nvarchar(100)")
+                                .HasColumnName("ReasonCode");
+
+                            b1.Property<string>("SqlOutcomeSource")
+                                .IsRequired()
+                                .HasMaxLength(20)
+                                .HasColumnType("nvarchar(20)")
+                                .HasColumnName("SqlOutcomeSource");
+
+                            b1.Property<bool>("SqlSuccessObserved")
+                                .HasColumnType("bit")
+                                .HasColumnName("SqlSuccessObserved");
+
+                            b1.Property<bool?>("UsedChecksum")
+                                .HasColumnType("bit")
+                                .HasColumnName("UsedChecksum");
+
+                            b1.Property<bool?>("UsedCompression")
+                                .HasColumnType("bit")
+                                .HasColumnName("UsedCompression");
+
+                            b1.Property<bool?>("UsedCopyOnly")
+                                .HasColumnType("bit")
+                                .HasColumnName("UsedCopyOnly");
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "ActiveAssessment", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.ActiveAssessment#BackupSetAssessment", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("Conclusion")
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("ActiveConclusion");
+
+                                    b2.Property<string>("ReasonCode")
+                                        .HasMaxLength(100)
+                                        .HasColumnType("nvarchar(100)")
+                                        .HasColumnName("ActiveReasonCode");
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("ActiveAssessmentState");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "Assessment", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Assessment#BackupSetAssessment", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("Conclusion")
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("Conclusion");
+
+                                    b2.Property<string>("ReasonCode")
+                                        .HasMaxLength(100)
+                                        .HasColumnType("nvarchar(100)")
+                                        .HasColumnName("BaselineReasonCode");
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("AssessmentState");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "Completion", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Completion#BackupCompletionTimeDecision", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<DateTimeOffset?>("CompletedAtUtc")
+                                        .HasColumnType("datetimeoffset")
+                                        .HasColumnName("CompletedAtUtc");
+
+                                    b2.Property<string>("ReasonCode")
+                                        .IsRequired()
+                                        .HasMaxLength(100)
+                                        .HasColumnType("nvarchar(100)")
+                                        .HasColumnName("CompletionReasonCode");
+
+                                    b2.Property<string>("Source")
+                                        .IsRequired()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("CompletionSource");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "Content", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Content#BackupContentEvidence", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("DigestAlgorithm")
+                                        .HasMaxLength(6)
+                                        .HasColumnType("nvarchar(6)")
+                                        .HasColumnName("ContentDigestAlgorithm");
+
+                                    b2.Property<byte[]>("DigestHex")
+                                        .HasColumnType("binary(32)")
+                                        .HasColumnName("ContentDigest");
+
+                                    b2.Property<long?>("LengthBytes")
+                                        .HasColumnType("bigint")
+                                        .HasColumnName("ContentLengthBytes");
+
+                                    b2.Property<string>("Protection")
+                                        .IsRequired()
+                                        .HasMaxLength(30)
+                                        .HasColumnType("nvarchar(30)")
+                                        .HasColumnName("ObjectProtection");
+
+                                    b2.Property<string>("ReasonCode")
+                                        .HasMaxLength(100)
+                                        .HasColumnType("nvarchar(100)")
+                                        .HasColumnName("ContentReasonCode");
+
+                                    b2.Property<string>("StableObjectId")
+                                        .HasMaxLength(256)
+                                        .HasColumnType("nvarchar(256)")
+                                        .HasColumnName("StableObjectId");
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("ContentState");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "Metadata", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "BackupSetGuid", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.BackupSetGuid#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("BackupSetGuidState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("BackupSetGuid");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "CheckpointLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.CheckpointLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("CheckpointLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("CheckpointLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "DatabaseBackupLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.DatabaseBackupLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("DatabaseBackupLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("DatabaseBackupLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "DatabaseGuid", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.DatabaseGuid#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("DatabaseGuidState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("DatabaseGuid");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "DifferentialBaseGuid", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.DifferentialBaseGuid#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("DifferentialBaseGuidState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("DifferentialBaseGuid");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "DifferentialBaseLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.DifferentialBaseLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("DifferentialBaseLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("DifferentialBaseLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "FamilyGuid", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.FamilyGuid#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("FamilyGuidState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("FamilyGuid");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "FirstLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.FirstLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("FirstLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("FirstLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "FirstRecoveryForkId", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.FirstRecoveryForkId#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("FirstRecoveryForkIdState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("FirstRecoveryForkId");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "ForkPointLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.ForkPointLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("ForkPointLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("ForkPointLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "HasBackupChecksums", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.HasBackupChecksums#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("HasBackupChecksumsState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("HasBackupChecksums");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "HasIncompleteMetadata", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.HasIncompleteMetadata#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("HasIncompleteMetadataState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("HasIncompleteMetadata");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsCompressed", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsCompressed#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("IsCompressedState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsCompressed");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsCopyOnly", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsCopyOnly#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("IsCopyOnlyState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsCopyOnly");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsDamaged", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsDamaged#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("IsDamagedState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsDamaged");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsSnapshot", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsSnapshot#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("IsSnapshotState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsSnapshot");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "LastLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.LastLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("LastLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("LastLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "RecoveryForkId", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.RecoveryForkId#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("RecoveryForkIdState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("RecoveryForkId");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "SqlFinishedLocal", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.SqlFinishedLocal#BackupMetadataField<DateTime>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("SqlFinishedLocalState");
+
+                                            b3.Property<DateTime?>("Value")
+                                                .HasColumnType("datetime2(7)")
+                                                .HasColumnName("SqlFinishedLocal");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "SqlStartedLocal", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.SqlStartedLocal#BackupMetadataField<DateTime>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("SqlStartedLocalState");
+
+                                            b3.Property<DateTime?>("Value")
+                                                .HasColumnType("datetime2(7)")
+                                                .HasColumnName("SqlStartedLocal");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "Type", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.Type#BackupMetadataField<BackupType>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("TypeState");
+
+                                            b3.Property<string>("Value")
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("Type");
+                                        });
+                                });
+                        });
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId", "EntryNumber")
+                        .IsUnique();
+
+                    b.ToTable("BackupPlanExecutionObservations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_ActiveAssessment", "([ActiveAssessmentState] = 'NotApplicable' AND [ActiveConclusion] IS NULL AND [ActiveReasonCode] IS NULL) OR ([ActiveAssessmentState] = 'Known' AND [ActiveConclusion] IS NOT NULL AND [ActiveConclusion] IN ('Verified','Unmanaged','Mismatch','Unknown') AND [ActiveReasonCode] IS NOT NULL AND [ActiveReasonCode] IN ('baseline.backup_type_mismatch','baseline.copy_only_differential','baseline.copy_only_full','baseline.database_backup_lsn_mismatch','baseline.database_identity_mismatch','baseline.duplicate_managed_guid','baseline.external_full_observed','baseline.history_not_found','baseline.lsn_mismatch','baseline.managed_full_not_found','baseline.managed_full_verified','baseline.missing_fields','baseline.multiple_bases','baseline.permission_denied','baseline.recovery_branch_mismatch','baseline.source_conflict'))");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_Assessment", "([AssessmentState] = 'NotApplicable' AND [Conclusion] IS NULL AND [BaselineReasonCode] IS NULL) OR ([AssessmentState] = 'Known' AND [Conclusion] IS NOT NULL AND [Conclusion] IN ('Verified','Unmanaged','Mismatch','Unknown') AND [BaselineReasonCode] IS NOT NULL AND [BaselineReasonCode] IN ('baseline.backup_type_mismatch','baseline.copy_only_differential','baseline.copy_only_full','baseline.database_backup_lsn_mismatch','baseline.database_identity_mismatch','baseline.duplicate_managed_guid','baseline.external_full_observed','baseline.history_not_found','baseline.lsn_mismatch','baseline.managed_full_not_found','baseline.managed_full_verified','baseline.missing_fields','baseline.multiple_bases','baseline.permission_denied','baseline.recovery_branch_mismatch','baseline.source_conflict'))");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_BackupSetGuid", "([BackupSetGuidState] = 'Known' AND [BackupSetGuid] IS NOT NULL AND [BackupSetGuid] <> '00000000-0000-0000-0000-000000000000') OR ([BackupSetGuidState] IN ('Unknown') AND [BackupSetGuid] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_CheckpointLsn", "([CheckpointLsnState] = 'Known' AND [CheckpointLsn] IS NOT NULL AND [CheckpointLsn] >= 0) OR ([CheckpointLsnState] IN ('Unknown') AND [CheckpointLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_Completion", "([CompletionSource] = 'PlatformObserved' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.platform_observed') OR ([CompletionSource] = 'SqlLocalTime' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.sql_local_converted') OR ([CompletionSource] = 'Unknown' AND [CompletedAtUtc] IS NULL AND [CompletionReasonCode] IN ('completion.ambiguous_local_time','completion.conversion_out_of_range','completion.future_sql_time','completion.invalid_local_time','completion.older_than_24_hours','completion.server_offset_mismatch','completion.server_offset_unknown','completion.server_time_zone_unknown','completion.sql_finish_missing'))");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_Content", "([ContentState] = 'Unknown' AND [ContentDigestAlgorithm] IS NULL AND [ContentDigest] IS NULL AND [ContentLengthBytes] IS NULL) OR ([ContentState] = 'Verified' AND [ContentDigestAlgorithm] IS NOT NULL AND [ContentDigestAlgorithm] = 'SHA256' AND [ContentDigest] IS NOT NULL AND [ContentLengthBytes] IS NOT NULL AND [ContentLengthBytes] > 0)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_DatabaseBackupLsn", "([DatabaseBackupLsnState] = 'Known' AND [DatabaseBackupLsn] IS NOT NULL AND [DatabaseBackupLsn] >= 0) OR ([DatabaseBackupLsnState] IN ('Unknown') AND [DatabaseBackupLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_DatabaseGuid", "([DatabaseGuidState] = 'Known' AND [DatabaseGuid] IS NOT NULL AND [DatabaseGuid] <> '00000000-0000-0000-0000-000000000000') OR ([DatabaseGuidState] IN ('Unknown') AND [DatabaseGuid] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_DifferentialBaseGuid", "([DifferentialBaseGuidState] = 'Known' AND [DifferentialBaseGuid] IS NOT NULL AND [DifferentialBaseGuid] <> '00000000-0000-0000-0000-000000000000') OR ([DifferentialBaseGuidState] IN ('Unknown','NotApplicable') AND [DifferentialBaseGuid] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_DifferentialBaseLsn", "([DifferentialBaseLsnState] = 'Known' AND [DifferentialBaseLsn] IS NOT NULL AND [DifferentialBaseLsn] >= 0) OR ([DifferentialBaseLsnState] IN ('Unknown','NotApplicable') AND [DifferentialBaseLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_DifferentialFields", "([TypeState] = 'Known' AND [Type] IS NOT NULL AND [Type] IN ('Full','Log') AND [DifferentialBaseLsnState] = 'NotApplicable' AND [DifferentialBaseGuidState] = 'NotApplicable') OR ([TypeState] = 'Known' AND [Type] IS NOT NULL AND [Type] = 'Differential' AND [DifferentialBaseLsnState] <> 'NotApplicable' AND [DifferentialBaseGuidState] <> 'NotApplicable') OR ([TypeState] = 'Unknown' AND [Type] IS NULL AND [DifferentialBaseLsnState] <> 'NotApplicable' AND [DifferentialBaseGuidState] <> 'NotApplicable')");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_EvidenceAtUtc", "[EvidenceAtUtc] IS NULL OR ([EvidenceAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[EvidenceAtUtc]) = 0)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_FamilyGuid", "([FamilyGuidState] = 'Known' AND [FamilyGuid] IS NOT NULL AND [FamilyGuid] <> '00000000-0000-0000-0000-000000000000') OR ([FamilyGuidState] IN ('Unknown') AND [FamilyGuid] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_FirstLsn", "([FirstLsnState] = 'Known' AND [FirstLsn] IS NOT NULL AND [FirstLsn] >= 0) OR ([FirstLsnState] IN ('Unknown') AND [FirstLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_FirstRecoveryForkId", "([FirstRecoveryForkIdState] = 'Known' AND [FirstRecoveryForkId] IS NOT NULL AND [FirstRecoveryForkId] <> '00000000-0000-0000-0000-000000000000') OR ([FirstRecoveryForkIdState] IN ('Unknown') AND [FirstRecoveryForkId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_ForkPointLsn", "([ForkPointLsnState] = 'Known' AND [ForkPointLsn] IS NOT NULL AND [ForkPointLsn] >= 0) OR ([ForkPointLsnState] IN ('Unknown','NotApplicable') AND [ForkPointLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_HasBackupChecksums", "([HasBackupChecksumsState] = 'Known' AND [HasBackupChecksums] IS NOT NULL) OR ([HasBackupChecksumsState] IN ('Unknown') AND [HasBackupChecksums] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_HasIncompleteMetadata", "([HasIncompleteMetadataState] = 'Known' AND [HasIncompleteMetadata] IS NOT NULL) OR ([HasIncompleteMetadataState] IN ('Unknown') AND [HasIncompleteMetadata] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsCompressed", "([IsCompressedState] = 'Known' AND [IsCompressed] IS NOT NULL) OR ([IsCompressedState] IN ('Unknown') AND [IsCompressed] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsCopyOnly", "([IsCopyOnlyState] = 'Known' AND [IsCopyOnly] IS NOT NULL) OR ([IsCopyOnlyState] IN ('Unknown') AND [IsCopyOnly] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsDamaged", "([IsDamagedState] = 'Known' AND [IsDamaged] IS NOT NULL) OR ([IsDamagedState] IN ('Unknown') AND [IsDamaged] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsSnapshot", "([IsSnapshotState] = 'Known' AND [IsSnapshot] IS NOT NULL) OR ([IsSnapshotState] IN ('Unknown') AND [IsSnapshot] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_LastLsn", "([LastLsnState] = 'Known' AND [LastLsn] IS NOT NULL AND [LastLsn] >= 0) OR ([LastLsnState] IN ('Unknown') AND [LastLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_Outcome", "[Outcome] IN ('Unknown','Succeeded','ConfirmedFailed','Indeterminate','Cancelled') AND [SqlOutcomeSource] IN ('Unknown','NotInvoked','PlatformResponse','RecoveredEvidence') AND ([SqlOutcomeSource] <> 'NotInvoked' OR [SqlSuccessObserved] = 0) AND [ObjectProtection] IN ('Unknown','Unsupported','GuardedUntilCommit')");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_PlatformCompletedAtUtc", "[PlatformCompletedAtUtc] IS NULL OR ([PlatformCompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[PlatformCompletedAtUtc]) = 0 AND [SqlOutcomeSource] = 'PlatformResponse' AND [SqlSuccessObserved] = 1)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_RecoveryForkId", "([RecoveryForkIdState] = 'Known' AND [RecoveryForkId] IS NOT NULL AND [RecoveryForkId] <> '00000000-0000-0000-0000-000000000000') OR ([RecoveryForkIdState] IN ('Unknown') AND [RecoveryForkId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_Source", "[EntryNumber] >= 0 AND [Source] IN ('Comparison','BackupHeader','Msdb','Database','Registration','SourceFile','RemotePartial','RemoteFinal','Termination') AND [Kind] IN ('Backup','Dependency','ActiveBaseline')");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_SqlFinishedLocal", "([SqlFinishedLocalState] = 'Known' AND [SqlFinishedLocal] IS NOT NULL) OR ([SqlFinishedLocalState] IN ('Unknown') AND [SqlFinishedLocal] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_SqlStartedLocal", "([SqlStartedLocalState] = 'Known' AND [SqlStartedLocal] IS NOT NULL) OR ([SqlStartedLocalState] IN ('Unknown') AND [SqlStartedLocal] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_Type", "([TypeState] = 'Known' AND [Type] IS NOT NULL AND [Type] IN ('Full','Differential','Log')) OR ([TypeState] IN ('Unknown') AND [Type] IS NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AttemptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("IntendedBackupSetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<DateTimeOffset>("ObservedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("int");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.ComplexProperty(typeof(Dictionary<string, object>), "Facts", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts", b1 =>
+                        {
+                            b1.IsRequired();
+
+                            b1.Property<Guid?>("ActualBaseBackupSetId")
+                                .HasColumnType("uniqueidentifier")
+                                .HasColumnName("ActualBaseBackupSetId");
+
+                            b1.Property<DateTimeOffset?>("EvidenceAtUtc")
+                                .HasColumnType("datetimeoffset")
+                                .HasColumnName("EvidenceAtUtc");
+
+                            b1.Property<bool>("OriginalCallTerminated")
+                                .HasColumnType("bit")
+                                .HasColumnName("OriginalCallTerminated");
+
+                            b1.Property<bool>("OriginalCallerCannotInvoke")
+                                .HasColumnType("bit")
+                                .HasColumnName("OriginalCallerCannotInvoke");
+
+                            b1.Property<string>("Outcome")
+                                .IsRequired()
+                                .HasMaxLength(20)
+                                .HasColumnType("nvarchar(20)")
+                                .HasColumnName("Outcome");
+
+                            b1.Property<DateTimeOffset?>("PlatformCompletedAtUtc")
+                                .HasColumnType("datetimeoffset")
+                                .HasColumnName("PlatformCompletedAtUtc");
+
+                            b1.Property<string>("ReasonCode")
+                                .HasMaxLength(100)
+                                .HasColumnType("nvarchar(100)")
+                                .HasColumnName("ReasonCode");
+
+                            b1.Property<string>("SqlOutcomeSource")
+                                .IsRequired()
+                                .HasMaxLength(20)
+                                .HasColumnType("nvarchar(20)")
+                                .HasColumnName("SqlOutcomeSource");
+
+                            b1.Property<bool>("SqlSuccessObserved")
+                                .HasColumnType("bit")
+                                .HasColumnName("SqlSuccessObserved");
+
+                            b1.Property<bool?>("UsedChecksum")
+                                .HasColumnType("bit")
+                                .HasColumnName("UsedChecksum");
+
+                            b1.Property<bool?>("UsedCompression")
+                                .HasColumnType("bit")
+                                .HasColumnName("UsedCompression");
+
+                            b1.Property<bool?>("UsedCopyOnly")
+                                .HasColumnType("bit")
+                                .HasColumnName("UsedCopyOnly");
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "ActiveAssessment", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.ActiveAssessment#BackupSetAssessment", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("Conclusion")
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("ActiveConclusion");
+
+                                    b2.Property<string>("ReasonCode")
+                                        .HasMaxLength(100)
+                                        .HasColumnType("nvarchar(100)")
+                                        .HasColumnName("ActiveReasonCode");
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("ActiveAssessmentState");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "Assessment", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Assessment#BackupSetAssessment", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("Conclusion")
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("Conclusion");
+
+                                    b2.Property<string>("ReasonCode")
+                                        .HasMaxLength(100)
+                                        .HasColumnType("nvarchar(100)")
+                                        .HasColumnName("BaselineReasonCode");
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("AssessmentState");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "Completion", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Completion#BackupCompletionTimeDecision", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<DateTimeOffset?>("CompletedAtUtc")
+                                        .HasColumnType("datetimeoffset")
+                                        .HasColumnName("CompletedAtUtc");
+
+                                    b2.Property<string>("ReasonCode")
+                                        .IsRequired()
+                                        .HasMaxLength(100)
+                                        .HasColumnType("nvarchar(100)")
+                                        .HasColumnName("CompletionReasonCode");
+
+                                    b2.Property<string>("Source")
+                                        .IsRequired()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("CompletionSource");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "Content", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Content#BackupContentEvidence", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("DigestAlgorithm")
+                                        .HasMaxLength(6)
+                                        .HasColumnType("nvarchar(6)")
+                                        .HasColumnName("ContentDigestAlgorithm");
+
+                                    b2.Property<byte[]>("DigestHex")
+                                        .HasColumnType("binary(32)")
+                                        .HasColumnName("ContentDigest");
+
+                                    b2.Property<long?>("LengthBytes")
+                                        .HasColumnType("bigint")
+                                        .HasColumnName("ContentLengthBytes");
+
+                                    b2.Property<string>("Protection")
+                                        .IsRequired()
+                                        .HasMaxLength(30)
+                                        .HasColumnType("nvarchar(30)")
+                                        .HasColumnName("ObjectProtection");
+
+                                    b2.Property<string>("ReasonCode")
+                                        .HasMaxLength(100)
+                                        .HasColumnType("nvarchar(100)")
+                                        .HasColumnName("ContentReasonCode");
+
+                                    b2.Property<string>("StableObjectId")
+                                        .HasMaxLength(256)
+                                        .HasColumnType("nvarchar(256)")
+                                        .HasColumnName("StableObjectId");
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("ContentState");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "Metadata", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "BackupSetGuid", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.BackupSetGuid#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("BackupSetGuidState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("BackupSetGuid");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "CheckpointLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.CheckpointLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("CheckpointLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("CheckpointLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "DatabaseBackupLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.DatabaseBackupLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("DatabaseBackupLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("DatabaseBackupLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "DatabaseGuid", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.DatabaseGuid#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("DatabaseGuidState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("DatabaseGuid");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "DifferentialBaseGuid", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.DifferentialBaseGuid#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("DifferentialBaseGuidState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("DifferentialBaseGuid");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "DifferentialBaseLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.DifferentialBaseLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("DifferentialBaseLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("DifferentialBaseLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "FamilyGuid", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.FamilyGuid#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("FamilyGuidState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("FamilyGuid");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "FirstLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.FirstLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("FirstLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("FirstLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "FirstRecoveryForkId", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.FirstRecoveryForkId#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("FirstRecoveryForkIdState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("FirstRecoveryForkId");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "ForkPointLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.ForkPointLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("ForkPointLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("ForkPointLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "HasBackupChecksums", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.HasBackupChecksums#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("HasBackupChecksumsState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("HasBackupChecksums");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "HasIncompleteMetadata", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.HasIncompleteMetadata#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("HasIncompleteMetadataState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("HasIncompleteMetadata");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsCompressed", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsCompressed#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("IsCompressedState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsCompressed");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsCopyOnly", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsCopyOnly#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("IsCopyOnlyState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsCopyOnly");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsDamaged", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsDamaged#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("IsDamagedState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsDamaged");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsSnapshot", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsSnapshot#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("IsSnapshotState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsSnapshot");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "LastLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.LastLsn#BackupMetadataField<BackupLsn>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("LastLsnState");
+
+                                            b3.Property<decimal?>("Value")
+                                                .HasColumnType("numeric(25,0)")
+                                                .HasColumnName("LastLsn");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "RecoveryForkId", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.RecoveryForkId#BackupMetadataField<Guid>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("RecoveryForkIdState");
+
+                                            b3.Property<Guid?>("Value")
+                                                .HasColumnType("uniqueidentifier")
+                                                .HasColumnName("RecoveryForkId");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "SqlFinishedLocal", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.SqlFinishedLocal#BackupMetadataField<DateTime>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("SqlFinishedLocalState");
+
+                                            b3.Property<DateTime?>("Value")
+                                                .HasColumnType("datetime2(7)")
+                                                .HasColumnName("SqlFinishedLocal");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "SqlStartedLocal", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.SqlStartedLocal#BackupMetadataField<DateTime>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("SqlStartedLocalState");
+
+                                            b3.Property<DateTime?>("Value")
+                                                .HasColumnType("datetime2(7)")
+                                                .HasColumnName("SqlStartedLocal");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "Type", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.Type#BackupMetadataField<BackupType>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("TypeState");
+
+                                            b3.Property<string>("Value")
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("Type");
+                                        });
+                                });
+                        });
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TaskId", "AttemptId", "Kind", "Sequence")
+                        .IsUnique();
+
+                    b.ToTable("BackupPlanExecutionOperations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_ActiveAssessment", "([ActiveAssessmentState] = 'NotApplicable' AND [ActiveConclusion] IS NULL AND [ActiveReasonCode] IS NULL) OR ([ActiveAssessmentState] = 'Known' AND [ActiveConclusion] IS NOT NULL AND [ActiveConclusion] IN ('Verified','Unmanaged','Mismatch','Unknown') AND [ActiveReasonCode] IS NOT NULL AND [ActiveReasonCode] IN ('baseline.backup_type_mismatch','baseline.copy_only_differential','baseline.copy_only_full','baseline.database_backup_lsn_mismatch','baseline.database_identity_mismatch','baseline.duplicate_managed_guid','baseline.external_full_observed','baseline.history_not_found','baseline.lsn_mismatch','baseline.managed_full_not_found','baseline.managed_full_verified','baseline.missing_fields','baseline.multiple_bases','baseline.permission_denied','baseline.recovery_branch_mismatch','baseline.source_conflict'))");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_Assessment", "([AssessmentState] = 'NotApplicable' AND [Conclusion] IS NULL AND [BaselineReasonCode] IS NULL) OR ([AssessmentState] = 'Known' AND [Conclusion] IS NOT NULL AND [Conclusion] IN ('Verified','Unmanaged','Mismatch','Unknown') AND [BaselineReasonCode] IS NOT NULL AND [BaselineReasonCode] IN ('baseline.backup_type_mismatch','baseline.copy_only_differential','baseline.copy_only_full','baseline.database_backup_lsn_mismatch','baseline.database_identity_mismatch','baseline.duplicate_managed_guid','baseline.external_full_observed','baseline.history_not_found','baseline.lsn_mismatch','baseline.managed_full_not_found','baseline.managed_full_verified','baseline.missing_fields','baseline.multiple_bases','baseline.permission_denied','baseline.recovery_branch_mismatch','baseline.source_conflict'))");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_BackupSetGuid", "([BackupSetGuidState] = 'Known' AND [BackupSetGuid] IS NOT NULL AND [BackupSetGuid] <> '00000000-0000-0000-0000-000000000000') OR ([BackupSetGuidState] IN ('Unknown') AND [BackupSetGuid] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_CheckpointLsn", "([CheckpointLsnState] = 'Known' AND [CheckpointLsn] IS NOT NULL AND [CheckpointLsn] >= 0) OR ([CheckpointLsnState] IN ('Unknown') AND [CheckpointLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_Completion", "([CompletionSource] = 'PlatformObserved' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.platform_observed') OR ([CompletionSource] = 'SqlLocalTime' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.sql_local_converted') OR ([CompletionSource] = 'Unknown' AND [CompletedAtUtc] IS NULL AND [CompletionReasonCode] IN ('completion.ambiguous_local_time','completion.conversion_out_of_range','completion.future_sql_time','completion.invalid_local_time','completion.older_than_24_hours','completion.server_offset_mismatch','completion.server_offset_unknown','completion.server_time_zone_unknown','completion.sql_finish_missing'))");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_Content", "([ContentState] = 'Unknown' AND [ContentDigestAlgorithm] IS NULL AND [ContentDigest] IS NULL AND [ContentLengthBytes] IS NULL) OR ([ContentState] = 'Verified' AND [ContentDigestAlgorithm] IS NOT NULL AND [ContentDigestAlgorithm] = 'SHA256' AND [ContentDigest] IS NOT NULL AND [ContentLengthBytes] IS NOT NULL AND [ContentLengthBytes] > 0)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_DatabaseBackupLsn", "([DatabaseBackupLsnState] = 'Known' AND [DatabaseBackupLsn] IS NOT NULL AND [DatabaseBackupLsn] >= 0) OR ([DatabaseBackupLsnState] IN ('Unknown') AND [DatabaseBackupLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_DatabaseGuid", "([DatabaseGuidState] = 'Known' AND [DatabaseGuid] IS NOT NULL AND [DatabaseGuid] <> '00000000-0000-0000-0000-000000000000') OR ([DatabaseGuidState] IN ('Unknown') AND [DatabaseGuid] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_DifferentialBaseGuid", "([DifferentialBaseGuidState] = 'Known' AND [DifferentialBaseGuid] IS NOT NULL AND [DifferentialBaseGuid] <> '00000000-0000-0000-0000-000000000000') OR ([DifferentialBaseGuidState] IN ('Unknown','NotApplicable') AND [DifferentialBaseGuid] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_DifferentialBaseLsn", "([DifferentialBaseLsnState] = 'Known' AND [DifferentialBaseLsn] IS NOT NULL AND [DifferentialBaseLsn] >= 0) OR ([DifferentialBaseLsnState] IN ('Unknown','NotApplicable') AND [DifferentialBaseLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_DifferentialFields", "([TypeState] = 'Known' AND [Type] IS NOT NULL AND [Type] IN ('Full','Log') AND [DifferentialBaseLsnState] = 'NotApplicable' AND [DifferentialBaseGuidState] = 'NotApplicable') OR ([TypeState] = 'Known' AND [Type] IS NOT NULL AND [Type] = 'Differential' AND [DifferentialBaseLsnState] <> 'NotApplicable' AND [DifferentialBaseGuidState] <> 'NotApplicable') OR ([TypeState] = 'Unknown' AND [Type] IS NULL AND [DifferentialBaseLsnState] <> 'NotApplicable' AND [DifferentialBaseGuidState] <> 'NotApplicable')");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_EvidenceAtUtc", "[EvidenceAtUtc] IS NULL OR ([EvidenceAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[EvidenceAtUtc]) = 0)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_FamilyGuid", "([FamilyGuidState] = 'Known' AND [FamilyGuid] IS NOT NULL AND [FamilyGuid] <> '00000000-0000-0000-0000-000000000000') OR ([FamilyGuidState] IN ('Unknown') AND [FamilyGuid] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_FirstLsn", "([FirstLsnState] = 'Known' AND [FirstLsn] IS NOT NULL AND [FirstLsn] >= 0) OR ([FirstLsnState] IN ('Unknown') AND [FirstLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_FirstRecoveryForkId", "([FirstRecoveryForkIdState] = 'Known' AND [FirstRecoveryForkId] IS NOT NULL AND [FirstRecoveryForkId] <> '00000000-0000-0000-0000-000000000000') OR ([FirstRecoveryForkIdState] IN ('Unknown') AND [FirstRecoveryForkId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_ForkPointLsn", "([ForkPointLsnState] = 'Known' AND [ForkPointLsn] IS NOT NULL AND [ForkPointLsn] >= 0) OR ([ForkPointLsnState] IN ('Unknown','NotApplicable') AND [ForkPointLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_HasBackupChecksums", "([HasBackupChecksumsState] = 'Known' AND [HasBackupChecksums] IS NOT NULL) OR ([HasBackupChecksumsState] IN ('Unknown') AND [HasBackupChecksums] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_HasIncompleteMetadata", "([HasIncompleteMetadataState] = 'Known' AND [HasIncompleteMetadata] IS NOT NULL) OR ([HasIncompleteMetadataState] IN ('Unknown') AND [HasIncompleteMetadata] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_Identity", "[Sequence] >= 1 AND [IntendedBackupSetId] <> '00000000-0000-0000-0000-000000000000' AND DATEPART(TZOFFSET,[ObservedAtUtc]) = 0");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_IsCompressed", "([IsCompressedState] = 'Known' AND [IsCompressed] IS NOT NULL) OR ([IsCompressedState] IN ('Unknown') AND [IsCompressed] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_IsCopyOnly", "([IsCopyOnlyState] = 'Known' AND [IsCopyOnly] IS NOT NULL) OR ([IsCopyOnlyState] IN ('Unknown') AND [IsCopyOnly] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_IsDamaged", "([IsDamagedState] = 'Known' AND [IsDamaged] IS NOT NULL) OR ([IsDamagedState] IN ('Unknown') AND [IsDamaged] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_IsSnapshot", "([IsSnapshotState] = 'Known' AND [IsSnapshot] IS NOT NULL) OR ([IsSnapshotState] IN ('Unknown') AND [IsSnapshot] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_LastLsn", "([LastLsnState] = 'Known' AND [LastLsn] IS NOT NULL AND [LastLsn] >= 0) OR ([LastLsnState] IN ('Unknown') AND [LastLsn] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_Outcome", "[Outcome] IN ('Unknown','Succeeded','ConfirmedFailed','Indeterminate','Cancelled') AND [SqlOutcomeSource] IN ('Unknown','NotInvoked','PlatformResponse','RecoveredEvidence') AND ([SqlOutcomeSource] <> 'NotInvoked' OR [SqlSuccessObserved] = 0) AND [ObjectProtection] IN ('Unknown','Unsupported','GuardedUntilCommit')");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_PlatformCompletedAtUtc", "[PlatformCompletedAtUtc] IS NULL OR ([PlatformCompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[PlatformCompletedAtUtc]) = 0 AND [SqlOutcomeSource] = 'PlatformResponse' AND [SqlSuccessObserved] = 1)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_RecoveryForkId", "([RecoveryForkIdState] = 'Known' AND [RecoveryForkId] IS NOT NULL AND [RecoveryForkId] <> '00000000-0000-0000-0000-000000000000') OR ([RecoveryForkIdState] IN ('Unknown') AND [RecoveryForkId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_SqlFinishedLocal", "([SqlFinishedLocalState] = 'Known' AND [SqlFinishedLocal] IS NOT NULL) OR ([SqlFinishedLocalState] IN ('Unknown') AND [SqlFinishedLocal] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_SqlStartedLocal", "([SqlStartedLocalState] = 'Known' AND [SqlStartedLocal] IS NOT NULL) OR ([SqlStartedLocalState] IN ('Unknown') AND [SqlStartedLocal] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_State", "[State] IN ('Reserved','Frozen','Applied','Abandoned') AND [Kind] IN ('Admission','SqlResult','Metadata','VerifyLocal','Transfer','ValidateCopy','Recovery') AND ([State] <> 'Abandoned' OR [Kind] NOT IN ('SqlResult','Transfer','ValidateCopy'))");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_Type", "([TypeState] = 'Known' AND [Type] IS NOT NULL AND [Type] IN ('Full','Differential','Log')) OR ([TypeState] IN ('Unknown') AND [Type] IS NULL)");
                         });
                 });
 
@@ -3072,6 +4372,11 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("DbBackupManager.Domain.BackupTasks.BackupAttempt", b =>
                 {
+                    b.HasOne("DbBackupManager.Domain.BackupSets.BackupSet", null)
+                        .WithMany()
+                        .HasForeignKey("AdmittedFullBackupSetId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("DbBackupManager.Domain.Configuration.StorageTarget", null)
                         .WithMany()
                         .HasForeignKey("RemoteStorageTargetId")
@@ -3133,6 +4438,54 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                     b.HasOne("DbBackupManager.Domain.BackupTasks.BackupFile", null)
                         .WithMany()
                         .HasForeignKey("TaskId", "FileId")
+                        .HasPrincipalKey("TaskId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.BackupTasks.BackupInvocationAuthorization", b =>
+                {
+                    b.HasOne("DbBackupManager.Domain.Configuration.ManagedDatabase", null)
+                        .WithMany()
+                        .HasForeignKey("DatabaseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("DbBackupManager.Domain.BackupTasks.BackupAttempt", null)
+                        .WithMany()
+                        .HasForeignKey("TaskId", "AttemptId")
+                        .HasPrincipalKey("TaskId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation", null)
+                        .WithMany()
+                        .HasForeignKey("TaskId", "AttemptId", "SqlOperationId")
+                        .HasPrincipalKey("TaskId", "AttemptId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation", null)
+                        .WithMany()
+                        .HasForeignKey("TaskId", "AttemptId", "TerminationEvidenceId")
+                        .HasPrincipalKey("TaskId", "AttemptId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation", b =>
+                {
+                    b.HasOne("DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation", b =>
+                {
+                    b.HasOne("DbBackupManager.Domain.BackupTasks.BackupAttempt", null)
+                        .WithMany()
+                        .HasForeignKey("TaskId", "AttemptId")
                         .HasPrincipalKey("TaskId", "Id")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
