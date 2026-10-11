@@ -117,6 +117,7 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
     public ITargetSqlInvocationTerminationProbe? RestrictedTerminationProbe { get; set; }
     public int TerminationReads { get; private set; }
     public int MetadataReads { get; private set; }
+    internal PlatformDbContext CreateTrackedContext() => _factory.CreateDbContext();
     public async Task ExpireLeaseAsync(Guid taskId)
     {
         await using var db = _platform.CreateContext();
@@ -160,7 +161,7 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
             await environment.SeedAsync(mode);
             IBackupExecutionOperationStore operations = new BackupExecutionOperationStore(factory, TimeProvider.System);
             IBackupInvocationAuthorizationStore authorizations = new BackupInvocationAuthorizationStore(factory, TimeProvider.System);
-            IBackupPlanExecutionStore store = new BackupPlanExecutionStore(factory, TimeProvider.System);
+            IBackupPlanExecutionStore store = new RenewalAwareStore(new BackupPlanExecutionStore(factory, TimeProvider.System), factory);
             if (fault is not null)
             { operations = fault.Wrap(operations); authorizations = fault.Wrap(authorizations); store = fault.Wrap(store); }
             ITargetSqlBackupMetadataReader reader = new ObservedMetadataReader(environment, new SqlClientTargetSqlBackupMetadataReader(credentials, connections));
@@ -403,18 +404,62 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
     }
     private sealed class TrackingFactory(PlatformDatabaseSqlServerFixture platform, params IInterceptor[] interceptors) : IDbContextFactory<PlatformDbContext>
     {
-        private readonly List<PlatformDbContext> _created = [];
+        private readonly List<(PlatformDbContext Context, Guid? Renewal)> _created = [];
+        private readonly AsyncLocal<Guid?> _renewal = new();
         public PlatformDbContext CreateDbContext()
         {
             var context = platform.CreateContext(interceptors);
-            lock (_created) _created.Add(context);
+            lock (_created) _created.Add((context, _renewal.Value));
             return context;
         }
         public void AssertNoLiveContext()
         {
-            lock (_created) foreach (var context in _created)
-                Assert.Throws<ObjectDisposedException>(() => context.ChangeTracker.Entries().ToArray());
+            lock (_created) foreach (var entry in _created)
+                // 外部 I/O 不持有自己的 Context；独立续租允许同时使用短 Context。
+                if (entry.Renewal is null || entry.Renewal == _renewal.Value)
+                    Assert.Throws<ObjectDisposedException>(() => entry.Context.ChangeTracker.Entries().ToArray());
         }
+        public IDisposable BeginRenewal()
+        {
+            var previous = _renewal.Value;
+            var id = Guid.NewGuid();
+            _renewal.Value = id;
+            return new RenewalScope(this, id, previous);
+        }
+        private sealed class RenewalScope(TrackingFactory owner, Guid id, Guid? previous) : IDisposable
+        {
+            public void Dispose()
+            {
+                try
+                {
+                    lock (owner._created) foreach (var entry in owner._created.Where(x => x.Renewal == id))
+                        Assert.Throws<ObjectDisposedException>(() => entry.Context.ChangeTracker.Entries().ToArray());
+                }
+                finally { owner._renewal.Value = previous; }
+            }
+        }
+    }
+    private sealed class RenewalAwareStore(IBackupPlanExecutionStore inner, TrackingFactory factory) : IBackupPlanExecutionStore
+    {
+        public Task<BackupExecutionContractResult<BackupPlanExecutionSession>> OpenAsync(Guid taskId, Guid requestMutationId,
+            bool reconciliationOnly, Guid leaseToken, string owner, DateTimeOffset now, DateTimeOffset expires,
+            CancellationToken cancellationToken = default) =>
+            inner.OpenAsync(taskId, requestMutationId, reconciliationOnly, leaseToken, owner, now, expires, cancellationToken);
+        public Task<BackupPlanExecutionSession?> RefreshAsync(Guid taskId, Guid leaseToken, CancellationToken cancellationToken = default) =>
+            inner.RefreshAsync(taskId, leaseToken, cancellationToken);
+        public async Task<BackupExecutionContractCode> RenewAsync(Guid taskId, Guid leaseToken, DateTimeOffset expires,
+            CancellationToken cancellationToken = default)
+        {
+            using var scope = factory.BeginRenewal();
+            return await inner.RenewAsync(taskId, leaseToken, expires, cancellationToken);
+        }
+        public Task<QualifiedManagedFull?> FindQualifiedFullAsync(Guid databaseId, Guid backupSetGuid, CancellationToken cancellationToken = default) =>
+            inner.FindQualifiedFullAsync(databaseId, backupSetGuid, cancellationToken);
+        public Task<BackupExecutionContractCode> ApplyAsync(LeaseHandle lease, ReserveBackupExecutionOperation identity,
+            IVerifiedBackupFileHandle? protectedFile = null, IVerifiedBackupFileHandle? protectedDependency = null,
+            CancellationToken cancellationToken = default) => inner.ApplyAsync(lease, identity, protectedFile, protectedDependency, cancellationToken);
+        public Task<BackupExecutionContractCode> SuspendAsync(LeaseHandle lease, Guid mutationId, string reason,
+            CancellationToken cancellationToken = default) => inner.SuspendAsync(lease, mutationId, reason, cancellationToken);
     }
     private string SmbRoot(string child)
     {

@@ -1,14 +1,68 @@
+using System.Data.Common;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace DbBackupManager.Infrastructure.Tests;
 
 public sealed class BackupPlanLeaseRenewalLocalDbTests(PlatformDatabaseSqlServerFixture platform)
     : IClassFixture<PlatformDatabaseSqlServerFixture>
 {
+    [Fact]
+    public async Task IndependentRenewalContextCanOverlapFileIoButForegroundContextCannot()
+    {
+        var barrier = new RenewalCommandBarrier();
+        await using var test = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalOnly, null, barrier);
+        var taskId = await test.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        var now = DateTimeOffset.UtcNow;
+        var session = (await test.Store.OpenAsync(taskId, Guid.NewGuid(), false, Guid.NewGuid(), "合成并发续租", now, now.AddMinutes(2))).Value!;
+        var path = session.Work.Attempt.WorkerSourceFilePath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllBytesAsync(path, [1, 2, 3, 4]);
+        var endpoint = BackupPlanExecutionStore.Endpoint(session.Work.Snapshot.WorkerSourceEndpoint);
+        var request = new DbBackupManager.Application.FileStorage.BackupContentVerificationRequest(taskId, session.Work.Attempt.Id, endpoint, path, 30);
+        barrier.Armed = true;
+        var renewal = test.Store.RenewAsync(taskId, session.Work.Lease.LeaseToken, now.AddMinutes(3));
+        try
+        {
+            await barrier.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await using (var foreground = test.CreateTrackedContext())
+                await Assert.ThrowsAnyAsync<Xunit.Sdk.XunitException>(() => test.FileVerifier.OpenVerifiedAsync(request));
+            // 真实续租事务仍在等待；当前文件 I/O 自身不持有平台 Context。
+            var opened = await test.FileVerifier.OpenVerifiedAsync(request);
+            Assert.True(opened.IsSucceeded);
+            await using var protectedFile = opened.Value!;
+        }
+        finally
+        {
+            barrier.Release.TrySetResult();
+            Assert.Equal(BackupExecutionContractCode.Succeeded, await renewal);
+        }
+        Assert.Equal(0, test.Invocations);
+        Assert.Equal(0, test.PlanWrites);
+    }
+
+    private sealed class RenewalCommandBarrier : DbCommandInterceptor
+    {
+        public bool Armed { get; set; }
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (Armed && command.CommandText.Contains("UPDATE [BackupTasks]", StringComparison.Ordinal))
+            {
+                Armed = false;
+                Entered.TrySetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+            return result;
+        }
+    }
+
     [Fact]
     public async Task RenewalBetweenReadAndEachCommitReplaysOriginalCommandWithoutExternalIo()
     {
