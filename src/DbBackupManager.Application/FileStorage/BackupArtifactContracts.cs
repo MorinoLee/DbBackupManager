@@ -51,6 +51,8 @@ public sealed record VerifiedBackupRenameReceipt(BackupContentEvidence BeforeRen
 }
 public interface IBackupPlanFileTransferExecutor
 {
+    Task<BackupFileStorageResult<BackupFileMutationReceipt>> CheckCapabilitiesAsync(
+        BackupContentVerificationRequest target, CancellationToken cancellationToken = default);
     Task<BackupFileStorageResult<VerifiedBackupTransferReceipt>> TransferVerifiedAsync(Guid mutationId,
         IVerifiedBackupFileHandle source, BackupContentVerificationRequest target, CancellationToken cancellationToken = default);
     Task<BackupFileStorageResult<VerifiedBackupRenameReceipt>> RenameAndVerifyAsync(Guid mutationId,

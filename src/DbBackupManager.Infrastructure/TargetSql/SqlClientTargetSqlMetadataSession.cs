@@ -33,7 +33,7 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
               AND EXISTS (SELECT 1 FROM msdb.dbo.backupmediafamily AS mf
                   WHERE mf.media_set_id = bs.media_set_id AND mf.physical_device_name = @path COLLATE Latin1_General_100_BIN2);
             """, request, BackupSetEvidenceSource.Msdb, null, cancellationToken);
-        var active = await ReadActiveAsync(request, cancellationToken);
+        var active = await ReadActiveAsync(new(request.DatabaseName, request.TimeoutSeconds), cancellationToken);
         var guids = new[] { header.Metadata.DifferentialBaseGuid.Value, history.Metadata.DifferentialBaseGuid.Value }
             .Concat(active.Baseline.DataFileBases.Select(x => x.BaseBackupSetGuid)).OfType<Guid>().Distinct().ToArray();
         var fulls = new List<BackupMetadataSourceEvidence>();
@@ -90,18 +90,18 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
             SqlClientTargetSqlBackupMetadataReader.FailedSource(source, code) with { RequestedBackupSetGuid = requestedGuid };
     }
 
-    private async Task<BackupActiveMetadataEvidence> ReadActiveAsync(TargetSqlBackupMetadataRequest request, CancellationToken cancellationToken)
+    public async Task<BackupActiveMetadataEvidence> ReadActiveAsync(TargetSqlActiveBaselineRequest request, CancellationToken cancellationToken)
     {
         try
         {
             var database = request.DatabaseName.Replace("]", "]]", StringComparison.Ordinal);
-            await using var command = Command($"""
+            await using var command = new SqlCommand($"""
                 SELECT rs.database_guid AS BindingID, rs.family_guid AS FamilyGUID,
                     rs.recovery_fork_guid AS RecoveryForkID, rs.first_recovery_fork_guid AS FirstRecoveryForkID,
                     df.differential_base_guid AS DifferentialBaseGUID, df.differential_base_lsn AS DifferentialBaseLSN
                 FROM [{database}].sys.database_files AS df CROSS JOIN sys.database_recovery_status AS rs
                 WHERE df.type = 0 AND rs.database_id = DB_ID(@database) ORDER BY df.file_id;
-                """, request);
+                """, _connection) { CommandTimeout = request.TimeoutSeconds };
             command.Parameters.Add("@database", SqlDbType.NVarChar, 128).Value = request.DatabaseName;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var files = new List<ActiveDataFileBaselineEvidence>();

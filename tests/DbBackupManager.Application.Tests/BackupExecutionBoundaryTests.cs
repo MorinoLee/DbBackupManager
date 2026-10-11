@@ -19,13 +19,12 @@ public sealed class BackupExecutionBoundaryTests
     };
 
     [Fact]
-    public async Task ClosedPlanRunnerReturnsPhaseResultAndObservesCancellation()
+    public void PlanRecoveryHasNoBackupOrFileMutationDependencies()
     {
-        var runner = new BackupPlanTaskRunner();
-        Assert.Equal(BackupExecutionContractCode.StageNotOpen, await runner.RunTaskOnceAsync(new(Guid.NewGuid(), Guid.NewGuid())));
-        using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
-        await Assert.ThrowsAsync<OperationCanceledException>(() => runner.RunTaskOnceAsync(new(Guid.NewGuid(), Guid.NewGuid()), cancellation.Token));
+        var dependencies = typeof(BackupPlanReadOnlyStages).GetConstructors().Single().GetParameters().Select(x => x.ParameterType).ToArray();
+        Assert.DoesNotContain(typeof(DbBackupManager.Application.TargetSql.ITargetSqlInvocationPreparation), dependencies);
+        Assert.DoesNotContain(typeof(IBackupPlanFileTransferExecutor), dependencies);
+        Assert.DoesNotContain(typeof(IBackupFileDeletionExecutor), dependencies);
     }
 
     [Fact]

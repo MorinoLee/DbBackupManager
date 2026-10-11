@@ -186,6 +186,30 @@ public sealed class BackupTask : ConcurrentEntity
             expiresAtUtc);
     }
 
+    /// <summary>仅用于已证明从未获权的原计划 Attempt；不创建重试 Attempt。</summary>
+    public void ClaimOriginalPreparedPlanAttempt(Guid attemptId, Guid leaseToken, string owner,
+        DateTimeOffset acquiredAtUtc, DateTimeOffset expiresAtUtc)
+    {
+        if (PlanId is null || Status != BackupTaskStatus.Pending || CurrentStage != BackupTaskStage.Backup
+            || CurrentBackupAttemptId != attemptId)
+            throw new InvalidOperationException("当前任务不能继续原计划准备阶段。");
+        SetLease(BackupLeasePurpose.Execution, leaseToken, owner, acquiredAtUtc, expiresAtUtc);
+        Status = BackupTaskStatus.Running;
+        ClearError();
+    }
+
+    public void CompleteUninvokedPlanPreparationReconciliation(Guid leaseToken, DateTimeOffset nowUtc)
+    {
+        EnsureLease(leaseToken, BackupLeasePurpose.Reconciliation, nowUtc);
+        if (PlanId is null || Status != BackupTaskStatus.NeedsAttention || CurrentStage != BackupTaskStage.Backup)
+            throw new InvalidOperationException("当前任务不是原计划准备阶段核对。");
+        Status = CancellationRequestedAtUtc is null ? BackupTaskStatus.Pending : BackupTaskStatus.Cancelled;
+        if (Status == BackupTaskStatus.Cancelled) CompletedAtUtc = nowUtc;
+        ClearReconciliationSchedule();
+        ClearError();
+        ClearLease();
+    }
+
     public void RequestReconciliation(DateTimeOffset requestedAtUtc)
     {
         var requestedAt = BackupTaskValues.RequireUtc(requestedAtUtc, nameof(requestedAtUtc));
@@ -629,6 +653,20 @@ public sealed class BackupTask : ConcurrentEntity
     {
         ReconciliationAttemptCount = 0;
         NextReconciliationAtUtc = null;
+    }
+
+    /// <summary>调用方已证明当前写入阶段尚无操作预约，仅恢复原阶段的显式执行资格。</summary>
+    public void CompleteUnreservedPlanStageReconciliation(Guid leaseToken, DateTimeOffset utcNow)
+    {
+        var now = BackupTaskValues.RequireUtc(utcNow, nameof(utcNow));
+        EnsureLease(leaseToken, BackupLeasePurpose.Reconciliation, now);
+        if (PlanId is null || Status != BackupTaskStatus.NeedsAttention
+            || CurrentStage is not (BackupTaskStage.Transfer or BackupTaskStage.ValidateCopy))
+            throw new InvalidOperationException("只能恢复尚未预约写入的计划文件阶段。");
+        Status = BackupTaskStatus.Pending;
+        ClearLease();
+        ClearError();
+        ClearReconciliationSchedule();
     }
 
     private void ClearLease()

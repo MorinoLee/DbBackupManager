@@ -74,6 +74,9 @@ internal sealed class BackupInvocationAuthorizationStore(IDbContextFactory<Platf
             || BackupTaskPersistence.ValidateLease(task, lease, now) is not null) return new(BackupExecutionContractCode.LeaseLost);
         var snapshot = await context.BackupTaskSnapshots.SingleAsync(x => x.TaskId == task.Id, token);
         if (snapshot.DatabaseId != command.DatabaseId) return new(BackupExecutionContractCode.Conflict);
+        if (task.PlanId is not null && (task.CancellationRequestedAtUtc is not null
+            || !await BackupPlanExecutionStore.ConfigurationEnabledAsync(context, snapshot, token)))
+            return new(BackupExecutionContractCode.Conflict);
         var attempt = await context.BackupAttempts.AsTracking().SingleOrDefaultAsync(x => x.TaskId == task.Id && x.Id == lease.BackupAttemptId, token);
         if (attempt is null || attempt.BackupInvocationStatus != BackupInvocationStatus.Prepared
             || !attempt.RowVersion.SequenceEqual(command.AttemptRowVersion)) return new(BackupExecutionContractCode.Conflict);
@@ -89,6 +92,34 @@ internal sealed class BackupInvocationAuthorizationStore(IDbContextFactory<Platf
             || snapshot.BackupType == Domain.Configuration.BackupType.Differential
                 && (attempt.AdmittedFullBackupSetId is null || attempt.AdmissionRecoveryForkId is null || attempt.AdmissionObservedAtUtc is null)))
             return new(BackupExecutionContractCode.Conflict);
+        if (task.PlanId is not null && snapshot.BackupType == Domain.Configuration.BackupType.Differential)
+        {
+            var full = await context.BackupSets.SingleOrDefaultAsync(x => x.Id == attempt.AdmittedFullBackupSetId, token);
+            if (full?.Metadata.BackupSetGuid.Value is not { } fullGuid
+                || full.Metadata.DatabaseGuid.Value != attempt.ExpectedDatabaseGuid || full.Metadata.FamilyGuid.Value != attempt.ExpectedFamilyGuid
+                || full.Metadata.FirstRecoveryForkId.Value != attempt.AdmissionRecoveryForkId || full.Metadata.RecoveryForkId.Value != attempt.AdmissionRecoveryForkId
+                || await BackupPlanExecutionStore.FindQualifiedFullInContextAsync(context, snapshot.DatabaseId, fullGuid, token) is null)
+                return new(BackupExecutionContractCode.Conflict);
+            var admission = await context.BackupPlanExecutionOperations.Where(x => x.AttemptId == attempt.Id
+                && x.Kind == BackupExecutionOperationKind.Admission && x.State == BackupExecutionOperationState.Frozen
+                && x.Facts.Outcome == BackupExecutionOutcome.Succeeded).OrderByDescending(x => x.Sequence).FirstOrDefaultAsync(token);
+            if (admission is null || admission.Facts.ActualBaseBackupSetId != full.Id
+                || admission.Facts.Metadata.DifferentialBaseGuid.Value != fullGuid
+                || admission.Facts.Metadata.DifferentialBaseLsn.Value != full.Metadata.CheckpointLsn.Value)
+                return new(BackupExecutionContractCode.Conflict);
+            var gates = await context.BackupPlanExecutionObservations.Where(x => x.OperationId == admission.Id
+                && x.Source == BackupExecutionObservationSource.Database && x.Kind == Domain.BackupSets.BackupSetEvidenceKind.ActiveBaseline).ToArrayAsync(token);
+            foreach (var gate in new[] { "admission.g0", "admission.g1" })
+            {
+                var rows = gates.Where(x => x.Facts.ReasonCode == gate).ToArray();
+                if (rows.Length == 0 || rows.Any(x => x.Facts.Metadata.DatabaseGuid.Value != attempt.ExpectedDatabaseGuid
+                    || x.Facts.Metadata.FamilyGuid.Value != attempt.ExpectedFamilyGuid
+                    || x.Facts.Metadata.RecoveryForkId.Value != attempt.AdmissionRecoveryForkId
+                    || x.Facts.Metadata.DifferentialBaseGuid.Value != fullGuid
+                    || x.Facts.Metadata.DifferentialBaseLsn.Value != full.Metadata.CheckpointLsn.Value))
+                    return new(BackupExecutionContractCode.Conflict);
+            }
+        }
         var operation = await context.BackupPlanExecutionOperations.SingleOrDefaultAsync(x => x.Id == command.SqlOperationId, token);
         if (operation is null)
         {
@@ -159,8 +190,8 @@ internal sealed class BackupInvocationAuthorizationStore(IDbContextFactory<Platf
             {
                 var original = await context.BackupAttempts.SingleAsync(x => x.Id == authorization.AttemptId, cancellationToken);
                 var observations = await context.BackupPlanExecutionObservations.Where(x => x.OperationId == evidence.Id).ToArrayAsync(cancellationToken);
-                var header = observations.Where(x => x.Source == BackupExecutionObservationSource.BackupHeader).ToArray();
-                var history = observations.Where(x => x.Source == BackupExecutionObservationSource.Msdb).ToArray();
+                var header = observations.Where(x => x.Source == BackupExecutionObservationSource.BackupHeader && x.Kind == Domain.BackupSets.BackupSetEvidenceKind.Backup).ToArray();
+                var history = observations.Where(x => x.Source == BackupExecutionObservationSource.Msdb && x.Kind == Domain.BackupSets.BackupSetEvidenceKind.Backup).ToArray();
                 if (evidence.Facts.SqlOutcomeSource != BackupSqlOutcomeSource.RecoveredEvidence
                     || original.ExpectedDatabaseGuid is null || original.ExpectedFamilyGuid is null
                     || evidence.Facts.Metadata.DatabaseGuid.Value != original.ExpectedDatabaseGuid

@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
 
 namespace DbBackupManager.Application.TargetSql;
@@ -8,6 +9,7 @@ public sealed record TargetSqlInvocationTerminationEvidence(TargetSqlInvocationT
 public interface IPreparedTargetSqlBackupInvocation : IAsyncDisposable
 {
     BackupInvocationBinding Binding { get; }
+    BackupDatabaseIdentity Database { get; }
     Task<TargetSqlResult<TargetSqlBackupCompletion>> InvokeOnceAsync(Guid invocationPermitId,
         CancellationToken cancellationToken = default);
 }

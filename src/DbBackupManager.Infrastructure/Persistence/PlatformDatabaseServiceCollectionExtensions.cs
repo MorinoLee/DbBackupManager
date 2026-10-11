@@ -44,7 +44,10 @@ public static class PlatformDatabaseServiceCollectionExtensions
         services.TryAddScoped<IBackupTaskExecutionStore, BackupTaskExecutionStore>();
         services.TryAddScoped<IBackupExecutionOperationStore, BackupExecutionOperationStore>();
         services.TryAddScoped<IBackupInvocationAuthorizationStore, BackupInvocationAuthorizationStore>();
+        services.TryAddScoped<IBackupPlanExecutionStore, BackupPlanExecutionStore>();
+        services.TryAddScoped<BackupPlanReadOnlyStages>();
         services.TryAddScoped<IBackupPlanTaskRunner, BackupPlanTaskRunner>();
+        services.TryAddScoped<IBackupPlanTaskReconciler, BackupPlanTaskReconciler>();
         services.TryAddScoped<DbBackupManager.Application.FileStorage.IBackupArtifactDeletionGuard, BackupArtifactDeletionGuard>();
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddScoped<IBackupPlanTaskCreationStore, BackupPlanTaskCreationStore>();

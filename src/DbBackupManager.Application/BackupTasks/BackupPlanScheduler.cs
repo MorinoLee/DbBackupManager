@@ -79,7 +79,7 @@ public static class BackupPlanScheduleSelectionRules
 }
 
 public sealed record BackupPlanAttemptFacts(Guid AttemptId, BackupInvocationStatus SqlStatus,
-    bool MetadataPassed, bool LocalVerified, bool ContradictoryEvidence = false);
+    bool MetadataPassed, bool LocalVerified, bool ContradictoryEvidence = false, bool NotInvokedFailure = false);
 
 public static class BackupPlanSlotDispositionRules
 {
@@ -107,8 +107,8 @@ public static class BackupPlanSlotDispositionRules
         if (status == BackupTaskStatus.NeedsAttention) return BackupSlotDisposition.Uncertain;
         if (status == BackupTaskStatus.Pending) return BackupSlotDisposition.Pending;
         // 后续失败不能抹掉历史成功或矛盾证据；Prepared 也不证明该 Attempt 明确失败。
-        if (status == BackupTaskStatus.Failed && attempts.All(x => x.SqlStatus == BackupInvocationStatus.ConfirmedFailed
-                && !x.ContradictoryEvidence && !x.MetadataPassed && !x.LocalVerified))
+        if (status == BackupTaskStatus.Failed && attempts.All(x => (x.SqlStatus == BackupInvocationStatus.ConfirmedFailed
+                || x.SqlStatus == BackupInvocationStatus.Prepared && x.NotInvokedFailure) && !x.ContradictoryEvidence && !x.MetadataPassed && !x.LocalVerified))
             return BackupSlotDisposition.Failed;
         return status is BackupTaskStatus.Pending or BackupTaskStatus.Running
             && current.SqlStatus is BackupInvocationStatus.Prepared or BackupInvocationStatus.Running
