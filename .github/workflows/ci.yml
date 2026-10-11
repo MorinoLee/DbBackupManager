@@ -196,7 +196,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.infrastructure == 'true'
     runs-on: windows-latest
-    timeout-minutes: 12
+    # 计划执行/恢复包含真实 SQL 与 SMB 故障注入；保留全量，给较慢的托管 runner 留出有界预算。
+    timeout-minutes: 20
 
     steps:
       - name: 检出代码

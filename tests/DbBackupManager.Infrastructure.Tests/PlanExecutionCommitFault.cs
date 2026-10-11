@@ -10,6 +10,7 @@ internal sealed class PlanExecutionCommitFault(string method, string? kind = nul
     public bool Fired { get; private set; }
     public bool Armed { get; set; } = true;
     public Action? BeforeThrow { get; set; }
+    public Func<string, object?, Task>? AfterResponseAsync { get; set; }
     public void Observe(string called, object?[] arguments)
     {
         if (!WillFire(called, arguments)) return;
@@ -46,6 +47,7 @@ internal sealed class PlanExecutionCommitFault(string method, string? kind = nul
         private async Task<T> WaitAsync<T>(Task<T> task, string called, object?[] arguments)
         {
             var result = await task;
+            if (_fault.AfterResponseAsync is { } after) await after(called, result);
             if (_fault.WillFire(called, arguments) && result is BackupFileStorageResult<VerifiedBackupRenameReceipt> { Value: { } receipt })
                 await receipt.FinalHandle.DisposeAsync();
             _fault.Observe(called, arguments);

@@ -11,6 +11,24 @@ internal sealed class BackupPlanOperationFlow(IBackupPlanExecutionStore store, I
         await store.RefreshAsync(session.Work.Task.TaskId, session.Work.Lease.LeaseToken, token)
         ?? throw new PlanExecutionLeaseLostException();
 
+    // 只重放同一持久化命令；续租改变 RowVersion 时刷新，失租或阶段变化立即停止。
+    public async Task<T> CommitAsync<T>(BackupPlanExecutionSession session, Func<BackupPlanExecutionSession, Task<T>> command,
+        Func<T, BackupExecutionContractCode> code, CancellationToken token)
+    {
+        var current = await FreshAsync(session, token);
+        for (var retry = 0; ; retry++)
+        {
+            var result = await command(current);
+            if (code(result) != BackupExecutionContractCode.LeaseLost || retry >= 2) return result;
+            var next = await store.RefreshAsync(current.Work.Task.TaskId, current.Work.Lease.LeaseToken, token);
+            var before = current.Work.Lease;
+            if (next is null || next.Work.Lease.Purpose != before.Purpose || next.Work.Lease.Stage != before.Stage
+                || next.Work.Lease.BackupAttemptId != before.BackupAttemptId
+                || next.Work.Lease.RowVersion.SequenceEqual(before.RowVersion)) return result;
+            current = next;
+        }
+    }
+
     public async Task<FrozenBackupExecutionOperation> ReserveAsync(BackupPlanExecutionSession session, BackupExecutionOperationKind kind,
         bool newObservation, CancellationToken token)
     {
@@ -19,32 +37,31 @@ internal sealed class BackupPlanOperationFlow(IBackupPlanExecutionStore store, I
         if (previous is not null && (!newObservation || previous.State == BackupExecutionOperationState.Frozen && kind != BackupExecutionOperationKind.Admission)) return previous;
         if (previous?.State == BackupExecutionOperationState.Reserved && kind is not (BackupExecutionOperationKind.SqlResult or BackupExecutionOperationKind.Transfer or BackupExecutionOperationKind.ValidateCopy))
         {
-            var abandoned = await operations.AbandonAsync(session.Work.Lease, previous.Identity, token);
+            var abandoned = await CommitAsync(session, next => operations.AbandonAsync(next.Work.Lease, previous.Identity, token), x => x.Code, token);
             Require(abandoned.Code);
         }
         else if (previous?.State == BackupExecutionOperationState.Reserved) return previous;
         var sql = session.Operations.Single(x => x.Identity.Kind == BackupExecutionOperationKind.SqlResult);
         var identity = new ReserveBackupExecutionOperation(Guid.NewGuid(), session.Work.Task.TaskId, session.Work.Attempt.Id,
             kind, (previous?.Identity.Sequence ?? 0) + 1, sql.Identity.IntendedBackupSetId, clock.GetUtcNow());
-        var result = await operations.ReserveAsync(session.Work.Lease, identity, token);
+        var result = await CommitAsync(session, next => operations.ReserveAsync(next.Work.Lease, identity, token), x => x.Code, token);
         Require(result.Code);
         return result.Value!;
     }
     public async Task<FrozenBackupExecutionOperation> FreezeAsync(BackupPlanExecutionSession session, FrozenBackupExecutionOperation operation,
         BackupExecutionFacts facts, IReadOnlyList<BackupExecutionObservationInput> observations, CancellationToken token)
     {
-        session = await FreshAsync(session, token);
-        var result = await operations.FreezeAsync(session.Work.Lease, new(operation.Identity, facts, observations), token);
+        var command = new FreezeBackupExecutionOperation(operation.Identity, facts, observations);
+        var result = await CommitAsync(session, next => operations.FreezeAsync(next.Work.Lease, command, token), x => x.Code, token);
         Require(result.Code);
         return result.Value!;
     }
     public Task<BackupExecutionContractCode> ApplyAsync(BackupPlanExecutionSession session, FrozenBackupExecutionOperation operation,
         IVerifiedBackupFileHandle? handle, CancellationToken token) => ApplyAsync(session, operation, handle, null, token);
-    public async Task<BackupExecutionContractCode> ApplyAsync(BackupPlanExecutionSession session, FrozenBackupExecutionOperation operation,
+    public Task<BackupExecutionContractCode> ApplyAsync(BackupPlanExecutionSession session, FrozenBackupExecutionOperation operation,
         IVerifiedBackupFileHandle? handle, IVerifiedBackupFileHandle? dependency, CancellationToken token)
     {
-        session = await FreshAsync(session, token);
-        return await store.ApplyAsync(session.Work.Lease, operation.Identity, handle, dependency, token);
+        return CommitAsync(session, next => store.ApplyAsync(next.Work.Lease, operation.Identity, handle, dependency, token), x => x, token);
     }
     public static void Require(BackupExecutionContractCode code)
     {

@@ -138,8 +138,9 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
                     }
                 }, AdmissionObservations(g0, g1), token);
             session = await _flow.FreshAsync(session, token);
-            var grant = await authorizations.AuthorizeAsync(session.Work.Lease, new(original.Identity.MutationId, original.Identity.MutationId,
-                original.Identity.MutationId, work.Snapshot.Identity.DatabaseId, invocation.Binding, clock.GetUtcNow(), session.Work.Attempt.RowVersion), token);
+            var authorization = new AuthorizeBackupInvocation(original.Identity.MutationId, original.Identity.MutationId,
+                original.Identity.MutationId, work.Snapshot.Identity.DatabaseId, invocation.Binding, clock.GetUtcNow(), session.Work.Attempt.RowVersion);
+            var grant = await _flow.CommitAsync(session, next => authorizations.AuthorizeAsync(next.Work.Lease, authorization, token), x => x.Code, token);
             if (grant.Code != BackupExecutionContractCode.Succeeded || grant.Value?.Lease is null)
                 return grant.Code == BackupExecutionContractCode.DatabaseBlocked
                     ? await stages.SuspendAsync(session, "sql.database_blocked", token) : grant.Code;
@@ -181,7 +182,7 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
         var identity = new ReserveBackupExecutionOperation(Guid.NewGuid(), session.Work.Task.TaskId, session.Work.Attempt.Id,
             BackupExecutionOperationKind.Admission, session.Operations.Count(x => x.Identity.Kind == BackupExecutionOperationKind.Admission) + 1,
             sql.Identity.IntendedBackupSetId, clock.GetUtcNow());
-        var reserved = await operations.ReserveAsync(session.Work.Lease, identity, token);
+        var reserved = await _flow.CommitAsync(session, next => operations.ReserveAsync(next.Work.Lease, identity, token), x => x.Code, token);
         Require(reserved.Code);
         var frozen = await _flow.FreezeAsync(session, reserved.Value!, new()
         { Outcome = BackupExecutionOutcome.ConfirmedFailed, SqlOutcomeSource = BackupSqlOutcomeSource.NotInvoked, ReasonCode = reason }, [], token);

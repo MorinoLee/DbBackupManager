@@ -149,9 +149,10 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
         if (operation.Facts.OriginalCallTerminated && operation.Facts.OriginalCallerCannotInvoke && session.Authorization.TerminalObservedAtUtc is null)
         {
             session = await _flow.FreshAsync(session, token);
-            var ended = await authorizations.RecordTerminationAsync(session.Work.Lease, new(session.Authorization!.PermitId,
+            var command = new TerminateBackupInvocation(session.Authorization!.PermitId,
                 operation.Identity.MutationId, operation.Identity.MutationId, BackupInvocationTerminationKind.RecoveredTerminated,
-                operation.Facts.EvidenceAtUtc!.Value, true, true), token);
+                operation.Facts.EvidenceAtUtc!.Value, true, true);
+            var ended = await _flow.CommitAsync(session, next => authorizations.RecordTerminationAsync(next.Work.Lease, command, token), x => x.Code, token);
             Require(ended.Code);
         }
         return await _flow.ApplyAsync(session, operation, null, token);
@@ -228,7 +229,8 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
     internal async Task<BackupExecutionContractCode> SuspendAsync(BackupPlanExecutionSession session, string reason, CancellationToken token)
     {
         session = await _flow.FreshAsync(session, token);
-        return await store.SuspendAsync(session.Work.Lease, Guid.NewGuid(), reason, token);
+        var mutationId = Guid.NewGuid();
+        return await _flow.CommitAsync(session, next => store.SuspendAsync(next.Work.Lease, mutationId, reason, token), x => x, token);
     }
     internal async Task<IVerifiedBackupFileHandle?> HoldDependencyAsync(BackupPlanExecutionSession session, BackupExecutionFacts? facts, CancellationToken token)
     {

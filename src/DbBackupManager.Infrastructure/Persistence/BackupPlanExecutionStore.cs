@@ -105,12 +105,14 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
     public Task<BackupExecutionContractCode> RenewAsync(Guid taskId, Guid leaseToken, DateTimeOffset expires, CancellationToken cancellationToken = default) =>
         _persistence.ExecuteWithStrategyAsync(async db =>
         {
-            var task = await db.BackupTasks.AsTracking().SingleOrDefaultAsync(x => x.Id == taskId, cancellationToken);
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            var task = await LockAsync(db, taskId, cancellationToken);
             if (task?.LeaseToken != leaseToken || task.LeasePurpose is null || task.LeaseExpiresAtUtc <= clock.GetUtcNow())
                 return BackupExecutionContractCode.LeaseLost;
             if (expires <= task.LeaseExpiresAtUtc) return BackupExecutionContractCode.AlreadyApplied;
             task.RenewLease(leaseToken, task.LeasePurpose.Value, clock.GetUtcNow(), expires);
             await db.SaveChangesAsync(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
 
