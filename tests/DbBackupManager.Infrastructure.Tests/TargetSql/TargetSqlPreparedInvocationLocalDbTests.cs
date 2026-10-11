@@ -16,13 +16,14 @@ public sealed class TargetSqlPreparedInvocationLocalDbTests(PlatformDatabaseSqlS
         var permit = Guid.NewGuid();
         var prepared = await adapter.PrepareAsync(test.SqlInput,
             new(test.TargetDatabaseName, test.NewSqlPath(), BackupRunPurpose.PlanFull, true, false, 60), Guid.NewGuid());
-        Assert.True(prepared.IsSucceeded);
+        Assert.True(prepared.IsSucceeded, prepared.Failure?.ToString());
         await using var invocation = prepared.Value!;
         Assert.NotNull(invocation.Database.DatabaseGuid);
         Assert.NotNull(invocation.Database.FamilyGuid);
         var active = await adapter.ReadAsync(test.SqlInput, permit, invocation.Binding, 30);
         Assert.True(active.State == TargetSqlInvocationTerminationState.Active, active.ReasonCode);
-        Assert.True((await invocation.InvokeOnceAsync(permit)).IsSucceeded);
+        var completion = await invocation.InvokeOnceAsync(permit);
+        Assert.True(completion.IsSucceeded, completion.Failure?.ToString());
         Assert.Equal(TargetSqlFailureCode.CommandRejected, (await invocation.InvokeOnceAsync(permit)).Failure!.Code);
         await invocation.DisposeAsync();
         Assert.Equal(TargetSqlInvocationTerminationState.Terminated,
@@ -49,7 +50,7 @@ public sealed class TargetSqlPreparedInvocationLocalDbTests(PlatformDatabaseSqlS
         var path = test.NewSqlPath();
         var prepared = await test.SqlAdapter().PrepareAsync(test.SqlInput,
             new(test.TargetDatabaseName, path, BackupRunPurpose.PlanFull, true, false, 60), Guid.NewGuid());
-        Assert.True(prepared.IsSucceeded);
+        Assert.True(prepared.IsSucceeded, prepared.Failure?.ToString());
         await using var invocation = prepared.Value!;
         byte[] bytes = [1, 2, 3, 4];
         await File.WriteAllBytesAsync(path, bytes);
