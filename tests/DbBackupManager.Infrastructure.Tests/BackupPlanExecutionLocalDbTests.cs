@@ -80,7 +80,8 @@ public sealed class BackupPlanExecutionLocalDbTests(PlatformDatabaseSqlServerFix
 }
 
 /// <summary>使用本机 LocalDB 和指向本次临时目录的回环 SMB；SQL、摘要、句柄和平台事务均为真实适配器。</summary>
-internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSqlInvocationPreparation, ITargetSqlActiveBaselineReader
+internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSqlInvocationPreparation, ITargetSqlActiveBaselineReader,
+    ITargetSqlInvocationTerminationProbe
 {
     private readonly PlatformDatabaseSqlServerFixture _platform;
     private readonly SqlConnection _master;
@@ -113,6 +114,8 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
     public Func<Task>? AfterDifferential { get; set; }
     public Func<Task>? AfterBackupResponse { get; set; }
     public bool MetadataUnavailable { get; set; }
+    public ITargetSqlInvocationTerminationProbe? RestrictedTerminationProbe { get; set; }
+    public int TerminationReads { get; private set; }
     public int MetadataReads { get; private set; }
     public async Task ExpireLeaseAsync(Guid taskId)
     {
@@ -165,7 +168,7 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
             var adapter = new BackupPlanFileAdapter([local]);
             var simple = new BackupFileStorageAdapter([local]);
             var stages = new BackupPlanReadOnlyStages(store, operations, reconciliation, new SqlClientTargetSqlReadOnlyProbe(credentials, connections),
-                adapter, simple, sql, authorizations, TimeProvider.System);
+                adapter, simple, environment, authorizations, TimeProvider.System);
             environment.Store = store;
             environment.FileVerifier = adapter;
             IBackupPlanFileTransferExecutor planTransfer = adapter;
@@ -305,6 +308,23 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
         if (++_gates == 1 && AfterFirstGate is { } action) await action();
         return result;
     }
+    public Task<TargetSqlInvocationTerminationEvidence> ReadAsync(TargetSqlConnectionInput connection, Guid invocationPermitId,
+        BackupInvocationBinding originalBinding, int timeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        TerminationReads++;
+        return (RestrictedTerminationProbe ?? _sql).ReadAsync(connection, invocationPermitId, originalBinding, timeoutSeconds, cancellationToken);
+    }
+    public async Task UseRestrictedTerminationVisibilityAsync()
+    {
+        // 权限反例只在本次随机数据库内创建无登录用户，随数据库一起清理。
+        await using var connection = new SqlConnection(_master.ConnectionString);
+        await connection.OpenAsync();
+        await using var create = new SqlCommand($"USE [{_databaseName}]; CREATE USER [DbBPE_TerminationReader] WITHOUT LOGIN;", connection);
+        await create.ExecuteNonQueryAsync();
+        RestrictedTerminationProbe = new SqlClientTargetSqlInvocation(new SyntheticCredentials(),
+            new LocalSqlConnections(_master.ConnectionString, _factory, _databaseName),
+            new DifferentialBackupAllowance(new ConfigurationBuilder().Build(), NullLogger<DifferentialBackupAllowance>.Instance), TimeProvider.System);
+    }
     public async ValueTask DisposeAsync()
     {
         try { await DropAsync(_master, _databaseName); }
@@ -359,14 +379,23 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
                 : inner.ReadAsync(connection, request, cancellationToken);
         }
     }
-    private sealed class LocalSqlConnections(string connectionString, TrackingFactory platform)
+    private sealed class LocalSqlConnections(string connectionString, TrackingFactory platform, string? restrictedDatabase = null)
         : ITargetSqlInvocationConnectionFactory, ITargetSqlClientSessionFactory
     {
         public async Task<SqlConnection> OpenAsync(TargetSqlConnectionInput input, TargetSqlCredentialLease credential, CancellationToken token)
         {
             platform.AssertNoLiveContext();
             var connection = new SqlConnection(connectionString);
-            try { await connection.OpenAsync(token); return connection; }
+            try
+            {
+                await connection.OpenAsync(token);
+                if (restrictedDatabase is not null)
+                {
+                    await using var impersonate = new SqlCommand($"USE [{restrictedDatabase}]; EXECUTE AS USER = 'DbBPE_TerminationReader';", connection);
+                    await impersonate.ExecuteNonQueryAsync(token);
+                }
+                return connection;
+            }
             catch { await connection.DisposeAsync(); throw; }
         }
         async Task<ITargetSqlClientSession> ITargetSqlClientSessionFactory.OpenAsync(TargetSqlConnectionInput input, TargetSqlCredentialLease credential, CancellationToken token) =>

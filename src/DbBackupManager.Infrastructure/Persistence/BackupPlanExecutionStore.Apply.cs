@@ -69,8 +69,22 @@ internal sealed partial class BackupPlanExecutionStore
                     if (!facts.SqlSuccessObserved) return BackupExecutionContractCode.Conflict;
                     if (attempt.BackupInvocationStatus == BackupInvocationStatus.Running) attempt.RecordBackupSucceeded(evidenceTime);
                     else if (attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate) attempt.ReconcileBackupSucceeded(evidenceTime);
+                    else if (identity.Kind == BackupExecutionOperationKind.Recovery && lease.Purpose == BackupLeasePurpose.Reconciliation
+                        && facts.SqlOutcomeSource == BackupSqlOutcomeSource.RecoveredEvidence
+                        && attempt.BackupInvocationStatus == BackupInvocationStatus.Succeeded && sqlFacts.SqlSuccessObserved)
+                    {
+                        // 已应用的成功事实不重写完成时间；本次只补查原授权的终止。
+                    }
                     else return BackupExecutionContractCode.Conflict;
-                    Advance(task, snapshot, lease, now);
+                    if (identity.Kind == BackupExecutionOperationKind.Recovery && facts.SqlOutcomeSource == BackupSqlOutcomeSource.RecoveredEvidence)
+                    {
+                        var authorization = await db.BackupInvocationAuthorizations.SingleOrDefaultAsync(x => x.TaskId == task.Id && x.AttemptId == attempt.Id, cancellationToken);
+                        if (authorization is null) return BackupExecutionContractCode.Conflict;
+                        if (authorization.TerminalObservedAtUtc is null)
+                            Unknown(task, snapshot, lease, now, "sql.original_call_unterminated");
+                        else Advance(task, snapshot, lease, now);
+                    }
+                    else Advance(task, snapshot, lease, now);
                 }
                 else if (facts.Outcome == BackupExecutionOutcome.ConfirmedFailed)
                 {

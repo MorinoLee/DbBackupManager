@@ -79,6 +79,10 @@ internal sealed class BackupExecutionOperationStore(IDbContextFactory<PlatformDb
                 if (operation is null)
                 {
                     if (frozen is not null || abandon) return new BackupExecutionContractResult<FrozenBackupExecutionOperation>(BackupExecutionContractCode.NotFound);
+                    // 与取消更新共享任务行锁；取消先提交时，不预约新的远端写入。
+                    if (task.PlanId is not null && task.CancellationRequestedAtUtc is not null
+                        && identity.Kind is BackupExecutionOperationKind.Transfer or BackupExecutionOperationKind.ValidateCopy)
+                        return new BackupExecutionContractResult<FrozenBackupExecutionOperation>(BackupExecutionContractCode.CancellationRequested);
                     operation = candidate;
                     context.BackupPlanExecutionOperations.Add(operation);
                 }

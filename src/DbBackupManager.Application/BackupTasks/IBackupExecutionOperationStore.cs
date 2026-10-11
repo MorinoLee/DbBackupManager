@@ -3,7 +3,7 @@ using DbBackupManager.Domain.BackupTasks;
 
 namespace DbBackupManager.Application.BackupTasks;
 
-public enum BackupExecutionContractCode { Succeeded, AlreadyApplied, Conflict, NotFound, LeaseLost, DatabaseBlocked, StageNotOpen }
+public enum BackupExecutionContractCode { Succeeded, AlreadyApplied, Conflict, NotFound, LeaseLost, DatabaseBlocked, StageNotOpen, CancellationRequested }
 public sealed record BackupExecutionContractResult<T>(BackupExecutionContractCode Code, T? Value = null) where T : class;
 public sealed record ReserveBackupExecutionOperation(Guid MutationId, Guid TaskId, Guid AttemptId,
     BackupExecutionOperationKind Kind, int Sequence, Guid IntendedBackupSetId, DateTimeOffset ObservedAtUtc);

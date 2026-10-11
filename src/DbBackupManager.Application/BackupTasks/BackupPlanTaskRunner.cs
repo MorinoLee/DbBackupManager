@@ -57,6 +57,12 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
                 : BackupExecutionContractCode.Succeeded;
         }
         catch (PlanExecutionLeaseLostException) { return BackupExecutionContractCode.LeaseLost; }
+        catch (PlanExecutionConflictException exception) when (exception.Code == BackupExecutionContractCode.CancellationRequested)
+        {
+            var fresh = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
+            return fresh is null ? BackupExecutionContractCode.LeaseLost
+                : await stages.SuspendAsync(fresh, "plan.cancelled_after_sql", CancellationToken.None);
+        }
         catch (PlanExecutionConflictException exception) { return exception.Code; }
         catch (OperationCanceledException)
         {

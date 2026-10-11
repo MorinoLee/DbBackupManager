@@ -112,36 +112,53 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
         if (operation.State == BackupExecutionOperationState.Reserved)
         {
             var work = session.Work;
-            var prepared = await metadata.PrepareAsync(new(work.Lease, original.Identity.IntendedBackupSetId, work.Snapshot.Identity.DatabaseId,
-                operation.Identity.MutationId, operation.Identity.ObservedAtUtc, ExpectedIdentity(work), Connection(work),
-                new(work.Attempt.Id, work.Snapshot.Identity.DatabaseName, work.Attempt.LocalSqlFilePath,
-                    Math.Min(work.Snapshot.Policy.VerifyTimeoutMinutes * 60, 3600)), false, null), token);
-            var command = prepared.Command;
-            var complete = MetadataMatches(work, command.Metadata, command.Assessment, command.BaseBackupSetId, prepared.Evidence, false);
-            if (!complete) return await SuspendAsync(session, "sql.recovery_unknown", token);
+            var previous = session.Operations.Where(x => x.Identity.Kind == BackupExecutionOperationKind.Recovery
+                && x.State == BackupExecutionOperationState.Applied && x.Facts.SqlSuccessObserved
+                && x.Facts.SqlOutcomeSource == BackupSqlOutcomeSource.RecoveredEvidence).OrderByDescending(x => x.Identity.Sequence).FirstOrDefault();
+            BackupExecutionFacts facts;
+            var observations = new List<BackupExecutionObservationInput>();
+            if (previous is not null)
+            {
+                facts = previous.Facts; // 已确认的 SQL 身份、字段和完成来源保持原值，只追加终止观察。
+                observations.AddRange(previous.Observations.Where(x => x.Source != BackupExecutionObservationSource.Termination)
+                    .Select((x, i) => x with { EntryNumber = i }));
+            }
+            else
+            {
+                var prepared = await metadata.PrepareAsync(new(work.Lease, original.Identity.IntendedBackupSetId, work.Snapshot.Identity.DatabaseId,
+                    operation.Identity.MutationId, operation.Identity.ObservedAtUtc, ExpectedIdentity(work), Connection(work),
+                    new(work.Attempt.Id, work.Snapshot.Identity.DatabaseName, work.Attempt.LocalSqlFilePath,
+                        Math.Min(work.Snapshot.Policy.VerifyTimeoutMinutes * 60, 3600)), false, null), token);
+                var command = prepared.Command;
+                var complete = MetadataMatches(work, command.Metadata, command.Assessment, command.BaseBackupSetId, prepared.Evidence, false);
+                if (!complete) return await SuspendAsync(session, "sql.recovery_unknown", token);
+                facts = new()
+                {
+                    Outcome = BackupExecutionOutcome.Succeeded,
+                    SqlOutcomeSource = BackupSqlOutcomeSource.RecoveredEvidence,
+                    SqlSuccessObserved = true,
+                    Metadata = command.Metadata,
+                    Completion = command.Completion,
+                    Assessment = command.Assessment,
+                    ActualBaseBackupSetId = command.BaseBackupSetId,
+                    ActiveAssessment = prepared.ActiveBaseline,
+                    UsedCopyOnly = command.Metadata.IsCopyOnly.Value,
+                    UsedChecksum = command.Metadata.HasBackupChecksums.Value,
+                    UsedCompression = command.Metadata.IsCompressed.Value
+                };
+                observations.AddRange(command.Observations.Select((x, i) => new BackupExecutionObservationInput(i,
+                    Enum.Parse<BackupExecutionObservationSource>(x.Source.ToString()), x.Kind,
+                    new() { Metadata = x.Metadata, Completion = x.Completion, Assessment = x.Assessment, SqlSuccessObserved = true })));
+            }
             var ended = await termination.ReadAsync(Connection(work), session.Authorization.PermitId, session.Authorization.Binding,
                 Math.Min(work.Snapshot.Policy.VerifyTimeoutMinutes * 60, 3600), token);
             var terminal = ended.State == TargetSqlInvocationTerminationState.Terminated;
-            var facts = new BackupExecutionFacts
+            facts = facts with
             {
-                Outcome = BackupExecutionOutcome.Succeeded,
-                SqlOutcomeSource = BackupSqlOutcomeSource.RecoveredEvidence,
-                SqlSuccessObserved = true,
                 EvidenceAtUtc = clock.GetUtcNow(),
-                Metadata = command.Metadata,
-                Completion = command.Completion,
-                Assessment = command.Assessment,
-                ActualBaseBackupSetId = command.BaseBackupSetId,
-                ActiveAssessment = prepared.ActiveBaseline,
                 OriginalCallTerminated = terminal,
-                OriginalCallerCannotInvoke = terminal,
-                UsedCopyOnly = command.Metadata.IsCopyOnly.Value,
-                UsedChecksum = command.Metadata.HasBackupChecksums.Value,
-                UsedCompression = command.Metadata.IsCompressed.Value
+                OriginalCallerCannotInvoke = terminal
             };
-            var observations = command.Observations.Select((x, i) => new BackupExecutionObservationInput(i,
-                Enum.Parse<BackupExecutionObservationSource>(x.Source.ToString()), x.Kind,
-                new() { Metadata = x.Metadata, Completion = x.Completion, Assessment = x.Assessment, SqlSuccessObserved = true })).ToList();
             observations.Add(new(observations.Count, BackupExecutionObservationSource.Termination, BackupSetEvidenceKind.Backup,
                 new() { OriginalCallTerminated = terminal, OriginalCallerCannotInvoke = terminal, ReasonCode = ended.ReasonCode }));
             operation = await _flow.FreezeAsync(session, operation, facts, observations, token);
