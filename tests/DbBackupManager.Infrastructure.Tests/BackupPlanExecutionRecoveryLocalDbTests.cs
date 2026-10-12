@@ -100,6 +100,17 @@ public sealed class BackupPlanExecutionRecoveryLocalDbTests(PlatformDatabaseSqlS
         if (loseLease) Assert.Equal(BackupExecutionContractCode.LeaseLost, await test.Runner.RunTaskOnceAsync(new(taskId, Guid.NewGuid())));
         else await Assert.ThrowsAsync<LostPlanCommitResponseException>(() => test.Runner.RunTaskOnceAsync(new(taskId, Guid.NewGuid())));
         test.AfterBackupResponse = null;
+        Guid originalAttempt;
+        await using (var before = platform.CreateContext())
+        {
+            // SQL 已成功，但冻结提交前失租或丢失响应；成功事实尚未写入，后续只能只读收回原 Attempt。
+            var attempt = await before.BackupAttempts.SingleAsync(x => x.TaskId == taskId);
+            originalAttempt = attempt.Id;
+            var sql = await before.BackupPlanExecutionOperations.SingleAsync(x => x.AttemptId == attempt.Id && x.Kind == BackupExecutionOperationKind.SqlResult);
+            Assert.Equal(BackupExecutionOperationState.Reserved, sql.State);
+            Assert.Null(sql.Facts.PlatformCompletedAtUtc);
+            Assert.False(await before.BackupPlanExecutionOperations.AnyAsync(x => x.AttemptId == attempt.Id && x.Kind == BackupExecutionOperationKind.Recovery));
+        }
         await test.ExpireLeaseAsync(taskId);
         Assert.Equal(BackupExecutionContractCode.Succeeded, await test.Reconciler.ReconcilePlanTaskOnceAsync(new(taskId, Guid.NewGuid())));
         Assert.Equal(1, test.Invocations);
@@ -118,8 +129,10 @@ public sealed class BackupPlanExecutionRecoveryLocalDbTests(PlatformDatabaseSqlS
         await test.Runner.RunTaskOnceAsync(new(taskId, Guid.NewGuid()));
         Assert.Equal(1, test.Invocations);
         await using var finalDb = platform.CreateContext();
-        Assert.Equal(BackupTaskStatus.Succeeded, (await finalDb.BackupTasks.SingleAsync(x => x.Id == taskId)).Status);
-        Assert.Equal(1, await finalDb.BackupAttempts.CountAsync(x => x.TaskId == taskId));
+        var completed = await finalDb.BackupTasks.SingleAsync(x => x.Id == taskId);
+        Assert.Equal(BackupTaskStatus.Succeeded, completed.Status);
+        Assert.Equal(originalAttempt, completed.CurrentBackupAttemptId);
+        Assert.Equal(originalAttempt, (await finalDb.BackupAttempts.SingleAsync(x => x.TaskId == taskId)).Id);
         Assert.Equal(0, test.PlanDeletions);
     }
 

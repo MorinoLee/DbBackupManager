@@ -43,7 +43,7 @@ internal sealed class BackupPlanOperationFlow(IBackupPlanExecutionStore store, I
         else if (previous?.State == BackupExecutionOperationState.Reserved) return previous;
         var sql = session.Operations.Single(x => x.Identity.Kind == BackupExecutionOperationKind.SqlResult);
         var identity = new ReserveBackupExecutionOperation(Guid.NewGuid(), session.Work.Task.TaskId, session.Work.Attempt.Id,
-            kind, (previous?.Identity.Sequence ?? 0) + 1, sql.Identity.IntendedBackupSetId, clock.GetUtcNow());
+            kind, NextSequence(session.Operations, kind), sql.Identity.IntendedBackupSetId, clock.GetUtcNow());
         var result = await CommitAsync(session, next => operations.ReserveAsync(next.Work.Lease, identity, token), x => x.Code, token);
         Require(result.Code);
         return result.Value!;
@@ -83,6 +83,13 @@ internal sealed class BackupPlanOperationFlow(IBackupPlanExecutionStore store, I
         new(work.Task.TaskId, work.Attempt.Id, Endpoint(remote ? work.Snapshot.Policy.RemoteEndpoint! : work.Snapshot.WorkerSourceEndpoint),
             path, work.Snapshot.Policy.TransferTimeoutMinutes * 60, expected);
     public static BackupContentEvidence CopyContent(BackupContentEvidence source) => source with { StableObjectId = null };
+    internal static int NextSequence(IReadOnlyList<FrozenBackupExecutionOperation> operations, BackupExecutionOperationKind kind)
+    {
+        var max = 0;
+        foreach (var operation in operations)
+            if (operation.Identity.Kind == kind && operation.Identity.Sequence > max) max = operation.Identity.Sequence;
+        return max + 1;
+    }
 }
 
 internal sealed class PlanExecutionLeaseLostException : Exception;
@@ -93,34 +100,73 @@ internal sealed class PlanExecutionConflictException(BackupExecutionContractCode
 
 internal sealed class BackupPlanHeartbeat : IAsyncDisposable
 {
+    internal static readonly TimeSpan Interval = TimeSpan.FromSeconds(20);
+    internal static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(2);
+    // 续租间隔 20 秒、租约 2 分钟；留出多次重试后，只在剩余时间不够再等一轮时取消外部 I/O。
+    internal static readonly TimeSpan NearExpiry = TimeSpan.FromSeconds(30);
     private readonly CancellationTokenSource _stop = new();
     private readonly CancellationTokenSource _io;
     private readonly Task _loop;
-    public BackupPlanHeartbeat(IBackupPlanExecutionStore store, TimeProvider clock, Guid taskId, Guid leaseToken, CancellationToken caller)
+    private readonly TimeProvider _clock;
+    private DateTimeOffset _expiresAt;
+    internal Exception? LastFault { get; private set; }
+    public BackupPlanHeartbeat(IBackupPlanExecutionStore store, TimeProvider clock, Guid taskId, Guid leaseToken,
+        DateTimeOffset leaseExpiresAt, CancellationToken caller, Func<CancellationToken, Task>? wait = null)
     {
+        _clock = clock;
+        _expiresAt = leaseExpiresAt;
         _io = CancellationTokenSource.CreateLinkedTokenSource(caller);
-        _loop = LoopAsync(store, clock, taskId, leaseToken);
+        _loop = LoopAsync(store, taskId, leaseToken, wait ?? (static token => Task.Delay(Interval, token)));
     }
     public CancellationToken Token => _io.Token;
-    private async Task LoopAsync(IBackupPlanExecutionStore store, TimeProvider clock, Guid task, Guid lease)
+    private async Task LoopAsync(IBackupPlanExecutionStore store, Guid task, Guid lease, Func<CancellationToken, Task> wait)
     {
         try
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(20));
-            while (await timer.WaitForNextTickAsync(_stop.Token))
+            while (true)
             {
-                var code = await store.RenewAsync(task, lease, clock.GetUtcNow().AddMinutes(2), _stop.Token);
-                if (code is not (BackupExecutionContractCode.Succeeded or BackupExecutionContractCode.AlreadyApplied))
-                { await _io.CancelAsync(); break; }
+                await wait(_stop.Token);
+                try
+                {
+                    var requested = _clock.GetUtcNow().Add(LeaseDuration);
+                    var code = await store.RenewAsync(task, lease, requested, _stop.Token);
+                    if (code is BackupExecutionContractCode.Succeeded or BackupExecutionContractCode.AlreadyApplied)
+                    {
+                        _expiresAt = requested;
+                        LastFault = null;
+                        continue;
+                    }
+                    if (CancelIo(code)) break;
+                }
+                catch (OperationCanceledException) when (_stop.IsCancellationRequested) { break; }
+                catch (Exception exception)
+                {
+                    LastFault = exception;
+                    if (CancelIo(null)) break;
+                }
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
-        catch { await _io.CancelAsync(); throw; }
+    }
+    private bool CancelIo(BackupExecutionContractCode? code)
+    {
+        if (code is BackupExecutionContractCode.Succeeded or BackupExecutionContractCode.AlreadyApplied) return false;
+        if (code != BackupExecutionContractCode.LeaseLost && _clock.GetUtcNow() < _expiresAt - NearExpiry) return false;
+        _io.Cancel();
+        return true;
     }
     public async ValueTask DisposeAsync()
     {
-        await _stop.CancelAsync();
-        try { await _loop; }
+        try
+        {
+            await _stop.CancelAsync();
+            await _loop;
+        }
+        catch (Exception exception)
+        {
+            // 已提交的执行结果必须保留；续租失败只留在心跳上，不从 Dispose 再抛出。
+            LastFault = exception;
+        }
         finally { _stop.Dispose(); _io.Dispose(); }
     }
 }

@@ -24,22 +24,20 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
             clock.GetUtcNow(), clock.GetUtcNow().AddMinutes(2), cancellationToken);
         if (opened.Value is null) return opened.Code;
         var session = opened.Value;
-        await using var heartbeat = new BackupPlanHeartbeat(store, clock, request.TaskId, lease, cancellationToken);
+        await using var heartbeat = new BackupPlanHeartbeat(store, clock, request.TaskId, lease, session.Work.Lease.ExpiresAtUtc, cancellationToken);
         try
         {
             if (session.Work.Lease.Stage == BackupTaskStage.Backup)
             {
                 var code = await InvokeAsync(session, heartbeat.Token);
-                Require(code);
-                var next = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
+                var next = await ContinueAsync(session, code);
                 if (next is null) return code;
                 session = next;
             }
             if (session.Work.Lease.Stage == BackupTaskStage.VerifyLocal)
             {
                 var code = await stages.RunAsync(session, false, heartbeat.Token);
-                Require(code);
-                var next = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
+                var next = await ContinueAsync(session, code);
                 if (next is null) return code;
                 session = next;
             }
@@ -48,8 +46,7 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
             if (session.Work.Lease.Stage == BackupTaskStage.Transfer)
             {
                 var code = await TransferAsync(session, heartbeat.Token);
-                Require(code);
-                var next = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
+                var next = await ContinueAsync(session, code);
                 if (next is null) return code;
                 session = next;
             }
@@ -67,9 +64,31 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
         catch (OperationCanceledException)
         {
             var fresh = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
-            if (fresh is not null) await stages.SuspendAsync(fresh, "plan.interrupted", CancellationToken.None);
+            if (fresh is null) return BackupExecutionContractCode.LeaseLost;
+            try { await stages.SuspendAsync(fresh, "plan.interrupted", CancellationToken.None); }
+            catch { /* 暂停失败仍把取消交给调用方。 */ }
             throw;
         }
+        catch (Exception)
+        {
+            try
+            {
+                var fresh = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
+                if (fresh is not null) await stages.SuspendAsync(fresh, "plan.unexpected_error", CancellationToken.None);
+            }
+            catch { /* 暂停失败不能掩盖原异常，也不能改写已经提交的结果。 */ }
+            throw;
+        }
+    }
+
+    private async Task<BackupPlanExecutionSession?> ContinueAsync(BackupPlanExecutionSession session, BackupExecutionContractCode code)
+    {
+        Require(code);
+        var next = await store.RefreshAsync(session.Work.Task.TaskId, session.Work.Lease.LeaseToken, CancellationToken.None);
+        if (next is not null) return next;
+        var required = BackupTaskStateMachine.GetRequiredStages(session.Work.Snapshot.Policy.StorageMode);
+        if (required.Count > 0 && session.Work.Lease.Stage == required[^1]) return null;
+        throw new PlanExecutionLeaseLostException();
     }
 
     private async Task<BackupExecutionContractCode> InvokeAsync(BackupPlanExecutionSession session, CancellationToken token)
@@ -186,7 +205,7 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
         session = await _flow.FreshAsync(session, token);
         var sql = session.Operations.Single(x => x.Identity.Kind == BackupExecutionOperationKind.SqlResult);
         var identity = new ReserveBackupExecutionOperation(Guid.NewGuid(), session.Work.Task.TaskId, session.Work.Attempt.Id,
-            BackupExecutionOperationKind.Admission, session.Operations.Count(x => x.Identity.Kind == BackupExecutionOperationKind.Admission) + 1,
+            BackupExecutionOperationKind.Admission, NextSequence(session.Operations, BackupExecutionOperationKind.Admission),
             sql.Identity.IntendedBackupSetId, clock.GetUtcNow());
         var reserved = await _flow.CommitAsync(session, next => operations.ReserveAsync(next.Work.Lease, identity, token), x => x.Code, token);
         Require(reserved.Code);

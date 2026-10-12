@@ -80,7 +80,7 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
                 if (operation.Facts.Outcome != BackupExecutionOutcome.Succeeded) return applied;
             }
             var next = await store.RefreshAsync(session.Work.Task.TaskId, session.Work.Lease.LeaseToken, token);
-            if (next is null) return BackupExecutionContractCode.Succeeded;
+            if (next is null) return BackupExecutionContractCode.LeaseLost;
             session = next;
             return await VerifyLocalAsync(session, token);
         }
@@ -283,14 +283,16 @@ public sealed class BackupPlanTaskReconciler(IBackupPlanExecutionStore store, Ba
         var opened = await store.OpenAsync(request.TaskId, request.RequestMutationId, true, lease, Guid.NewGuid().ToString("N"),
             clock.GetUtcNow(), clock.GetUtcNow().AddMinutes(2), cancellationToken);
         if (opened.Value is null) return opened.Code;
-        await using var heartbeat = new BackupPlanHeartbeat(store, clock, request.TaskId, lease, cancellationToken);
+        await using var heartbeat = new BackupPlanHeartbeat(store, clock, request.TaskId, lease, opened.Value.Work.Lease.ExpiresAtUtc, cancellationToken);
         try { return await stages.RunAsync(opened.Value, true, heartbeat.Token); }
         catch (PlanExecutionLeaseLostException) { return BackupExecutionContractCode.LeaseLost; }
         catch (PlanExecutionConflictException exception) { return exception.Code; }
         catch (OperationCanceledException)
         {
             var fresh = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
-            if (fresh is not null) await stages.SuspendAsync(fresh, "plan.recovery_interrupted", CancellationToken.None);
+            if (fresh is null) return BackupExecutionContractCode.LeaseLost;
+            try { await stages.SuspendAsync(fresh, "plan.recovery_interrupted", CancellationToken.None); }
+            catch { /* 暂停失败仍把取消交给调用方。 */ }
             throw;
         }
     }

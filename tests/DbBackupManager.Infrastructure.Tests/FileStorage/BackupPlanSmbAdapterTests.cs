@@ -58,6 +58,30 @@ public sealed class BackupPlanSmbAdapterTests
         }
     }
 
+    [Theory]
+    [InlineData("file.bak")]
+    [InlineData("")]
+    [InlineData(@"\file.bak")]
+    public void CapabilityProbeWithoutParentDirectoryDoesNotSlicePastTheStart(string path) =>
+        Assert.False(BackupPlanFileAdapter.TryGetCapabilityParent(path, out _));
+
+    [Fact]
+    public void CapabilityProbeParentStopsAtTheLastBackslash()
+    {
+        Assert.True(BackupPlanFileAdapter.TryGetCapabilityParent(@"source\dir\file.bak", out var parent));
+        Assert.Equal(@"source\dir", parent);
+    }
+
+    [Fact]
+    public async Task SmbCapabilityPathWithoutParentIsRejectedBeforeAnyProbe()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var endpoint = new BackupFileEndpointInput(FileTransferProtocol.Smb, "localhost", null, @"C:\synthetic", Guid.NewGuid(), null);
+        var result = await new BackupPlanFileAdapter([]).CheckCapabilitiesAsync(new(Guid.NewGuid(), Guid.NewGuid(), endpoint, "file.bak", 30));
+        Assert.Equal(BackupFileStorageFailureCode.PathRejected, result.Failure!.Code);
+        Assert.Equal(BackupFileStorageFailurePhase.SourceInspection, result.Failure.Phase);
+    }
+
     [Fact]
     public async Task SftpIsRejectedBeforeProtocolConnectionWithoutProvenProtection()
     {

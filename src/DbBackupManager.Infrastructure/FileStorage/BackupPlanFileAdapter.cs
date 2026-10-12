@@ -43,9 +43,10 @@ internal sealed class BackupPlanFileAdapter(IEnumerable<IFileStorageProtocolSess
         CancellationToken cancellationToken = default)
     {
         if (!OperatingSystem.IsWindows() || target.Endpoint.Protocol != FileTransferProtocol.Smb) return Unsupported<BackupFileMutationReceipt>();
+        if (!TryGetCapabilityParent(target.Path, out var parent))
+            return BackupFileStorageResult.ConfirmedFailure<BackupFileMutationReceipt>(BackupFileStorageFailureCode.PathRejected, BackupFileStorageFailurePhase.SourceInspection);
         // 能力检查不把配置的协议名称当成已满足契约；只操作本次随机探测对象。
         using var deadline = Deadline(target, cancellationToken);
-        var parent = target.Path[..target.Path.LastIndexOf('\\')];
         var probePath = $"{parent}\\.dbbackup-capability-{Guid.NewGuid():N}";
         var renamedPath = probePath + ".renamed";
         try
@@ -162,6 +163,13 @@ internal sealed class BackupPlanFileAdapter(IEnumerable<IFileStorageProtocolSess
             if (file is not null) await file.DisposeAsync();
             if (session is not null) await session.DisposeAsync();
         }
+    }
+    internal static bool TryGetCapabilityParent(string path, out string parent)
+    {
+        var separator = path.LastIndexOf('\\');
+        if (separator <= 0) { parent = ""; return false; }
+        parent = path[..separator];
+        return true;
     }
     private IFileStorageProtocolSessionFactory Factory(BackupFileEndpointInput endpoint) => _factories.Single(x => x.Protocol == endpoint.Protocol);
     private static CancellationTokenSource Deadline(BackupContentVerificationRequest request, CancellationToken token)
