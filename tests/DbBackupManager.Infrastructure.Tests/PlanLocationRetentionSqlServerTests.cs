@@ -456,9 +456,11 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
             targetId,
             $@"\\synthetic-host\synthetic-share\{attemptId:N}.bak.part",
             $@"\\synthetic-host\synthetic-share\{attemptId:N}-remote.bak"));
+        db.AddRange(task, snapshot);
+        await db.SaveChangesAsync();
         attempt.BindSqlIdentity(Guid.NewGuid(), Guid.NewGuid());
         task.ClaimExecution(version.StorageMode, attemptId, leaseToken, "合成保留领取", now, now.AddMinutes(30));
-        db.AddRange(task, snapshot, attempt);
+        db.Add(attempt);
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();
         var stored = await db.BackupTasks.AsNoTracking().SingleAsync(item => item.Id == task.Id);
@@ -598,9 +600,11 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
             chain.TargetId,
             $@"\\synthetic-host\synthetic-share\{attemptId:N}.bak.part",
             $@"\\synthetic-host\synthetic-share\{attemptId:N}-remote.bak"));
+        db.AddRange(task, snapshot);
+        await db.SaveChangesAsync();
         attempt.BindSqlIdentity(Guid.NewGuid(), Guid.NewGuid());
         task.ClaimExecution(version.StorageMode, attemptId, Guid.NewGuid(), "合成活动任务", now, now.AddHours(1));
-        db.AddRange(task, snapshot, attempt);
+        db.Add(attempt);
         await db.SaveChangesAsync();
     }
 
