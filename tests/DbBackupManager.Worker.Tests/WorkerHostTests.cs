@@ -54,9 +54,14 @@ public sealed class WorkerHostTests
         Assert.Contains(
             host.Services.GetServices<IHostedService>(),
             service => service.GetType().Name == "BackupScheduleWorkerService");
+        Assert.DoesNotContain(
+            host.Services.GetServices<IHostedService>(),
+            service => service.GetType().Name == "PlanLocationRetentionRunner");
         using var retentionScope = host.Services.CreateScope();
         Assert.IsType<BackupFileRetentionRunner>(
             retentionScope.ServiceProvider.GetRequiredService<BackupFileRetentionRunner>());
+        Assert.IsType<PlanLocationRetentionRunner>(
+            retentionScope.ServiceProvider.GetRequiredService<PlanLocationRetentionRunner>());
         using var notificationScope = host.Services.CreateScope();
         Assert.IsType<NotificationDeliveryRunner>(
             notificationScope.ServiceProvider.GetRequiredService<NotificationDeliveryRunner>());

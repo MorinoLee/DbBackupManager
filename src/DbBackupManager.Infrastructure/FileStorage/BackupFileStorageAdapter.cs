@@ -1,4 +1,5 @@
 using System.Buffers;
+using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
 using DbBackupManager.Domain.Configuration;
 
@@ -6,7 +7,8 @@ namespace DbBackupManager.Infrastructure.FileStorage;
 
 internal sealed class BackupFileStorageAdapter(
     IEnumerable<IFileStorageProtocolSessionFactory> sessionFactories,
-    IBackupArtifactDeletionGuard? deletionGuard = null) :
+    IBackupArtifactDeletionGuard? deletionGuard = null,
+    IPlanCopyDeletionCoordinator? planDeletion = null) :
     IBackupFileStorageProbe,
     IBackupDirectoryPreparer,
     IBackupFileTransferExecutor,
@@ -205,6 +207,43 @@ internal sealed class BackupFileStorageAdapter(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (planDeletion is not null)
+        {
+            await using var permit = await planDeletion.OpenAsync(request, cancellationToken);
+            if (permit.Applies)
+            {
+                if (!permit.Allowed)
+                {
+                    return BackupFileStorageResult.ConfirmedFailure<BackupFileMutationReceipt>(
+                        BackupFileStorageFailureCode.OperationRejected, BackupFileStorageFailurePhase.Delete);
+                }
+
+                if (deletionGuard is not null)
+                {
+                    var eligibility = await deletionGuard.EvaluateAsync(request, cancellationToken);
+                    if (!eligibility.Allowed
+                        && !string.Equals(eligibility.ReasonCode, "plan.copy.protected", StringComparison.Ordinal))
+                    {
+                        return BackupFileStorageResult.ConfirmedFailure<BackupFileMutationReceipt>(
+                            BackupFileStorageFailureCode.OperationRejected, BackupFileStorageFailurePhase.Delete);
+                    }
+                }
+
+                var deleted = await DeletePhysicalAsync(request, cancellationToken);
+                if (!deleted.IsSucceeded)
+                {
+                    return deleted;
+                }
+
+                var committed = await permit.CommitDeletedAsync(CancellationToken.None);
+                return committed
+                    ? deleted
+                    : BackupFileStorageResult.Indeterminate<BackupFileMutationReceipt>(
+                        BackupFileStorageFailureCode.OperationRejected,
+                        BackupFileStorageFailurePhase.ResponseProcessing);
+            }
+        }
+
         if (deletionGuard is not null)
         {
             var eligibility = await deletionGuard.EvaluateAsync(request, cancellationToken);
@@ -215,6 +254,13 @@ internal sealed class BackupFileStorageAdapter(
         else if (request.Owner is not null)
             return BackupFileStorageResult.ConfirmedFailure<BackupFileMutationReceipt>(
                 BackupFileStorageFailureCode.OperationRejected, BackupFileStorageFailurePhase.Delete);
+        return await DeletePhysicalAsync(request, cancellationToken);
+    }
+
+    private async Task<BackupFileStorageResult<BackupFileMutationReceipt>> DeletePhysicalAsync(
+        BackupFileDeleteRequest request,
+        CancellationToken cancellationToken)
+    {
         var mutationStarted = false;
         try
         {

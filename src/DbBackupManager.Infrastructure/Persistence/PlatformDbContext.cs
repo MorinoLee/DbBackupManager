@@ -346,6 +346,8 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
             (BackupFileStatus.DeletePending, BackupFileStatus.DeleteFailed) => true,
             (BackupFileStatus.DeletePending, BackupFileStatus.Deleted) => true,
             (BackupFileStatus.DeletePending, BackupFileStatus.Missing) => true,
+            // 尚未解开的计划租约被保护规则取消时，待删除回到可用。
+            (BackupFileStatus.DeletePending, BackupFileStatus.Available) => true,
             _ => false,
         };
         if (!isAllowed)

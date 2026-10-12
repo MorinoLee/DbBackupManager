@@ -20,7 +20,9 @@ internal sealed partial class BackupPlanExecutionStore
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == identity.TaskId, cancellationToken);
             if (snapshot is null) return BackupExecutionContractCode.NotFound;
-            // 与授权/终止使用相同的数据库→任务锁顺序，事务内不发生文件或 SQL I/O。
+            // 先取保留协调锁，再锁数据库和任务，避免与删除许可交叉等待。
+            if (!await PlanRetentionLock.TryAcquireAsync(db, snapshot.DatabaseId, cancellationToken))
+                return BackupExecutionContractCode.DatabaseBlocked;
             await BackupInvocationAuthorizationStore.LockDatabaseAsync(db, snapshot.DatabaseId, cancellationToken);
             var task = await LockAsync(db, identity.TaskId, cancellationToken);
             if (task is null || !IsOpen(task, snapshot)) return BackupExecutionContractCode.StageNotOpen;
@@ -122,7 +124,7 @@ internal sealed partial class BackupPlanExecutionStore
                     identity.ObservedAtUtc, facts.Metadata, facts.Completion, facts.Assessment, facts.ActualBaseBackupSetId, true,
                     observations.Select(x => new BackupSetObservation(Enum.Parse<BackupSetEvidenceSource>(x.Source.ToString()), x.Kind,
                         x.Facts.Metadata, x.Facts.Completion, x.Facts.Assessment)).ToArray());
-                var registered = await BackupSetRegistrationStore.RegisterInTransactionAsync(db, command, cancellationToken);
+                var registered = await BackupSetRegistrationStore.RegisterInTransactionAsync(db, command, now, cancellationToken);
                 if (!registered.IsSucceeded) return BackupExecutionContractCode.Conflict;
                 var set = await db.BackupSets.SingleAsync(x => x.AttemptId == attempt.Id, cancellationToken);
                 var rows = await db.BackupSetEvidence.Where(x => x.AttemptId == attempt.Id).ToArrayAsync(cancellationToken);
@@ -212,7 +214,10 @@ internal sealed partial class BackupPlanExecutionStore
             operation.MarkApplied();
             db.AddRange(CreateStateChange(operation.Id, task, before, stage, reason, null, now),
                 CreateAudit(null, task.Id, "plan.stage.apply", successful ? "succeeded" : "unknown", facts.ReasonCode));
+            var addedCopy = db.ChangeTracker.Entries<BackupFile>().Any(entry => entry.State == EntityState.Added);
             await db.SaveChangesAsync(cancellationToken);
+            if (addedCopy)
+                await PlanLocationRetentionWork.ReleaseSupersededAsync(db, snapshot.DatabaseId, now, cancellationToken);
             await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
