@@ -235,6 +235,44 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
     }
 
     [Fact]
+    public async Task ExplicitStagingClaimSkipsARunningOwnersFileButTheOwnerCanClaimIt()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40], completeNewest: false);
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        await using var db = database.CreateContext();
+        var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+        var task = await db.BackupTasks.AsNoTracking().SingleAsync(item => item.Id == file.TaskId);
+        Assert.Equal(BackupTaskStatus.Running, task.Status);
+        Assert.True(task.LeaseExpiresAtUtc > now);
+        var decision = (await store.AssessAsync(chain.DatabaseId, now))
+            .Single(item => item.Location == BackupFileLocation.Local)
+            .Copies.Single(copy => copy.FileId == file.Id);
+        Assert.True(PlanLocationRecovery.IsStagingReleasable(decision));
+        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimStagingAsync(chain.DatabaseId, Claim(now))).Code);
+        var own = await store.ClaimStagingAsync(chain.DatabaseId, Claim(now), file.TaskId);
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, own.Code);
+        Assert.Equal(file.Id, own.Value!.FileId);
+    }
+
+    [Fact]
+    public async Task MissingStagingDoesNotRecordCleanupEvidence()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(now));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        var missing = await store.CommitAsync(
+            claimed.Value!, new(Guid.NewGuid(), BackupFileRetentionOutcome.Missing, now.AddMinutes(1)));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, missing.Code);
+        await using var db = database.CreateContext();
+        var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+        Assert.Equal(BackupFileStatus.Missing, file.Status);
+        Assert.Null((await db.BackupAttempts.AsNoTracking().SingleAsync(item => item.Id == file.AttemptId)).LocalCleanupCompletedAtUtc);
+    }
+
+    [Fact]
     public async Task ConfirmedUnlinkIsRecordedAfterTheLeaseExpires()
     {
         var chain = await SeedChainAsync();

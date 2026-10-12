@@ -198,6 +198,7 @@ internal sealed partial class BackupPlanExecutionStore
                         attempt.RecordRemoteValidated(evidenceTime);
                     if (identity.Kind != BackupExecutionOperationKind.Transfer)
                     {
+                        // RemoteOnly 没有本地恢复窗口。这里写入远端窗口天数，只为满足 RetentionDays 的 1–36500 约束，不授权删除。
                         var retentionDays = identity.Kind == BackupExecutionOperationKind.VerifyLocal
                             ? snapshot.StorageMode == BackupStorageMode.RemoteOnly
                                 ? snapshot.RemoteRetentionDays

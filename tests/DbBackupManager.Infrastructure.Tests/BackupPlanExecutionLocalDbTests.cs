@@ -62,6 +62,10 @@ public sealed class BackupPlanExecutionLocalDbTests(PlatformDatabaseSqlServerFix
             Assert.NotNull(attempt.RemoteValidatedAtUtc);
             Assert.Null(attempt.LocalCleanupCompletedAtUtc);
             Assert.Equal(BackupTaskStage.Cleanup, (await db.BackupTasks.SingleAsync(item => item.Id == full)).CurrentStage);
+            Assert.Contains(await db.BackupTaskStateChanges.Where(item => item.TaskId == full).ToArrayAsync(),
+                item => item.ReasonCode == RecoveryProtectionReason.BaselineUnresolved);
+            Assert.Contains(await db.AuditRecords.Where(item => item.TargetId == full.ToString("N")).ToArrayAsync(),
+                item => item.Action == "plan.staging.retain" && item.ReasonCode == RecoveryProtectionReason.BaselineUnresolved);
         }
 
         var diff = await test.CreateTaskAsync(BackupRunPurpose.PlanDifferential);
@@ -536,9 +540,12 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
         public Task<BackupExecutionContractCode> SuspendAsync(LeaseHandle lease, Guid mutationId, string reason,
             CancellationToken cancellationToken = default) => inner.SuspendAsync(lease, mutationId, reason, cancellationToken);
         public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
-            CancellationToken cancellationToken = default) => inner.CompleteRemoteCleanupAsync(lease, retained, cancellationToken);
+            string? outcomeReason = null, CancellationToken cancellationToken = default) =>
+            inner.CompleteRemoteCleanupAsync(lease, retained, outcomeReason, cancellationToken);
         public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId,
             CancellationToken cancellationToken = default) => inner.CloseDeferredRemoteCleanupAsync(taskId, cancellationToken);
+        public Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId,
+            CancellationToken cancellationToken = default) => inner.CloseReadyRemoteCleanupsAsync(databaseId, cancellationToken);
     }
     private string SmbRoot(string child)
     {

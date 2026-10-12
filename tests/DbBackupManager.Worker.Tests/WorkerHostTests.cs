@@ -64,8 +64,39 @@ public sealed class WorkerHostTests
             retentionScope.ServiceProvider.GetRequiredService<PlanLocationRetentionRunner>());
         Assert.IsType<PlanRemoteStagingCleaner>(
             retentionScope.ServiceProvider.GetRequiredService<PlanRemoteStagingCleaner>());
+        foreach (var service in host.Services.GetServices<IHostedService>())
+        {
+            Assert.DoesNotContain(
+                service.GetType().GetConstructors().SelectMany(constructor => constructor.GetParameters()),
+                parameter => parameter.ParameterType == typeof(PlanRemoteStagingCleaner)
+                    || parameter.ParameterType == typeof(IPlanLocationRetentionStore));
+        }
         using var notificationScope = host.Services.CreateScope();
         Assert.IsType<NotificationDeliveryRunner>(
             notificationScope.ServiceProvider.GetRequiredService<NotificationDeliveryRunner>());
+    }
+
+    [Fact]
+    public void WorkerHostedServicesDoNotReferenceStagingCleanup()
+    {
+        var root = FindRepositoryRoot();
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(root, "src", "DbBackupManager.Worker"), "*.cs"))
+        {
+            var text = File.ReadAllText(file);
+            Assert.DoesNotContain("PlanRemoteStagingCleaner", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("ClaimStagingAsync", text, StringComparison.Ordinal);
+        }
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "DbBackupManager.slnx")))
+        {
+            directory = directory.Parent;
+        }
+
+        Assert.NotNull(directory);
+        return directory.FullName;
     }
 }

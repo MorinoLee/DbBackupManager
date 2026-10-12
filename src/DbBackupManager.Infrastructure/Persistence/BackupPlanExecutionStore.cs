@@ -166,7 +166,7 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
         }, cancellationToken);
 
     public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
-        CancellationToken cancellationToken = default) =>
+        string? outcomeReason = null, CancellationToken cancellationToken = default) =>
         _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
@@ -189,9 +189,12 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
             {
                 if (local is null || attempt.LocalCleanupCompletedAtUtc is not null)
                     return BackupExecutionContractCode.Conflict;
+                var reason = string.IsNullOrWhiteSpace(outcomeReason) || outcomeReason.Length > 100
+                    ? PlanLocationRetentionWork.StagingRetainedReason
+                    : outcomeReason;
                 task.CompleteRunningStage(snapshot.StorageMode, lease.LeaseToken, now);
-                db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, PlanLocationRetentionWork.StagingRetainedReason, null, now),
-                    CreateAudit(null, task.Id, "plan.staging.retain", "succeeded", PlanLocationRetentionWork.StagingRetainedReason));
+                db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, reason, null, now),
+                    CreateAudit(null, task.Id, "plan.staging.retain", "succeeded", reason));
             }
             else
             {
@@ -238,6 +241,32 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
             await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
+
+    public async Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId, CancellationToken cancellationToken = default)
+    {
+        if (databaseId == Guid.Empty) throw new ArgumentException("数据库标识不能为空。", nameof(databaseId));
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+        var now = clock.GetUtcNow();
+        var ids = await (
+            from task in db.BackupTasks.AsNoTracking()
+            join snapshot in db.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
+            join attempt in db.BackupAttempts.AsNoTracking() on task.CurrentBackupAttemptId equals attempt.Id
+            where snapshot.DatabaseId == databaseId
+                && snapshot.StorageMode == BackupStorageMode.RemoteOnly
+                && task.Status == BackupTaskStatus.NeedsAttention
+                && task.CurrentStage == BackupTaskStage.Cleanup
+                && attempt.LocalCleanupCompletedAtUtc != null
+                && (task.LeaseToken == null || task.LeaseExpiresAtUtc <= now)
+            select task.Id).ToListAsync(cancellationToken);
+        foreach (var id in ids)
+        {
+            var code = await CloseDeferredRemoteCleanupAsync(id, cancellationToken);
+            if (code == BackupExecutionContractCode.DatabaseBlocked)
+                return code;
+        }
+
+        return BackupExecutionContractCode.Succeeded;
+    }
 
     private static bool IsOpen(BackupTask task, BackupTaskSnapshot snapshot) => task.PlanId is not null && task.PolicyId is null
         && snapshot.FileNameRuleVersion == "v3" && snapshot.Purpose is BackupRunPurpose.PlanFull or BackupRunPurpose.PlanDifferential

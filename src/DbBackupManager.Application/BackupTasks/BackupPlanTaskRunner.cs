@@ -68,6 +68,11 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
                 throw new PlanExecutionLeaseLostException();
             }
 
+            if (cleaned.Work.Lease.Stage != BackupTaskStage.Cleanup)
+            {
+                return BackupExecutionContractCode.StageNotOpen;
+            }
+
             return await staging.CleanOwnAsync(cleaned, heartbeat.Token);
         }
         catch (PlanExecutionLeaseLostException) { return BackupExecutionContractCode.LeaseLost; }

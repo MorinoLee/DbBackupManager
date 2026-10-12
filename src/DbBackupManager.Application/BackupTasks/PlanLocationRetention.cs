@@ -66,6 +66,9 @@ public sealed record PlanStagingRelease(bool Releasable, Guid? FileId, string Re
 public static class PlanCopyDeletionReasons
 {
     public const string Busy = "plan.retention.busy";
+
+    /// <summary>暂存在删除前已经不在，不能当成已确认解开。需要人工处理。</summary>
+    public const string StagingMissing = "remote.staging_missing";
 }
 
 /// <summary>

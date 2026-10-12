@@ -89,8 +89,19 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             : PlanLocationRetentionWork.ClaimedReason;
         return ExecuteAsync(databaseId, async (context, token) =>
         {
+            // 未指定任务时不领取仍在 Running 的暂存。所属任务自己的 Cleanup 会带 onlyTaskId 来领。
+            var runningOwners = staging && onlyTaskId is null
+                ? (await (
+                    from task in context.BackupTasks.AsNoTracking()
+                    join snapshot in context.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
+                    where snapshot.DatabaseId == databaseId
+                        && task.Status == BackupTaskStatus.Running
+                        && task.LeasePurpose == BackupLeasePurpose.Execution
+                    select task.Id).ToListAsync(token)).ToHashSet()
+                : new HashSet<Guid>();
             bool Selected(BackupFile file, IReadOnlyDictionary<Guid, PlanCopyRetentionDecision> decisions) =>
                 (!onlyTaskId.HasValue || file.TaskId == onlyTaskId.Value)
+                && !runningOwners.Contains(file.TaskId)
                 && file.BackupSetId is not null
                 && decisions.TryGetValue(file.Id, out var decision)
                 && (staging
