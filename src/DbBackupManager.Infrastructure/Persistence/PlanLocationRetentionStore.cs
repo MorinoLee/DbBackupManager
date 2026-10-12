@@ -23,20 +23,85 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
         return await PlanLocationRetentionWork.LoadAsync(context, databaseId, nowUtc, cancellationToken);
     }
 
+    public async Task<PlanStagingRelease> ReadOwnStagingAsync(
+        Guid taskId,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (taskId == Guid.Empty)
+        {
+            throw new ArgumentException("任务标识不能为空。", nameof(taskId));
+        }
+
+        var now = RequireUtc(nowUtc, nameof(nowUtc));
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
+        var snapshot = await context.BackupTaskSnapshots.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.TaskId == taskId, cancellationToken);
+        if (snapshot is null)
+        {
+            return new PlanStagingRelease(false, null, PlanLocationRecovery.RemoteStagingDeferred);
+        }
+
+        var assessments = await PlanLocationRetentionWork.LoadAsync(context, snapshot.DatabaseId, now, cancellationToken);
+        var locals = assessments
+            .Where(item => item.Location == BackupFileLocation.Local)
+            .SelectMany(item => item.Copies)
+            .Where(copy => copy.BackupSetId is not null)
+            .ToArray();
+        var files = await context.BackupFiles.AsNoTracking()
+            .Where(file => file.TaskId == taskId && file.Location == BackupFileLocation.Local && file.Status != BackupFileStatus.Deleted)
+            .Select(file => file.Id)
+            .ToListAsync(cancellationToken);
+        var matches = locals.Where(copy => files.Contains(copy.FileId)).ToArray();
+        if (matches.Length != 1)
+        {
+            return new PlanStagingRelease(false, null, PlanLocationRecovery.DependencyUnproven);
+        }
+
+        var decision = matches[0];
+        return new PlanStagingRelease(PlanLocationRecovery.IsStagingReleasable(decision), decision.FileId, decision.Reason);
+    }
+
     public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ClaimNextAsync(
         Guid databaseId,
         ClaimBackupFileDeletionCommand command,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        ClaimAsync(databaseId, command, staging: false, onlyTaskId: null, cancellationToken);
+
+    public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ClaimStagingAsync(
+        Guid databaseId,
+        ClaimBackupFileDeletionCommand command,
+        Guid? onlyTaskId = null,
+        CancellationToken cancellationToken = default) =>
+        ClaimAsync(databaseId, command, staging: true, onlyTaskId, cancellationToken);
+
+    private Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ClaimAsync(
+        Guid databaseId,
+        ClaimBackupFileDeletionCommand command,
+        bool staging,
+        Guid? onlyTaskId,
+        CancellationToken cancellationToken)
     {
         RequireDatabase(databaseId);
         ValidateClaim(command);
+        var claimedReason = staging
+            ? PlanLocationRetentionWork.StagingClaimedReason
+            : PlanLocationRetentionWork.ClaimedReason;
         return ExecuteAsync(databaseId, async (context, token) =>
         {
+            bool Selected(BackupFile file, IReadOnlyDictionary<Guid, PlanCopyRetentionDecision> decisions) =>
+                (!onlyTaskId.HasValue || file.TaskId == onlyTaskId.Value)
+                && file.BackupSetId is not null
+                && decisions.TryGetValue(file.Id, out var decision)
+                && (staging
+                    ? PlanLocationRecovery.IsStagingReleasable(decision)
+                    : PlanLocationRecovery.IsDeletable(decision));
+
             var replay = await context.BackupFileStateChanges.AsNoTracking()
                 .SingleOrDefaultAsync(change => change.MutationId == command.MutationId, token);
             if (replay is not null)
             {
-                if (replay.ReasonCode != PlanLocationRetentionWork.ClaimedReason
+                if (replay.ReasonCode != claimedReason
                     || replay.ToStatus != BackupFileStatus.DeletePending)
                 {
                     return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
@@ -69,9 +134,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                 .ToListAsync(token);
             foreach (var file in expired)
             {
-                if (!planCopies.Contains(file.Id)
-                    || !decisions.TryGetValue(file.Id, out var decision)
-                    || !PlanLocationRecovery.IsDeletable(decision))
+                if (!planCopies.Contains(file.Id) || !Selected(file, decisions))
                 {
                     continue;
                 }
@@ -88,9 +151,9 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                     file,
                     BackupFileStatus.DeletePending,
                     BackupFileStatus.DeletePending,
-                    PlanLocationRetentionWork.ClaimedReason,
+                    claimedReason,
                     command.AcquiredAtUtc));
-                context.AuditRecords.Add(Audit(file.Id, "backup.file.plan_retention.claim", PlanLocationRetentionWork.ClaimedReason));
+                context.AuditRecords.Add(Audit(file.Id, staging ? "backup.file.plan_staging.claim" : "backup.file.plan_retention.claim", claimedReason));
                 await context.SaveChangesAsync(token);
                 return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(
                     BackupTaskStoreResultCode.Succeeded,
@@ -108,9 +171,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                 .ToListAsync(token))
                 .ToDictionary(set => set.Id, set => set.Completion.CompletedAtUtc);
             var selected = candidates
-                .Where(file => file.BackupSetId is { } setId
-                    && decisions.TryGetValue(file.Id, out var decision)
-                    && PlanLocationRecovery.IsDeletable(decision))
+                .Where(file => Selected(file, decisions))
                 .OrderBy(file => completions.GetValueOrDefault(file.BackupSetId!.Value) ?? DateTimeOffset.MaxValue)
                 .ThenBy(file => file.Id)
                 .FirstOrDefault();
@@ -133,9 +194,9 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                 selected,
                 from,
                 BackupFileStatus.DeletePending,
-                PlanLocationRetentionWork.ClaimedReason,
+                claimedReason,
                 command.AcquiredAtUtc));
-            context.AuditRecords.Add(Audit(selected.Id, "backup.file.plan_retention.claim", PlanLocationRetentionWork.ClaimedReason));
+            context.AuditRecords.Add(Audit(selected.Id, staging ? "backup.file.plan_staging.claim" : "backup.file.plan_retention.claim", claimedReason));
             await context.SaveChangesAsync(token);
             return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(
                 BackupTaskStoreResultCode.Succeeded,
@@ -196,7 +257,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
 
             var decisions = PlanLocationRetentionWork.Decisions(
                 await PlanLocationRetentionWork.LoadAsync(context, file.DatabaseId, now, token));
-            if (!decisions.TryGetValue(file.Id, out var decision) || !PlanLocationRecovery.IsDeletable(decision))
+            if (!decisions.TryGetValue(file.Id, out var decision) || !PlanLocationRecovery.RetainsPhysicalLease(decision))
             {
                 file.CancelDeletionLease(now);
                 context.BackupFileStateChanges.Add(Change(
@@ -273,7 +334,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
 
             var decisions = PlanLocationRetentionWork.Decisions(
                 await PlanLocationRetentionWork.LoadAsync(context, file.DatabaseId, occurredAt, token));
-            var deletable = decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.IsDeletable(decision);
+            var deletable = decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.RetainsPhysicalLease(decision);
             if (command.Outcome == BackupFileRetentionOutcome.Deleted && !deletable)
             {
                 file.CancelDeletionLease(occurredAt);
@@ -293,6 +354,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             {
                 case BackupFileRetentionOutcome.Deleted:
                     file.RecordDeleted(work.LeaseToken, occurredAt);
+                    await PlanLocationRetentionWork.NoteStagingCleanedAsync(context, file, occurredAt, token);
                     break;
                 case BackupFileRetentionOutcome.Missing:
                     file.RecordMissing(work.LeaseToken, occurredAt);
@@ -345,7 +407,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                     continue;
                 }
 
-                if (decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.IsDeletable(decision))
+                if (decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.RetainsPhysicalLease(decision))
                 {
                     continue;
                 }
@@ -410,7 +472,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
 
             var decisions = PlanLocationRetentionWork.Decisions(
                 await PlanLocationRetentionWork.LoadAsync(context, file.DatabaseId, now, token));
-            var deletable = decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.IsDeletable(decision);
+            var deletable = decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.RetainsPhysicalLease(decision);
             if (stillPresent && deletable)
             {
                 return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.Protected);

@@ -198,11 +198,18 @@ internal sealed partial class BackupPlanExecutionStore
                         attempt.RecordRemoteValidated(evidenceTime);
                     if (identity.Kind != BackupExecutionOperationKind.Transfer)
                     {
+                        var retentionDays = identity.Kind == BackupExecutionOperationKind.VerifyLocal
+                            ? snapshot.StorageMode == BackupStorageMode.RemoteOnly
+                                ? snapshot.RemoteRetentionDays
+                                : snapshot.LocalRetentionDays
+                            : snapshot.RemoteRetentionDays;
+                        if (retentionDays is not > 0)
+                            return BackupExecutionContractCode.Conflict;
                         var file = identity.Kind == BackupExecutionOperationKind.VerifyLocal
                             ? BackupFile.CreateLocal(operation.Id, task.Id, attempt.Id, snapshot.DatabaseId, snapshot.ServerId,
-                                endpoint.Protocol, path, facts.Content.LengthBytes!.Value, evidenceTime, snapshot.LocalRetentionDays!.Value)
+                                endpoint.Protocol, path, facts.Content.LengthBytes!.Value, evidenceTime, retentionDays.Value)
                             : BackupFile.CreateRemote(operation.Id, task.Id, attempt.Id, snapshot.DatabaseId, snapshot.StorageTargetId!.Value,
-                                endpoint.Protocol, path, facts.Content.LengthBytes!.Value, evidenceTime, snapshot.RemoteRetentionDays!.Value);
+                                endpoint.Protocol, path, facts.Content.LengthBytes!.Value, evidenceTime, retentionDays.Value);
                         file.AssociateBackupSet(set.Id);
                         db.BackupFiles.Add(file);
                         db.BackupFileStateChanges.Add(new(operation.Id, file.Id, task.Id, null, BackupFileStatus.Available, "file.registered", now));

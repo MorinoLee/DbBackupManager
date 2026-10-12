@@ -1,5 +1,6 @@
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 
@@ -110,6 +111,13 @@ public sealed class PlanLocationRetentionRunnerTests
             Claims++;
             return Task.FromResult(new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.Succeeded, work ?? Work()));
         }
+
+        public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ClaimStagingAsync(
+            Guid databaseId, ClaimBackupFileDeletionCommand command, Guid? onlyTaskId = null, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.NotFound));
+
+        public Task<PlanStagingRelease> ReadOwnStagingAsync(Guid taskId, DateTimeOffset nowUtc, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new PlanStagingRelease(false, null, PlanLocationRecovery.RemoteStagingDeferred));
 
         public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> RefreshAsync(
             Guid fileId, Guid leaseToken, DateTimeOffset nowUtc, CancellationToken cancellationToken = default)

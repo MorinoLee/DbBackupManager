@@ -44,6 +44,52 @@ public sealed class BackupPlanExecutionLocalDbTests(PlatformDatabaseSqlServerFix
         Assert.Equal(0, test.PlanDeletions);
     }
 
+    [Fact]
+    public async Task RemoteOnlyReleasesDifferentialStagingOnlyAfterItsBaseIsConfirmed()
+    {
+        await using var test = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.RemoteOnly);
+        var full = await test.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        var fullCode = await test.Runner.RunTaskOnceAsync(new(full, Guid.NewGuid()));
+        Assert.True(fullCode == BackupExecutionContractCode.Succeeded, $"code={fullCode}; {await test.DiagnosticAsync(full)}");
+        await test.AssertCompletedAsync(full, BackupType.Full);
+        var before = await test.AssessAsync();
+        var fullLocal = before.Single(item => item.Location == BackupFileLocation.Local);
+        Assert.Contains(fullLocal.Copies, copy => copy.Reason == RecoveryProtectionReason.BaselineUnresolved);
+        Assert.All(fullLocal.Copies, copy => Assert.False(PlanLocationRecovery.IsStagingReleasable(copy)));
+        await using (var db = platform.CreateContext())
+        {
+            var attempt = await db.BackupAttempts.SingleAsync(item => item.TaskId == full);
+            Assert.NotNull(attempt.RemoteValidatedAtUtc);
+            Assert.Null(attempt.LocalCleanupCompletedAtUtc);
+            Assert.Equal(BackupTaskStage.Cleanup, (await db.BackupTasks.SingleAsync(item => item.Id == full)).CurrentStage);
+        }
+
+        var diff = await test.CreateTaskAsync(BackupRunPurpose.PlanDifferential);
+        var diffCode = await test.Runner.RunTaskOnceAsync(new(diff, Guid.NewGuid()));
+        Assert.True(diffCode == BackupExecutionContractCode.Succeeded, $"code={diffCode}; {await test.DiagnosticAsync(diff)}");
+        await using (var db = platform.CreateContext())
+        {
+            var diffAttempt = await db.BackupAttempts.SingleAsync(item => item.TaskId == diff);
+            Assert.NotNull(diffAttempt.LocalCleanupCompletedAtUtc);
+            Assert.NotNull(diffAttempt.RemoteValidatedAtUtc);
+            Assert.True(diffAttempt.LocalCleanupCompletedAtUtc >= diffAttempt.RemoteValidatedAtUtc);
+            var diffFiles = await db.BackupFiles.Where(item => item.TaskId == diff).ToArrayAsync();
+            Assert.Equal(BackupFileStatus.Deleted, Assert.Single(diffFiles, item => item.Location == BackupFileLocation.Local).Status);
+            Assert.Equal(BackupFileStatus.Available, Assert.Single(diffFiles, item => item.Location == BackupFileLocation.Remote).Status);
+            var fullAttempt = await db.BackupAttempts.SingleAsync(item => item.TaskId == full);
+            Assert.Null(fullAttempt.LocalCleanupCompletedAtUtc);
+            Assert.Equal(BackupFileStatus.Available, (await db.BackupFiles.SingleAsync(item => item.TaskId == full && item.Location == BackupFileLocation.Local)).Status);
+            var fullSet = await db.BackupSets.SingleAsync(item => item.TaskId == full);
+            Assert.NotNull(await test.Store.FindQualifiedFullAsync(test.DatabaseId, fullSet.Metadata.BackupSetGuid.Value!.Value));
+        }
+
+        Assert.False(await test.Staging.RunOnceAsync(test.DatabaseId));
+        var after = await test.AssessAsync();
+        Assert.Contains(after.Single(item => item.Location == BackupFileLocation.Local).Copies, copy => copy.Reason == RecoveryProtectionReason.ActiveDifferentialBaseline);
+        Assert.Equal(1, test.PlanDeletions);
+        Assert.Equal(2, test.Invocations);
+    }
+
     [Theory]
     [InlineData("between_gates", 1, BackupTaskStatus.Failed)]
     [InlineData("after_g1", 2, BackupTaskStatus.NeedsAttention)]
@@ -96,6 +142,7 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
         TrackingFactory factory, SqlClientTargetSqlInvocation sql, LocalFiles local)
     { _platform = platform; _master = master; _databaseName = databaseName; _root = root; _factory = factory; _sql = sql; _local = local; }
     public BackupPlanTaskRunner Runner { get; private set; } = null!;
+    public PlanRemoteStagingCleaner Staging { get; private set; } = null!;
     public BackupPlanTaskReconciler Reconciler { get; private set; } = null!;
     public IBackupPlanExecutionStore Store { get; private set; } = null!;
     public IBackupFileContentVerifier FileVerifier { get; private set; } = null!;
@@ -175,7 +222,10 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
             environment.FileVerifier = adapter;
             IBackupPlanFileTransferExecutor planTransfer = adapter;
             if (fault is not null) planTransfer = fault.Wrap(planTransfer);
-            environment.Runner = new(store, operations, authorizations, environment, environment, simple, simple, adapter, planTransfer, stages, TimeProvider.System);
+            var deletion = new BackupFileStorageAdapter([local], new BackupArtifactDeletionGuard(factory, TimeProvider.System), new PlanCopyDeletionCoordinator(factory, TimeProvider.System));
+            var staging = new PlanRemoteStagingCleaner(new PlanLocationRetentionStore(factory), store, simple, deletion, TimeProvider.System);
+            environment.Runner = new(store, operations, authorizations, environment, environment, simple, simple, adapter, planTransfer, stages, staging, TimeProvider.System);
+            environment.Staging = staging;
             environment.Reconciler = new(store, stages, TimeProvider.System);
             return environment;
         }
@@ -230,6 +280,9 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
         await db.SaveChangesAsync();
         return id;
     }
+    public Task<IReadOnlyList<PlanLocationAssessment>> AssessAsync() =>
+        new PlanLocationRetentionStore(_factory).AssessAsync(DatabaseId, DateTimeOffset.UtcNow);
+
     public async Task<string> DiagnosticAsync(Guid taskId)
     {
         await using var db = _platform.CreateContext();
@@ -482,6 +535,10 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
             CancellationToken cancellationToken = default) => inner.ApplyAsync(lease, identity, protectedFile, protectedDependency, cancellationToken);
         public Task<BackupExecutionContractCode> SuspendAsync(LeaseHandle lease, Guid mutationId, string reason,
             CancellationToken cancellationToken = default) => inner.SuspendAsync(lease, mutationId, reason, cancellationToken);
+        public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
+            CancellationToken cancellationToken = default) => inner.CompleteRemoteCleanupAsync(lease, retained, cancellationToken);
+        public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId,
+            CancellationToken cancellationToken = default) => inner.CloseDeferredRemoteCleanupAsync(taskId, cancellationToken);
     }
     private string SmbRoot(string child)
     {

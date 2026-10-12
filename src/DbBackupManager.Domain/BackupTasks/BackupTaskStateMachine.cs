@@ -138,6 +138,20 @@ public static class BackupTaskStateMachine
         return new BackupTaskExecutionState(BackupTaskStatus.Cancelled, state.CurrentStage);
     }
 
+    public static BackupTaskExecutionState CompleteDeferredCleanup(
+        BackupTaskExecutionState state,
+        BackupStorageMode storageMode)
+    {
+        EnsureState(state, storageMode, BackupTaskStatus.NeedsAttention);
+        var stagePath = GetStagePath(storageMode);
+        if (state.CurrentStage != BackupTaskStage.Cleanup || stagePath[^1] != BackupTaskStage.Cleanup)
+        {
+            throw new InvalidOperationException("只有 RemoteOnly 的 Cleanup 阶段可以在暂存已清理后结束。");
+        }
+
+        return new BackupTaskExecutionState(BackupTaskStatus.Succeeded, state.CurrentStage);
+    }
+
     public static BackupTaskExecutionState ReconcileSucceeded(
         BackupTaskExecutionState state,
         BackupStorageMode storageMode)

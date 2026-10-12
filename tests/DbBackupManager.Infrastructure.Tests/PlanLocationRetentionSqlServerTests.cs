@@ -106,7 +106,7 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var chain = await SeedChainAsync();
         var store = new PlanLocationRetentionStore(Factory());
         var diff = await SeedRunningDifferentialAsync(chain, 40);
-        await FinishAsync(diff.Lease.TaskId, diff.Lease.LeaseToken, BackupStorageMode.LocalAndRemote);
+        await FinishAsync(diff.TaskId, diff.LeaseToken, BackupStorageMode.LocalAndRemote);
         var local = (await store.AssessAsync(chain.DatabaseId, DateTimeOffset.UtcNow)).Single(item => item.Location == BackupFileLocation.Local);
         Assert.Equal(RecoveryProtectionReason.DifferentialBase, Reason(local, chain.LocalFileId(40)));
         Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow))).Code);
@@ -156,14 +156,82 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var store = new PlanLocationRetentionStore(Factory());
         var assessments = await store.AssessAsync(chain.DatabaseId, now);
         var local = assessments.Single(item => item.Location == BackupFileLocation.Local);
-        Assert.Equal(PlanLocationRecovery.RemoteStagingDeferred, Reason(local, chain.LocalFileId(40)));
-        Assert.All(local.Copies, copy => Assert.Equal(RecoveryWindowVerdict.Protected, copy.Verdict));
+        Assert.Equal(PlanLocationRecovery.RemoteStagingReleasable, Reason(local, chain.LocalFileId(40)));
+        Assert.True(PlanLocationRecovery.IsStagingReleasable(local.Copies.Single(copy => copy.FileId == chain.LocalFileId(40))));
+        Assert.False(PlanLocationRecovery.IsDeletable(local.Copies.Single(copy => copy.FileId == chain.LocalFileId(40))));
         var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now));
         Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
         Assert.Equal(chain.RemoteFileId(40), claimed.Value!.FileId);
         Assert.Equal(BackupFileLocation.Remote, claimed.Value.Location);
         await using var db = database.CreateContext();
         Assert.Equal(BackupFileStatus.Available, (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status);
+    }
+
+    [Fact]
+    public async Task RemoteDifferentialWithoutBaseStaysVisibleAndStagingIsNotClaimed()
+    {
+        var chain = await SeedChainAsync(
+            storageMode: BackupStorageMode.RemoteOnly,
+            ages: [2],
+            mode: BackupPlanMode.FullAndDifferential,
+            registerRemote: false);
+        var diff = await SeedRunningDifferentialAsync(chain, 2);
+        await AddLocalStagingAsync(diff, diff.ServerId);
+        await RegisterCopyAsync(diff, local: false, 7);
+        await FinishAsync(diff.TaskId, diff.LeaseToken, BackupStorageMode.RemoteOnly);
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        var assessments = await store.AssessAsync(chain.DatabaseId, now);
+        var remote = assessments.Single(item => item.Location == BackupFileLocation.Remote);
+        var local = assessments.Single(item => item.Location == BackupFileLocation.Local);
+        Assert.Equal(LocationRecoveryConclusion.NotRestorable, remote.Conclusion);
+        Assert.Equal(RecoveryProtectionReason.BaseUnavailableAtLocation, remote.Copies.Single().Reason);
+        Assert.Equal(RecoveryProtectionReason.BaselineUnresolved, Reason(local, chain.LocalFileId(2)));
+        Assert.Contains(local.Copies, copy => copy.Reason == PlanLocationRecovery.RemoteBaseUnconfirmed);
+        Assert.All(local.Copies, copy => Assert.False(PlanLocationRecovery.IsStagingReleasable(copy)));
+        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimStagingAsync(chain.DatabaseId, Claim(now))).Code);
+        await using var db = database.CreateContext();
+        Assert.Equal(2, await db.BackupFiles.CountAsync(file => file.DatabaseId == chain.DatabaseId && file.Location == BackupFileLocation.Local && file.Status == BackupFileStatus.Available));
+    }
+
+    [Fact]
+    public async Task ExplicitStagingCleanupDeletesOnlyTheConfirmedLocalCopy()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(now));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        Assert.Equal(chain.LocalFileId(40), claimed.Value!.FileId);
+        var later = now.AddMinutes(10);
+        var stale = await store.CommitAsync(claimed.Value, new(Guid.NewGuid(), BackupFileRetentionOutcome.Deleted, later));
+        Assert.Equal(BackupTaskStoreResultCode.LeaseLost, stale.Code);
+
+        var fresh = await store.ClaimStagingAsync(chain.DatabaseId, Claim(later));
+        var protocol = new DeletingProtocol();
+        var adapter = new BackupFileStorageAdapter(
+            [protocol],
+            new BackupArtifactDeletionGuard(Factory(), TimeProvider.System),
+            new PlanCopyDeletionCoordinator(Factory(), TimeProvider.System));
+        var deleted = await adapter.DeleteAsync(DeleteRequest(fresh.Value!));
+        Assert.Equal(BackupFileStorageOutcome.Succeeded, deleted.Outcome);
+        Assert.Equal(1, protocol.Deletes);
+        await using var db = database.CreateContext();
+        Assert.Equal(BackupFileStatus.Deleted, (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status);
+        Assert.Equal(BackupFileStatus.Available, (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.RemoteFileId(40))).Status);
+        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(chain.DatabaseId, Claim(now))).Code);
+    }
+
+    [Fact]
+    public async Task AnotherOpenPlanTaskBlocksStagingRelease()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        await StartOpenPlanTaskAsync(chain);
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        var local = (await store.AssessAsync(chain.DatabaseId, now)).Single(item => item.Location == BackupFileLocation.Local);
+        Assert.Equal(RecoveryProtectionReason.ActiveTaskDependency, Reason(local, chain.LocalFileId(40)));
+        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimStagingAsync(chain.DatabaseId, Claim(now))).Code);
     }
 
     [Fact]
@@ -199,7 +267,7 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now) with { ExpiresAtUtc = now.AddMinutes(1) });
         Assert.Equal(chain.LocalFileId(40), claimed.Value!.FileId);
         var diff = await SeedRunningDifferentialAsync(chain, 40, registerSet: false);
-        Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await BackupSetTestData.RegisterAsync(database, diff)).Code);
+        Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await BackupSetTestData.RegisterAsync(database, diff.Command)).Code);
         await using (var db = database.CreateContext())
         {
             var pending = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
@@ -346,7 +414,9 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         bool completeNewest = true,
         bool completionKnown = true,
         BackupStorageMode storageMode = BackupStorageMode.LocalAndRemote,
-        int[]? ages = null)
+        int[]? ages = null,
+        BackupPlanMode? mode = null,
+        bool registerRemote = true)
     {
         ages ??= [40, 10, 1];
         var legacy = await BackupSetTestData.WorkAsync(database);
@@ -360,8 +430,8 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         await db.SaveChangesAsync();
         var localWindow = remoteOnly ? (int?)null : 7;
         var remoteWindow = remoteOnly ? 7 : 30;
-        var mode = remoteOnly ? BackupPlanMode.Full : BackupPlanMode.FullAndDifferential;
-        var definition = new BackupPlanDefinition(mode,
+        var planMode = mode ?? (remoteOnly ? BackupPlanMode.Full : BackupPlanMode.FullAndDifferential);
+        var definition = new BackupPlanDefinition(planMode,
             new(BackupScheduleType.Daily, new(2, 0), BackupWeekdays.None),
             remoteOnly ? null : new RecurringBackupSchedule(BackupScheduleType.Daily, new(3, 0), BackupWeekdays.None),
             null, "UTC", storageMode, target.Id, localWindow, remoteWindow, true, false, 120, 60, 60);
@@ -388,7 +458,10 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
                 await RegisterCopyAsync(created, local: true, localWindow!.Value);
             }
 
-            await RegisterCopyAsync(created, local: false, remoteWindow);
+            if (registerRemote)
+            {
+                await RegisterCopyAsync(created, local: false, remoteWindow);
+            }
             if (completeNewest || age != newest)
             {
                 await FinishAsync(created.TaskId, created.LeaseToken, storageMode);
@@ -398,10 +471,10 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         return chain;
     }
 
-    private Task<RegisterBackupSetCommand> SeedRunningDifferentialAsync(Chain chain, int age, bool registerSet = true) =>
+    private Task<CreatedBackup> SeedRunningDifferentialAsync(Chain chain, int age, bool registerSet = true) =>
         SeedRunningDifferentialAsyncCore(chain, age, registerSet);
 
-    private async Task<RegisterBackupSetCommand> SeedRunningDifferentialAsyncCore(Chain chain, int age, bool registerSet)
+    private async Task<CreatedBackup> SeedRunningDifferentialAsyncCore(Chain chain, int age, bool registerSet)
     {
         await using var db = database.CreateContext();
         var old = await db.BackupTaskSnapshots.AsNoTracking().FirstAsync(item => item.DatabaseId == chain.DatabaseId && item.Purpose != null);
@@ -430,7 +503,7 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var created = await CreateBackupAsync(old, version, chain.TargetId, BackupRunPurpose.PlanDifferential, now, now,
             new(now.AddDays(-1), BackupCompletionTimeSource.PlatformObserved, BackupCompletionTimeReason.PlatformObserved),
             false, facts, BackupSetAssessment.FromDecision(decision), decision.ManagedFullId, registerSet);
-        return created.Command;
+        return created;
     }
 
     private async Task<CreatedBackup> CreateBackupAsync(

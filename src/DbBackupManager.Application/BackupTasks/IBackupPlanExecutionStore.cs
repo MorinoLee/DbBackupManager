@@ -25,6 +25,14 @@ public interface IBackupPlanExecutionStore
         CancellationToken cancellationToken = default);
     Task<BackupExecutionContractCode> SuspendAsync(LeaseHandle lease, Guid mutationId, string reason,
         CancellationToken cancellationToken = default);
+
+    /// <summary>结束 RemoteOnly 的 Cleanup。保留暂存时不要求文件已删除；释放时必须已有清理证据。</summary>
+    Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>暂存已经确认解开、任务停在 NeedsAttention/Cleanup 且没有活动租约时，结束该任务。</summary>
+    Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed record ReconcileBackupPlanTaskRequest(Guid TaskId, Guid RequestMutationId);

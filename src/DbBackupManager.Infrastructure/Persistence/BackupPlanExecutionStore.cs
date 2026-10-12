@@ -165,9 +165,83 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
 
+    public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
+        CancellationToken cancellationToken = default) =>
+        _persistence.ExecuteWithStrategyAsync(async db =>
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == lease.TaskId, cancellationToken);
+            if (snapshot is null) return BackupExecutionContractCode.NotFound;
+            if (!await PlanRetentionLock.TryAcquireAsync(db, snapshot.DatabaseId, cancellationToken))
+                return BackupExecutionContractCode.DatabaseBlocked;
+            await BackupInvocationAuthorizationStore.LockDatabaseAsync(db, snapshot.DatabaseId, cancellationToken);
+            var task = await LockAsync(db, lease.TaskId, cancellationToken);
+            if (task is null) return BackupExecutionContractCode.NotFound;
+            if (snapshot.StorageMode != BackupStorageMode.RemoteOnly || task.CurrentStage != BackupTaskStage.Cleanup)
+                return BackupExecutionContractCode.StageNotOpen;
+            if (ValidateLease(task, lease, clock.GetUtcNow()) is not null) return BackupExecutionContractCode.LeaseLost;
+            var attempt = await db.BackupAttempts.AsTracking().SingleAsync(x => x.Id == lease.BackupAttemptId && x.TaskId == task.Id, cancellationToken);
+            var local = await db.BackupFiles.AsNoTracking().SingleOrDefaultAsync(x => x.TaskId == task.Id && x.AttemptId == attempt.Id
+                && x.Location == BackupFileLocation.Local && x.Status != BackupFileStatus.Deleted, cancellationToken);
+            var now = clock.GetUtcNow();
+            var before = task.Status;
+            if (retained)
+            {
+                if (local is null || attempt.LocalCleanupCompletedAtUtc is not null)
+                    return BackupExecutionContractCode.Conflict;
+                task.CompleteRunningStage(snapshot.StorageMode, lease.LeaseToken, now);
+                db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, PlanLocationRetentionWork.StagingRetainedReason, null, now),
+                    CreateAudit(null, task.Id, "plan.staging.retain", "succeeded", PlanLocationRetentionWork.StagingRetainedReason));
+            }
+            else
+            {
+                if (attempt.LocalCleanupCompletedAtUtc is null || local is not null)
+                    return BackupExecutionContractCode.Conflict;
+                task.CompleteRunningStage(snapshot.StorageMode, lease.LeaseToken, now);
+                db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, "plan.staging.cleaned", null, now),
+                    CreateAudit(null, task.Id, "plan.staging.clean", "succeeded", null));
+            }
+            await db.SaveChangesAsync(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+            return BackupExecutionContractCode.Succeeded;
+        }, cancellationToken);
+
+    public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default) =>
+        _persistence.ExecuteWithStrategyAsync(async db =>
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == taskId, cancellationToken);
+            if (snapshot is null) return BackupExecutionContractCode.NotFound;
+            if (!await PlanRetentionLock.TryAcquireAsync(db, snapshot.DatabaseId, cancellationToken))
+                return BackupExecutionContractCode.DatabaseBlocked;
+            await BackupInvocationAuthorizationStore.LockDatabaseAsync(db, snapshot.DatabaseId, cancellationToken);
+            var task = await LockAsync(db, taskId, cancellationToken);
+            if (task is null) return BackupExecutionContractCode.NotFound;
+            if (task.Status == BackupTaskStatus.Succeeded && task.CurrentStage == BackupTaskStage.Cleanup)
+                return BackupExecutionContractCode.AlreadyApplied;
+            if (snapshot.StorageMode != BackupStorageMode.RemoteOnly || task.Status != BackupTaskStatus.NeedsAttention
+                || task.CurrentStage != BackupTaskStage.Cleanup || task.CurrentBackupAttemptId is null)
+                return BackupExecutionContractCode.Conflict;
+            if (task.LeaseToken is not null && task.LeaseExpiresAtUtc > clock.GetUtcNow())
+                return BackupExecutionContractCode.Conflict;
+            var attempt = await db.BackupAttempts.AsNoTracking().SingleAsync(x => x.Id == task.CurrentBackupAttemptId, cancellationToken);
+            var localRemains = await db.BackupFiles.AnyAsync(x => x.TaskId == task.Id && x.AttemptId == attempt.Id
+                && x.Location == BackupFileLocation.Local && x.Status != BackupFileStatus.Deleted, cancellationToken);
+            if (attempt.LocalCleanupCompletedAtUtc is null || localRemains)
+                return BackupExecutionContractCode.Conflict;
+            var before = task.Status;
+            var now = clock.GetUtcNow();
+            task.CompleteDeferredRemoteCleanup(snapshot.StorageMode, now);
+            db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, "plan.staging.cleaned", null, now),
+                CreateAudit(null, task.Id, "plan.staging.clean", "succeeded", null));
+            await db.SaveChangesAsync(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+            return BackupExecutionContractCode.Succeeded;
+        }, cancellationToken);
+
     private static bool IsOpen(BackupTask task, BackupTaskSnapshot snapshot) => task.PlanId is not null && task.PolicyId is null
         && snapshot.FileNameRuleVersion == "v3" && snapshot.Purpose is BackupRunPurpose.PlanFull or BackupRunPurpose.PlanDifferential
-        && snapshot.StorageMode is BackupStorageMode.LocalOnly or BackupStorageMode.LocalAndRemote;
+        && snapshot.StorageMode is BackupStorageMode.LocalOnly or BackupStorageMode.LocalAndRemote or BackupStorageMode.RemoteOnly;
     internal static async Task<bool> ConfigurationEnabledAsync(PlatformDbContext db, BackupTaskSnapshot snapshot, CancellationToken token)
     {
         if (!await db.ManagedDatabases.AnyAsync(x => x.Id == snapshot.DatabaseId && x.IsManaged && x.IsAvailable && !x.IsSystemDatabase, token)

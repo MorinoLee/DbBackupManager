@@ -58,6 +58,7 @@ public static class PlatformDatabaseServiceCollectionExtensions
         services.TryAddScoped<IPlanLocationRetentionStore, PlanLocationRetentionStore>();
         services.TryAddScoped<IPlanCopyDeletionCoordinator, PlanCopyDeletionCoordinator>();
         services.TryAddScoped<PlanLocationRetentionRunner>();
+        services.TryAddScoped<PlanRemoteStagingCleaner>();
         services.TryAddScoped<BackupSetRegistrationService>();
         services.TryAddScoped<IBackupMetadataReconciliationLookup, BackupMetadataReconciliationLookup>();
         services.TryAddScoped<BackupMetadataReconciliationService>();
