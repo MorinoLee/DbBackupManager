@@ -346,6 +346,7 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
             (BackupFileStatus.DeletePending, BackupFileStatus.DeleteFailed) => true,
             (BackupFileStatus.DeletePending, BackupFileStatus.Deleted) => true,
             (BackupFileStatus.DeletePending, BackupFileStatus.Missing) => true,
+            (BackupFileStatus.DeletePending, BackupFileStatus.Available) => true,
             _ => false,
         };
         if (!isAllowed)

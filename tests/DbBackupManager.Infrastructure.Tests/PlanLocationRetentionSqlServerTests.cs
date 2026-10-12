@@ -101,14 +101,26 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
     }
 
     [Fact]
-    public async Task RegisteringADifferentialCancelsTheBaselineDeletionLease()
+    public async Task RegisteringADifferentialProtectsTheBaseline()
+    {
+        var chain = await SeedChainAsync();
+        var store = new PlanLocationRetentionStore(Factory());
+        var diff = await SeedRunningDifferentialAsync(chain, 40);
+        await FinishAsync(diff.Lease.TaskId, diff.Lease.LeaseToken, BackupStorageMode.LocalAndRemote);
+        var local = (await store.AssessAsync(chain.DatabaseId, DateTimeOffset.UtcNow)).Single(item => item.Location == BackupFileLocation.Local);
+        Assert.Equal(RecoveryProtectionReason.DifferentialBase, Reason(local, chain.LocalFileId(40)));
+        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow))).Code);
+    }
+
+    [Fact]
+    public async Task UnexpiredLeaseReturnsToAvailableWhenAnotherRunningBackupProtectsIt()
     {
         var chain = await SeedChainAsync();
         var now = DateTimeOffset.UtcNow;
         var store = new PlanLocationRetentionStore(Factory());
         var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now));
         Assert.Equal(chain.LocalFileId(40), claimed.Value!.FileId);
-        var diff = await SeedRunningDifferentialAsync(chain, 40);
+        await RegisterIndependentFullAsync(chain);
         await using (var db = database.CreateContext())
         {
             var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
@@ -118,10 +130,6 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         }
 
         Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await store.RefreshAsync(claimed.Value.FileId, claimed.Value.LeaseToken, now)).Code);
-        await FinishAsync(diff.Lease.TaskId, diff.Lease.LeaseToken, BackupStorageMode.LocalAndRemote);
-        var local = (await store.AssessAsync(chain.DatabaseId, DateTimeOffset.UtcNow)).Single(item => item.Location == BackupFileLocation.Local);
-        Assert.Equal(RecoveryProtectionReason.DifferentialBase, Reason(local, chain.LocalFileId(40)));
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow))).Code);
     }
 
     [Fact]
@@ -572,6 +580,22 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         public void Bind(Chain chain, int age) { _chain = chain; _age = age; }
         public void RememberLocal(Guid fileId) => _chain!.RememberLocal(_age, fileId);
         public void RememberRemote(Guid fileId) => _chain!.RememberRemote(_age, fileId);
+    }
+
+    private async Task RegisterIndependentFullAsync(Chain chain)
+    {
+        await using var db = database.CreateContext();
+        var old = await db.BackupTaskSnapshots.AsNoTracking()
+            .FirstAsync(item => item.DatabaseId == chain.DatabaseId && item.Purpose != null);
+        var versionId = await db.BackupPlans.AsNoTracking()
+            .Where(plan => plan.DatabaseId == chain.DatabaseId)
+            .Select(plan => EF.Property<Guid?>(plan, "_currentVersionId"))
+            .SingleAsync() ?? throw new InvalidOperationException("计划没有当前版本。");
+        var version = await db.BackupPlanVersions.SingleAsync(item => item.Id == versionId);
+        var now = DateTimeOffset.UtcNow;
+        await CreateBackupAsync(old, version, chain.TargetId, BackupRunPurpose.PlanFull, now, now,
+            new(now.AddDays(-1), BackupCompletionTimeSource.PlatformObserved, BackupCompletionTimeReason.PlatformObserved),
+            false, BackupSetTestData.Full(), null, null);
     }
 
     private async Task StartOpenPlanTaskAsync(Chain chain)
