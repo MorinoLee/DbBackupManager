@@ -15,7 +15,11 @@ public readonly record struct PlanRecoverySetInput(
     bool Proven,
     bool ReferencedByActiveTask);
 
-/// <summary>某个存储位置上的已登记副本。RemoteOnly 的本地暂存不参与该位置的恢复链。</summary>
+/// <summary>
+/// 某个存储位置上的已登记副本。RemoteOnly 的本地暂存不参与该位置的恢复链。
+/// <paramref name="StagingRemoteTargetId"/> 指出暂存必须在哪个远端目标得到确认；
+/// <paramref name="OtherActivityBlocksStagingRelease"/> 表示除本副本所属任务外还有未结束的计划任务。
+/// </summary>
 public readonly record struct PlanRecoveryCopyInput(
     Guid FileId,
     Guid? BackupSetId,
@@ -23,7 +27,9 @@ public readonly record struct PlanRecoveryCopyInput(
     Guid? StorageTargetId,
     BackupFileStatus Status,
     bool RemoteOnlyStaging,
-    bool OwnershipProven);
+    bool OwnershipProven,
+    Guid? StagingRemoteTargetId = null,
+    bool OtherActivityBlocksStagingRelease = false);
 
 public readonly record struct PlanLocationWindow(
     BackupFileLocation Location,
@@ -45,13 +51,19 @@ public readonly record struct PlanLocationRecoveryResult(
 
 /// <summary>
 /// 把已登记事实投影成 §5.3 的单位置判定。投影只加严：未知类型、未证明的依赖、
-/// 归属不清和 RemoteOnly 暂存都不会变成可删除。
+/// 归属不清都不会变成按窗口可删除。RemoteOnly 暂存不进入单位置恢复链，只有跨位置确认后才可释放。
 /// </summary>
 public static class PlanLocationRecovery
 {
     public const string DependencyUnproven = "dependency_unproven";
 
     public const string RemoteStagingDeferred = "remote_staging_deferred";
+
+    public const string RemoteStagingReleasable = "remote_staging_releasable";
+
+    public const string RemoteBaseUnconfirmed = "remote_base_unconfirmed";
+
+    public const string RemoteDependentUnconfirmed = "remote_dependent_unconfirmed";
 
     public const string OwnershipUnproven = "artifact.owner_unknown";
 
@@ -137,12 +149,146 @@ public static class PlanLocationRecovery
                 copies.Where(copy => copy.Location == location.Location && copy.StorageTargetId == location.StorageTargetId).ToArray()));
         }
 
-        return results;
+        return ApplyRemoteStagingRelease(results, copies, setsById, effectiveBaseline, protectAllFullsBecauseDependencyUnproven);
     }
 
     public static bool IsDeletable(PlanCopyRetentionDecision decision) =>
         decision.Verdict == RecoveryWindowVerdict.Deletable
         && decision.Reason == RecoveryProtectionReason.OutsideWindowUnneeded;
+
+    /// <summary>暂存释放不按恢复窗口，保留入口不能把它当成 outside_window_unneeded。</summary>
+    public static bool IsStagingReleasable(PlanCopyRetentionDecision decision) =>
+        decision.Verdict == RecoveryWindowVerdict.Deletable
+        && decision.Reason == RemoteStagingReleasable;
+
+    public static bool RetainsPhysicalLease(PlanCopyRetentionDecision decision) =>
+        IsDeletable(decision) || IsStagingReleasable(decision);
+
+    private static IReadOnlyList<PlanLocationRecoveryResult> ApplyRemoteStagingRelease(
+        List<PlanLocationRecoveryResult> results,
+        IReadOnlyList<PlanRecoveryCopyInput> copies,
+        Dictionary<Guid, PlanRecoverySetInput> setsById,
+        ActiveBaseline baseline,
+        bool protectAllFullsBecauseDependencyUnproven)
+    {
+        var replacements = new Dictionary<Guid, PlanCopyRetentionDecision>();
+        foreach (var copy in copies.Where(copy => copy.RemoteOnlyStaging))
+        {
+            replacements[copy.FileId] = DecideStaging(copy, copies, setsById, baseline, protectAllFullsBecauseDependencyUnproven);
+        }
+
+        if (replacements.Count == 0)
+        {
+            return results;
+        }
+
+        return results.Select(result =>
+        {
+            if (!result.Copies.Any(copy => replacements.ContainsKey(copy.FileId)))
+            {
+                return result;
+            }
+
+            var updated = result.Copies.Select(copy => replacements.TryGetValue(copy.FileId, out var decision) ? decision : copy).ToArray();
+            return result with { Copies = updated };
+        }).ToArray();
+    }
+
+    private static PlanCopyRetentionDecision DecideStaging(
+        PlanRecoveryCopyInput copy,
+        IReadOnlyList<PlanRecoveryCopyInput> copies,
+        Dictionary<Guid, PlanRecoverySetInput> setsById,
+        ActiveBaseline baseline,
+        bool protectAllFullsBecauseDependencyUnproven)
+    {
+        if (copy.Status is not (BackupFileStatus.Available or BackupFileStatus.DeletePending or BackupFileStatus.DeleteFailed))
+        {
+            return Protect(copy, RemoteStagingDeferred);
+        }
+
+        if (copy.StagingRemoteTargetId is not { } target || target == Guid.Empty)
+        {
+            return Protect(copy, RemoteStagingDeferred);
+        }
+
+        if (!copy.OwnershipProven || copy.BackupSetId is not { } setId || !setsById.TryGetValue(setId, out var set))
+        {
+            return Protect(copy, copy.OwnershipProven ? DependencyUnproven : OwnershipUnproven);
+        }
+
+        if (copy.OtherActivityBlocksStagingRelease)
+        {
+            return Protect(copy, RecoveryProtectionReason.ActiveTaskDependency);
+        }
+
+        if (set.Type == BackupType.Log)
+        {
+            return Protect(copy, RecoveryProtectionReason.LogRetentionDeferred);
+        }
+
+        if (!set.Proven || set.IsCopyOnly is null || set.Type is not (BackupType.Full or BackupType.Differential))
+        {
+            return Protect(copy, DependencyUnproven);
+        }
+
+        if (set.Type == BackupType.Full && (protectAllFullsBecauseDependencyUnproven || baseline.IsUnresolved))
+        {
+            return Protect(copy, protectAllFullsBecauseDependencyUnproven ? DependencyUnproven : RecoveryProtectionReason.BaselineUnresolved);
+        }
+
+        if (!RemoteCopyConfirmed(setId, target, copies))
+        {
+            return Protect(copy, RemoteStagingDeferred);
+        }
+
+        if (set.Type == BackupType.Differential)
+        {
+            if (set.DifferentialBaseId is not { } baseId
+                || !setsById.TryGetValue(baseId, out var baseSet)
+                || !baseSet.Proven
+                || baseSet.Type != BackupType.Full
+                || baseSet.IsCopyOnly != false)
+            {
+                return Protect(copy, DependencyUnproven);
+            }
+
+            return RemoteCopyConfirmed(baseId, target, copies)
+                ? Release(copy)
+                : Protect(copy, RemoteBaseUnconfirmed);
+        }
+
+        if (baseline.FullId == setId)
+        {
+            return Protect(copy, RecoveryProtectionReason.ActiveDifferentialBaseline);
+        }
+
+        foreach (var dependent in setsById.Values.Where(item => item.Type == BackupType.Differential && item.DifferentialBaseId == setId))
+        {
+            if (!dependent.Proven || dependent.DifferentialBaseId is null)
+            {
+                return Protect(copy, DependencyUnproven);
+            }
+
+            if (!RemoteCopyConfirmed(dependent.Id, target, copies))
+            {
+                return Protect(copy, RemoteDependentUnconfirmed);
+            }
+        }
+
+        return Release(copy);
+    }
+
+    private static bool RemoteCopyConfirmed(Guid setId, Guid targetId, IReadOnlyList<PlanRecoveryCopyInput> copies)
+    {
+        var matches = copies.Where(copy => copy.BackupSetId == setId
+            && copy.Location == BackupFileLocation.Remote
+            && copy.StorageTargetId == targetId
+            && !copy.RemoteOnlyStaging).ToArray();
+        return matches.Length == 1 && matches[0].OwnershipProven && matches[0].Status == BackupFileStatus.Available;
+    }
+
+    private static PlanCopyRetentionDecision Release(PlanRecoveryCopyInput copy) =>
+        new(copy.FileId, copy.BackupSetId, RecoveryWindowVerdict.Deletable, RemoteStagingReleasable);
 
     private static PlanLocationRecoveryResult EvaluateLocation(
         DateTimeOffset now,

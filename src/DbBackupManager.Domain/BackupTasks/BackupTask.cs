@@ -330,6 +330,21 @@ public sealed class BackupTask : ConcurrentEntity
         }
     }
 
+    public void CompleteDeferredRemoteCleanup(BackupStorageMode storageMode, DateTimeOffset utcNow)
+    {
+        var now = BackupTaskValues.RequireUtc(utcNow, nameof(utcNow));
+        if (LeaseToken is not null && LeaseExpiresAtUtc is not null && LeaseExpiresAtUtc > now)
+        {
+            throw new InvalidOperationException("活动租约尚未结束，不能另行结束暂存清理。");
+        }
+
+        SetState(BackupTaskStateMachine.CompleteDeferredCleanup(State(), storageMode));
+        CompletedAtUtc = now;
+        ClearReconciliationSchedule();
+        ClearError();
+        ClearLease();
+    }
+
     public void RejectPendingBackup(
         BackupStorageMode storageMode,
         DateTimeOffset utcNow,

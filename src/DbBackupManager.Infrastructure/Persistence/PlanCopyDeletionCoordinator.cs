@@ -64,7 +64,7 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
                 await PlanLocationRetentionWork.LoadAsync(context, current.DatabaseId, now, cancellationToken));
             var deletable = leaseMatches
                 && decisions.TryGetValue(current.Id, out var decision)
-                && PlanLocationRecovery.IsDeletable(decision);
+                && PlanLocationRecovery.RetainsPhysicalLease(decision);
             if (!deletable)
             {
                 if (leaseMatches)
@@ -219,6 +219,7 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
             }
 
             file.RecordConfirmedUnlink(_leaseToken, now);
+            await PlanLocationRetentionWork.NoteStagingCleanedAsync(context, file, now, CancellationToken.None);
             context.BackupFileStateChanges.Add(new BackupFileStateChange(
                 Guid.NewGuid(),
                 file.Id,

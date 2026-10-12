@@ -11,7 +11,7 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
     IBackupInvocationAuthorizationStore authorizations, ITargetSqlInvocationPreparation preparation,
     ITargetSqlActiveBaselineReader active, IBackupDirectoryPreparer directories, IBackupFileStorageProbe probe,
     IBackupFileContentVerifier files, IBackupPlanFileTransferExecutor transfer, BackupPlanReadOnlyStages stages,
-    TimeProvider clock) : IBackupPlanTaskRunner
+    PlanRemoteStagingCleaner staging, TimeProvider clock) : IBackupPlanTaskRunner
 {
     private readonly Guid _incarnation = Guid.NewGuid();
     private readonly BackupPlanOperationFlow _flow = new(store, operations, clock);
@@ -50,8 +50,30 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
                 if (next is null) return code;
                 session = next;
             }
-            return session.Work.Lease.Stage == BackupTaskStage.ValidateCopy ? await ConfirmCopyAsync(session, heartbeat.Token)
-                : BackupExecutionContractCode.Succeeded;
+            if (session.Work.Lease.Stage != BackupTaskStage.ValidateCopy)
+            {
+                return BackupExecutionContractCode.Succeeded;
+            }
+
+            var confirmed = await ConfirmCopyAsync(session, heartbeat.Token);
+            if (confirmed != BackupExecutionContractCode.Succeeded
+                || session.Work.Snapshot.Policy.StorageMode != BackupStorageMode.RemoteOnly)
+            {
+                return confirmed;
+            }
+
+            var cleaned = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
+            if (cleaned is null)
+            {
+                throw new PlanExecutionLeaseLostException();
+            }
+
+            if (cleaned.Work.Lease.Stage != BackupTaskStage.Cleanup)
+            {
+                return BackupExecutionContractCode.StageNotOpen;
+            }
+
+            return await staging.CleanOwnAsync(cleaned, heartbeat.Token);
         }
         catch (PlanExecutionLeaseLostException) { return BackupExecutionContractCode.LeaseLost; }
         catch (PlanExecutionConflictException exception) when (exception.Code == BackupExecutionContractCode.CancellationRequested)
@@ -101,7 +123,7 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
         var destination = File(work, false, work.Attempt.WorkerSourceFilePath);
         var sourceCapability = await transfer.CheckCapabilitiesAsync(destination, token);
         if (!sourceCapability.IsSucceeded) return await RejectAsync(session, "file.source_protection_unsupported", token);
-        if (work.Snapshot.Policy.StorageMode == BackupStorageMode.LocalAndRemote)
+        if (work.Snapshot.Policy.StorageMode is BackupStorageMode.LocalAndRemote or BackupStorageMode.RemoteOnly)
         {
             var remoteCapability = await transfer.CheckCapabilitiesAsync(File(work, true, work.Attempt.RemotePartialFilePath!), token);
             if (!remoteCapability.IsSucceeded) return await RejectAsync(session, "file.remote_protection_unsupported", token);

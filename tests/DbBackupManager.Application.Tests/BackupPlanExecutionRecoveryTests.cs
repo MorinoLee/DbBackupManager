@@ -114,6 +114,9 @@ public sealed class BackupPlanHeartbeatTests
         public Task<QualifiedManagedFull?> FindQualifiedFullAsync(Guid databaseId, Guid backupSetGuid, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<BackupExecutionContractCode> ApplyAsync(LeaseHandle lease, ReserveBackupExecutionOperation identity, DbBackupManager.Application.FileStorage.IVerifiedBackupFileHandle? protectedFile = null, DbBackupManager.Application.FileStorage.IVerifiedBackupFileHandle? protectedDependency = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<BackupExecutionContractCode> SuspendAsync(LeaseHandle lease, Guid mutationId, string reason, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained, string? outcomeReason = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }
 
@@ -216,7 +219,7 @@ public sealed class BackupPlanExecutionOutcomeTests
     private static BackupPlanTaskRunner Runner(ScriptStore store)
     {
         var stages = new BackupPlanReadOnlyStages(store, null!, null!, null!, null!, null!, null!, null!, TimeProvider.System);
-        return new(store, null!, null!, null!, null!, null!, null!, null!, null!, stages, TimeProvider.System);
+        return new(store, null!, null!, null!, null!, null!, null!, null!, null!, stages, null!, TimeProvider.System);
     }
 
     private static FrozenBackupExecutionOperation Operation(BackupExecutionOperationKind kind, int sequence) =>
@@ -274,5 +277,11 @@ public sealed class BackupPlanExecutionOutcomeTests
             SuspendReason = reason;
             return Task.FromResult(BackupExecutionContractCode.Succeeded);
         }
+        public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained, string? outcomeReason = null, CancellationToken cancellationToken = default) =>
+            Task.FromResult(BackupExecutionContractCode.Succeeded);
+        public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(BackupExecutionContractCode.Succeeded);
+        public Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(BackupExecutionContractCode.Succeeded);
     }
 }

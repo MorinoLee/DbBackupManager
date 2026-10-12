@@ -10,8 +10,10 @@ namespace DbBackupManager.Infrastructure.Persistence;
 internal static class PlanLocationRetentionWork
 {
     internal const string ClaimedReason = "plan.retention.claimed";
+    internal const string StagingClaimedReason = "plan.staging.claimed";
     internal const string ReleasedReason = "plan.retention.protected";
     internal const string DeletedReason = "plan.retention.deleted";
+    internal const string StagingRetainedReason = "remote.staging_retained";
 
     /// <summary>
     /// 只有计划任务、v3 命名规则且已关联备份集的副本由计划保留处理。其余租约保持原样。
@@ -109,14 +111,17 @@ internal static class PlanLocationRetentionWork
                 && (file.Location == BackupFileLocation.Local
                     ? file.DatabaseServerId == snapshot.ServerId
                     : file.StorageTargetId == snapshot.StorageTargetId);
+            var staging = snapshot?.StorageMode == BackupStorageMode.RemoteOnly && file.Location == BackupFileLocation.Local;
             return new PlanRecoveryCopyInput(
                 file.Id,
                 file.BackupSetId,
                 file.Location,
                 file.StorageTargetId,
                 file.Status,
-                snapshot?.StorageMode == BackupStorageMode.RemoteOnly && file.Location == BackupFileLocation.Local,
-                owned);
+                staging,
+                owned,
+                staging ? snapshot!.StorageTargetId : null,
+                activeTasks.Any(id => id != file.TaskId));
         }).ToArray();
         var windows = new List<PlanLocationWindow> { new(BackupFileLocation.Local, null, version?.LocalRecoveryWindowDays) };
         var remoteTargets = files
@@ -171,7 +176,7 @@ internal static class PlanLocationRetentionWork
             if (!planCopies.Contains(file.Id)
                 || file.DeletionLeaseExpiresAtUtc is null
                 || file.DeletionLeaseExpiresAtUtc <= nowUtc
-                || (decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.IsDeletable(decision)))
+                || (decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.RetainsPhysicalLease(decision)))
             {
                 continue;
             }
@@ -196,6 +201,33 @@ internal static class PlanLocationRetentionWork
 
     internal static Dictionary<Guid, PlanCopyRetentionDecision> Decisions(IReadOnlyList<PlanLocationAssessment> assessments) =>
         assessments.SelectMany(assessment => assessment.Copies).ToDictionary(copy => copy.FileId);
+
+    /// <summary>
+    /// 只有已经确认远端验证的 RemoteOnly 暂存，才在解开后写下清理时间。
+    /// 没有远端验证证据时不补造时间。
+    /// </summary>
+    internal static async Task NoteStagingCleanedAsync(
+        PlatformDbContext db,
+        BackupFile file,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await db.BackupTaskSnapshots.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.TaskId == file.TaskId, cancellationToken);
+        if (snapshot?.StorageMode != BackupStorageMode.RemoteOnly || file.Location != BackupFileLocation.Local)
+        {
+            return;
+        }
+
+        var attempt = await db.BackupAttempts.AsTracking()
+            .SingleOrDefaultAsync(item => item.Id == file.AttemptId && item.TaskId == file.TaskId, cancellationToken);
+        if (attempt?.RemoteValidatedAtUtc is not { } validated || attempt.LocalCleanupCompletedAtUtc is not null)
+        {
+            return;
+        }
+
+        attempt.RecordLocalCleanupCompleted(nowUtc < validated ? validated : nowUtc);
+    }
 
     private static bool Proven(BackupSet set)
     {

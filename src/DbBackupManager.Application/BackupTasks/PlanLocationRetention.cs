@@ -23,6 +23,18 @@ public interface IPlanLocationRetentionStore
         ClaimBackupFileDeletionCommand command,
         CancellationToken cancellationToken = default);
 
+    /// <summary>只领取已经证明可以释放的 RemoteOnly 暂存。不领取按窗口可删除的正式副本。</summary>
+    Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ClaimStagingAsync(
+        Guid databaseId,
+        ClaimBackupFileDeletionCommand command,
+        Guid? onlyTaskId = null,
+        CancellationToken cancellationToken = default);
+
+    Task<PlanStagingRelease> ReadOwnStagingAsync(
+        Guid taskId,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken = default);
+
     Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> RefreshAsync(
         Guid fileId,
         Guid leaseToken,
@@ -49,9 +61,14 @@ public interface IPlanLocationRetentionStore
         CancellationToken cancellationToken = default);
 }
 
+public sealed record PlanStagingRelease(bool Releasable, Guid? FileId, string Reason);
+
 public static class PlanCopyDeletionReasons
 {
     public const string Busy = "plan.retention.busy";
+
+    /// <summary>暂存在删除前已经不在，不能当成已确认解开。需要人工处理。</summary>
+    public const string StagingMissing = "remote.staging_missing";
 }
 
 /// <summary>

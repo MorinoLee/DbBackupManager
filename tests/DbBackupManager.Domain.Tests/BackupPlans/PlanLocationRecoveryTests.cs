@@ -162,6 +162,102 @@ public sealed class PlanLocationRecoveryTests
     }
 
     [Fact]
+    public void RemoteDifferentialWithoutItsBaseKeepsNecessaryStagingVisible()
+    {
+        var remote = Guid.NewGuid();
+        var results = PlanLocationRecovery.Evaluate(
+            Now,
+            ActiveBaseline.Unresolved,
+            false,
+            false,
+            [new(BackupFileLocation.Local, null, null), new(BackupFileLocation.Remote, remote, 7)],
+            [Set(1, BackupType.Full, Now.AddDays(-1)), Set(2, BackupType.Differential, Now.AddHours(-2), 1)],
+            [
+                Staging(11, 1, remote),
+                Staging(12, 2, remote),
+                Copy(22, 2, BackupFileLocation.Remote, remote),
+            ]);
+
+        var remoteResult = results.Single(result => result.Location == BackupFileLocation.Remote);
+        var local = results.Single(result => result.Location == BackupFileLocation.Local);
+        Assert.Equal(LocationRecoveryConclusion.NotRestorable, remoteResult.Conclusion);
+        Assert.Equal(RecoveryProtectionReason.BaseUnavailableAtLocation, Reason(remoteResult, 22));
+        Assert.Equal(RecoveryProtectionReason.BaselineUnresolved, Reason(local, 11));
+        Assert.Equal(PlanLocationRecovery.RemoteBaseUnconfirmed, Reason(local, 12));
+        Assert.All(local.Copies, copy => Assert.False(PlanLocationRecovery.IsStagingReleasable(copy)));
+        Assert.All(results.SelectMany(result => result.Copies), copy => Assert.False(PlanLocationRecovery.IsDeletable(copy)));
+    }
+
+    [Fact]
+    public void ConfirmedRemoteFullCanReleaseStagingWhenItIsNotADifferentialBaseline()
+    {
+        var remote = Guid.NewGuid();
+        var local = EvaluateStaging(ActiveBaseline.None, false, [
+            Set(1, BackupType.Full, Now.AddDays(-40)),
+            Set(2, BackupType.Full, Now.AddDays(-1)),
+        ], [
+            Staging(11, 1, remote),
+            Staging(12, 2, remote),
+            Copy(21, 1, BackupFileLocation.Remote, remote),
+            Copy(22, 2, BackupFileLocation.Remote, remote),
+        ]);
+
+        Assert.Equal(PlanLocationRecovery.RemoteStagingReleasable, Reason(local, 11));
+        Assert.Equal(PlanLocationRecovery.RemoteStagingReleasable, Reason(local, 12));
+        Assert.True(PlanLocationRecovery.IsStagingReleasable(Decision(local, 11)));
+        Assert.False(PlanLocationRecovery.IsDeletable(Decision(local, 11)));
+    }
+
+    [Fact]
+    public void ActiveBaselineAndUnconfirmedDependentKeepFullStaging()
+    {
+        var remote = Guid.NewGuid();
+        var fullId = GuidFrom(1);
+        var kept = EvaluateStaging(ActiveBaseline.Known(fullId), false, [
+            Set(fullId, BackupType.Full, Now.AddDays(-2)),
+            Set(GuidFrom(2), BackupType.Differential, Now.AddHours(-1), fullId),
+        ], [
+            Staging(11, fullId, remote),
+            Staging(12, 2, remote),
+            Copy(21, fullId, BackupFileLocation.Remote, remote),
+            Copy(22, 2, BackupFileLocation.Remote, remote),
+        ]);
+        Assert.Equal(RecoveryProtectionReason.ActiveDifferentialBaseline, Reason(kept, 11));
+        Assert.Equal(PlanLocationRecovery.RemoteStagingReleasable, Reason(kept, 12));
+
+        var waiting = EvaluateStaging(ActiveBaseline.None, false, [
+            Set(1, BackupType.Full, Now.AddDays(-2)),
+            Set(2, BackupType.Differential, Now.AddHours(-1), 1, proven: false),
+        ], [
+            Staging(11, 1, remote),
+            Staging(12, 2, remote),
+            Copy(21, 1, BackupFileLocation.Remote, remote),
+        ]);
+        Assert.Equal(PlanLocationRecovery.DependencyUnproven, Reason(waiting, 11));
+        Assert.Equal(PlanLocationRecovery.DependencyUnproven, Reason(waiting, 12));
+        Assert.False(PlanLocationRecovery.IsStagingReleasable(Decision(waiting, 11)));
+    }
+
+    [Fact]
+    public void OtherActivityAmbiguousRemoteAndLogStagingStayProtected()
+    {
+        var remote = Guid.NewGuid();
+        var local = EvaluateStaging(ActiveBaseline.None, false, [
+            Set(1, BackupType.Full, Now.AddDays(-1)),
+            Set(2, BackupType.Log, Now.AddHours(-1)),
+        ], [
+            Staging(11, 1, remote, otherActivity: true),
+            Staging(12, 2, remote),
+            Copy(21, 1, BackupFileLocation.Remote, remote),
+            Copy(31, 1, BackupFileLocation.Remote, remote),
+        ]);
+
+        Assert.Equal(RecoveryProtectionReason.ActiveTaskDependency, Reason(local, 11));
+        Assert.Equal(RecoveryProtectionReason.LogRetentionDeferred, Reason(local, 12));
+        Assert.False(PlanLocationRecovery.IsStagingReleasable(Decision(local, 11)));
+    }
+
+    [Fact]
     public void LogCopiesStayDeferred()
     {
         var result = Single(
@@ -190,6 +286,29 @@ public sealed class PlanLocationRecoveryTests
         file.ClaimDeletion(Guid.NewGuid(), "合成再次删除", now.AddMinutes(2), now.AddMinutes(10));
         Assert.Throws<InvalidOperationException>(() => file.RecordDeleted(token, now.AddMinutes(3)));
     }
+
+    private static PlanLocationRecoveryResult EvaluateStaging(
+        ActiveBaseline baseline,
+        bool protectAllFulls,
+        IReadOnlyList<PlanRecoverySetInput> sets,
+        IReadOnlyList<PlanRecoveryCopyInput> copies)
+    {
+        var remote = copies.Select(copy => copy.StorageTargetId ?? copy.StagingRemoteTargetId).First(id => id is not null)!.Value;
+        return PlanLocationRecovery.Evaluate(
+            Now,
+            baseline,
+            protectAllFulls,
+            false,
+            [new(BackupFileLocation.Local, null, null), new(BackupFileLocation.Remote, remote, 7)],
+            sets,
+            copies).Single(result => result.Location == BackupFileLocation.Local);
+    }
+
+    private static PlanRecoveryCopyInput Staging(int fileId, int setId, Guid target, bool otherActivity = false) =>
+        new(GuidFrom(fileId), GuidFrom(setId), BackupFileLocation.Local, null, BackupFileStatus.Available, true, true, target, otherActivity);
+
+    private static PlanRecoveryCopyInput Staging(int fileId, Guid setId, Guid target) =>
+        new(GuidFrom(fileId), setId, BackupFileLocation.Local, null, BackupFileStatus.Available, true, true, target, false);
 
     private static PlanLocationRecoveryResult Single(
         ActiveBaseline baseline,
