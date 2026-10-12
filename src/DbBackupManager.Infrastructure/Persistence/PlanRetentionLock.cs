@@ -10,6 +10,12 @@ namespace DbBackupManager.Infrastructure.Persistence;
 /// </summary>
 internal static class PlanRetentionLock
 {
+    /// <summary>
+    /// 计划副本物理删除的调用超时是 60 秒。协调锁必须盖过这次等待和随后的提交，
+    /// 避免登记或阶段提交在删除尚未结束时得到 DatabaseBlocked。
+    /// </summary>
+    internal const int LockTimeoutMilliseconds = 90_000;
+
     internal static string Name(Guid databaseId) => $"plan-retention-{databaseId:N}";
 
     internal static async Task<bool> TryAcquireAsync(
@@ -19,10 +25,11 @@ internal static class PlanRetentionLock
     {
         var result = new SqlParameter("@result", SqlDbType.Int) { Direction = ParameterDirection.Output };
         var resource = new SqlParameter("@resource", SqlDbType.NVarChar, 255) { Value = Name(databaseId) };
+        var timeout = new SqlParameter("@timeout", SqlDbType.Int) { Value = LockTimeoutMilliseconds };
         await context.Database.ExecuteSqlRawAsync(
             "EXEC @result = sys.sp_getapplock @Resource = @resource, @LockMode = 'Exclusive', "
-            + "@LockOwner = 'Transaction', @LockTimeout = 15000",
-            [result, resource],
+            + "@LockOwner = 'Transaction', @LockTimeout = @timeout",
+            [result, resource, timeout],
             cancellationToken);
         return result.Value is int code && code >= 0;
     }

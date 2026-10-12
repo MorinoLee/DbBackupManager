@@ -267,16 +267,53 @@ public sealed class BackupFile : ConcurrentEntity
     {
         var deletedAt = BackupTaskValues.RequireUtc(deletedAtUtc, nameof(deletedAtUtc));
         EnsureDeletionLease(leaseToken, deletedAt);
-        if (deletedAt < ValidatedAtUtc)
+        MarkDeleted(deletedAt);
+    }
+
+    /// <summary>
+    /// 物理文件已经确认解开。会话锁仍由调用方持有，租约即便刚刚到期也必须记下已删除，不能改回可用。
+    /// </summary>
+    public void RecordConfirmedUnlink(Guid leaseToken, DateTimeOffset deletedAtUtc)
+    {
+        var deletedAt = BackupTaskValues.RequireUtc(deletedAtUtc, nameof(deletedAtUtc));
+        var token = BackupTaskValues.RequireId(leaseToken, nameof(leaseToken));
+        if (Status != BackupFileStatus.DeletePending || DeletionLeaseToken != token)
         {
-            throw new ArgumentException("删除时间不能早于副本验证时间。", nameof(deletedAtUtc));
+            throw new InvalidOperationException("删除租约能力不匹配。");
         }
 
-        Status = BackupFileStatus.Deleted;
-        DeletedAtUtc = deletedAt;
-        MissingDetectedAtUtc = null;
-        NextDeletionAttemptAtUtc = null;
-        DeletionErrorCode = null;
+        MarkDeleted(deletedAt);
+    }
+
+    /// <summary>
+    /// 过期的计划删除租约在探测文件是否还在之后收口：还在则回到可用，已经不在则记为缺失。
+    /// </summary>
+    public void ResolveExpiredDeletion(Guid leaseToken, DateTimeOffset utcNow, bool stillPresent)
+    {
+        var now = BackupTaskValues.RequireUtc(utcNow, nameof(utcNow));
+        var token = BackupTaskValues.RequireId(leaseToken, nameof(leaseToken));
+        if (Status != BackupFileStatus.DeletePending || DeletionLeaseToken != token)
+        {
+            throw new InvalidOperationException("删除租约能力不匹配。");
+        }
+
+        if (DeletionLeaseExpiresAtUtc is null || DeletionLeaseExpiresAtUtc > now)
+        {
+            throw new InvalidOperationException("未到期的删除租约不能按过期结果收口。");
+        }
+
+        if (stillPresent)
+        {
+            CancelDeletionLease(now);
+            return;
+        }
+
+        if (DeletionAttemptCount < 1)
+        {
+            DeletionAttemptCount = 1;
+        }
+
+        MarkMissing(now);
         ClearDeletionLease();
     }
 
@@ -325,6 +362,21 @@ public sealed class BackupFile : ConcurrentEntity
         NextDeletionAttemptAtUtc = nextAttempt;
         DeletedAtUtc = null;
         MissingDetectedAtUtc = null;
+        ClearDeletionLease();
+    }
+
+    private void MarkDeleted(DateTimeOffset deletedAtUtc)
+    {
+        if (deletedAtUtc < ValidatedAtUtc)
+        {
+            throw new ArgumentException("删除时间不能早于副本验证时间。", nameof(deletedAtUtc));
+        }
+
+        Status = BackupFileStatus.Deleted;
+        DeletedAtUtc = deletedAtUtc;
+        MissingDetectedAtUtc = null;
+        NextDeletionAttemptAtUtc = null;
+        DeletionErrorCode = null;
         ClearDeletionLease();
     }
 

@@ -208,6 +208,47 @@ public sealed class BackupFileTests
             VerifiedAt.ToOffset(TimeSpan.FromHours(8))));
     }
 
+    [Fact]
+    public void ConfirmedUnlinkRecordsDeletedAfterTheLeaseExpires()
+    {
+        var file = CreateLocal();
+        var token = Guid.NewGuid();
+        var acquired = VerifiedAt.AddDays(8);
+        file.ClaimDeletion(token, "worker-a", acquired, acquired.AddMinutes(5));
+
+        Assert.Throws<InvalidOperationException>(() => file.RecordDeleted(token, acquired.AddMinutes(6)));
+        file.RecordConfirmedUnlink(token, acquired.AddMinutes(6));
+
+        Assert.Equal(BackupFileStatus.Deleted, file.Status);
+        Assert.Equal(acquired.AddMinutes(6), file.DeletedAtUtc);
+        Assert.Null(file.DeletionLeaseToken);
+        Assert.Equal(1, file.DeletionAttemptCount);
+    }
+
+    [Fact]
+    public void ExpiredDeletionResolvesFromWhetherTheFileRemains()
+    {
+        var present = CreateLocal();
+        var missing = CreateLocal();
+        var active = CreateLocal();
+        var acquired = VerifiedAt.AddDays(8);
+        var token = Guid.NewGuid();
+        present.ClaimDeletion(token, "worker-a", acquired, acquired.AddMinutes(5));
+        missing.ClaimDeletion(token, "worker-a", acquired, acquired.AddMinutes(5));
+        active.ClaimDeletion(token, "worker-a", acquired, acquired.AddMinutes(5));
+
+        present.ResolveExpiredDeletion(token, acquired.AddMinutes(5), stillPresent: true);
+        missing.ResolveExpiredDeletion(token, acquired.AddMinutes(6), stillPresent: false);
+
+        Assert.Equal(BackupFileStatus.Available, present.Status);
+        Assert.Equal(0, present.DeletionAttemptCount);
+        Assert.Null(present.DeletionLeaseToken);
+        Assert.Equal(BackupFileStatus.Missing, missing.Status);
+        Assert.Equal(acquired.AddMinutes(6), missing.MissingDetectedAtUtc);
+        Assert.Null(missing.DeletionLeaseToken);
+        Assert.Throws<InvalidOperationException>(() => active.ResolveExpiredDeletion(token, acquired.AddMinutes(4), false));
+    }
+
     private static BackupFile CreateLocal()
     {
         return BackupFile.CreateLocal(

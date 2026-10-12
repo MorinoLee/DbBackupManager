@@ -218,13 +218,24 @@ internal sealed class BackupFileStorageAdapter(
                         BackupFileStorageFailureCode.OperationRejected, BackupFileStorageFailurePhase.Delete);
                 }
 
+                if (deletionGuard is not null)
+                {
+                    var eligibility = await deletionGuard.EvaluateAsync(request, cancellationToken);
+                    if (!eligibility.Allowed
+                        && !string.Equals(eligibility.ReasonCode, "plan.copy.protected", StringComparison.Ordinal))
+                    {
+                        return BackupFileStorageResult.ConfirmedFailure<BackupFileMutationReceipt>(
+                            BackupFileStorageFailureCode.OperationRejected, BackupFileStorageFailurePhase.Delete);
+                    }
+                }
+
                 var deleted = await DeletePhysicalAsync(request, cancellationToken);
                 if (!deleted.IsSucceeded)
                 {
                     return deleted;
                 }
 
-                var committed = await permit.CommitDeletedAsync(cancellationToken);
+                var committed = await permit.CommitDeletedAsync(CancellationToken.None);
                 return committed
                     ? deleted
                     : BackupFileStorageResult.Indeterminate<BackupFileMutationReceipt>(

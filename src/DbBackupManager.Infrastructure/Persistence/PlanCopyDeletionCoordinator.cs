@@ -29,8 +29,7 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
         var snapshot = file is null
             ? null
             : await lookup.BackupTaskSnapshots.AsNoTracking().SingleOrDefaultAsync(item => item.TaskId == file.TaskId, cancellationToken);
-        if (file is null || task is null || snapshot is null
-            || task.PlanId is null && snapshot.Purpose is null && snapshot.FileNameRuleVersion != "v3" && file.BackupSetId is null)
+        if (file is null || task is null || snapshot is null || !PlanLocationRetentionWork.IsPlanCopy(file, task, snapshot))
         {
             return PlanCopyDeletionPermit.NotApplicable();
         }
@@ -42,7 +41,7 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
         if (!await AcquireSessionAsync(connection, file.DatabaseId, cancellationToken))
         {
             await connection.DisposeAsync();
-            return PlanCopyDeletionPermit.Denied("plan.copy.protected");
+            return PlanCopyDeletionPermit.Denied(PlanCopyDeletionReasons.Busy);
         }
 
         try
@@ -138,11 +137,15 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
     {
         await using var command = connection.CreateCommand();
         command.CommandText = acquire
-            ? "EXEC @result = sys.sp_getapplock @Resource = @resource, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 15000"
+            ? "EXEC @result = sys.sp_getapplock @Resource = @resource, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = @timeout"
             : "EXEC @result = sys.sp_releaseapplock @Resource = @resource, @LockOwner = 'Session'";
         var result = command.Parameters.Add("@result", SqlDbType.Int);
         result.Direction = ParameterDirection.Output;
         command.Parameters.Add("@resource", SqlDbType.NVarChar, 255).Value = PlanRetentionLock.Name(databaseId);
+        if (acquire)
+        {
+            command.Parameters.Add("@timeout", SqlDbType.Int).Value = PlanRetentionLock.LockTimeoutMilliseconds;
+        }
         await command.ExecuteNonQueryAsync(cancellationToken);
         return result.Value is int code ? code : -999;
     }
@@ -202,40 +205,20 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
                 return false;
             }
 
+            // 物理文件已经解开。提交不再跟随调用方取消，也不因租约刚到期或决策变化改回可用。
+            _ = cancellationToken;
             var now = _clock.GetUtcNow();
-            await using var context = await _factory.CreateDbContextAsync(cancellationToken);
-            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, _databaseId, cancellationToken);
-            var file = await context.BackupFiles.AsTracking().SingleOrDefaultAsync(item => item.Id == _fileId, cancellationToken);
-            if (file is null
-                || file.Status != BackupFileStatus.DeletePending
-                || file.DeletionLeaseToken != _leaseToken
-                || file.DeletionLeaseExpiresAtUtc is null
-                || file.DeletionLeaseExpiresAtUtc <= now)
+            await using var context = await _factory.CreateDbContextAsync(CancellationToken.None);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, CancellationToken.None);
+            await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, _databaseId, CancellationToken.None);
+            var file = await context.BackupFiles.AsTracking().SingleOrDefaultAsync(item => item.Id == _fileId, CancellationToken.None);
+            if (file is null || file.Status != BackupFileStatus.DeletePending || file.DeletionLeaseToken != _leaseToken)
             {
-                await transaction.CommitAsync(cancellationToken);
+                await transaction.CommitAsync(CancellationToken.None);
                 return false;
             }
 
-            var decisions = PlanLocationRetentionWork.Decisions(
-                await PlanLocationRetentionWork.LoadAsync(context, _databaseId, now, cancellationToken));
-            if (!decisions.TryGetValue(file.Id, out var decision) || !PlanLocationRecovery.IsDeletable(decision))
-            {
-                file.CancelDeletionLease(now);
-                context.BackupFileStateChanges.Add(new BackupFileStateChange(
-                    Guid.NewGuid(),
-                    file.Id,
-                    file.TaskId,
-                    BackupFileStatus.DeletePending,
-                    BackupFileStatus.Available,
-                    PlanLocationRetentionWork.ReleasedReason,
-                    now));
-                await context.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-                return false;
-            }
-
-            file.RecordDeleted(_leaseToken, now);
+            file.RecordConfirmedUnlink(_leaseToken, now);
             context.BackupFileStateChanges.Add(new BackupFileStateChange(
                 Guid.NewGuid(),
                 file.Id,
@@ -245,8 +228,8 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
                 PlanLocationRetentionWork.DeletedReason,
                 now));
             context.AuditRecords.Add(new(null, "backup.file.plan_retention.commit", "BackupFile", file.Id.ToString("N"), "succeeded", PlanLocationRetentionWork.DeletedReason));
-            await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            await context.SaveChangesAsync(CancellationToken.None);
+            await transaction.CommitAsync(CancellationToken.None);
             return true;
         }
 

@@ -33,6 +33,25 @@ public interface IPlanLocationRetentionStore
         BackupFileRetentionWorkItem work,
         BackupFileRetentionCommitCommand command,
         CancellationToken cancellationToken = default);
+
+    /// <summary>读取一条已到期、且当前不再可删的计划副本租约，不修改状态。</summary>
+    Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ReadExpiredProtectedAsync(
+        Guid databaseId,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>在探测之后收口过期租约：文件还在则回到可用，已经不在则记为缺失。</summary>
+    Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ResolveExpiredAsync(
+        Guid fileId,
+        Guid leaseToken,
+        bool stillPresent,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken = default);
+}
+
+public static class PlanCopyDeletionReasons
+{
+    public const string Busy = "plan.retention.busy";
 }
 
 /// <summary>
@@ -68,6 +87,17 @@ public sealed class PlanLocationRetentionRunner(
     public async Task<bool> RunOnceAsync(Guid databaseId, CancellationToken cancellationToken = default)
     {
         var now = clock.GetUtcNow();
+        var expired = await store.ReadExpiredProtectedAsync(databaseId, now, cancellationToken);
+        if (expired.Code == BackupTaskStoreResultCode.Succeeded && expired.Value is not null)
+        {
+            return await ResolveExpiredCopyAsync(expired.Value, cancellationToken);
+        }
+
+        if (expired.Code != BackupTaskStoreResultCode.NotFound)
+        {
+            return false;
+        }
+
         var claimed = await store.ClaimNextAsync(
             databaseId,
             new ClaimBackupFileDeletionCommand(Guid.NewGuid(), Guid.NewGuid(), "plan-retention", now, now.AddMinutes(2)),
@@ -130,7 +160,6 @@ public sealed class PlanLocationRetentionRunner(
             return true;
         }
 
-        await store.RefreshAsync(work.FileId, work.LeaseToken, clock.GetUtcNow(), cancellationToken);
         if (deleted.Outcome == BackupFileStorageOutcome.ConfirmedFailed
             && deleted.Failure?.Code != BackupFileStorageFailureCode.OperationRejected)
         {
@@ -141,5 +170,31 @@ public sealed class PlanLocationRetentionRunner(
         }
 
         return false;
+    }
+
+    private async Task<bool> ResolveExpiredCopyAsync(BackupFileRetentionWorkItem work, CancellationToken cancellationToken)
+    {
+        BackupFileStorageResult<BackupFileMetadata> inspect;
+        try
+        {
+            inspect = await probe.InspectAsync(work.Endpoint, work.Path, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        if (!inspect.IsSucceeded || inspect.Value is null)
+        {
+            return false;
+        }
+
+        var resolved = await store.ResolveExpiredAsync(
+            work.FileId,
+            work.LeaseToken,
+            inspect.Value.Exists,
+            clock.GetUtcNow(),
+            cancellationToken);
+        return resolved.Code == BackupTaskStoreResultCode.Succeeded;
     }
 }

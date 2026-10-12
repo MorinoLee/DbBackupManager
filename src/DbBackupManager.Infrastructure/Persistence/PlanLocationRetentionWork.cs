@@ -13,6 +13,43 @@ internal static class PlanLocationRetentionWork
     internal const string ReleasedReason = "plan.retention.protected";
     internal const string DeletedReason = "plan.retention.deleted";
 
+    /// <summary>
+    /// 只有计划任务、v3 命名规则且已关联备份集的副本由计划保留处理。其余租约保持原样。
+    /// </summary>
+    internal static bool IsPlanCopy(BackupFile file, BackupTask? task, BackupTaskSnapshot? snapshot) =>
+        task?.PlanId is not null
+        && snapshot is not null
+        && snapshot.DatabaseId == file.DatabaseId
+        && snapshot.FileNameRuleVersion == "v3"
+        && file.BackupSetId is not null;
+
+    internal static async Task<HashSet<Guid>> PlanCopyIdsAsync(
+        PlatformDbContext db,
+        Guid databaseId,
+        CancellationToken cancellationToken)
+    {
+        var files = await db.BackupFiles.AsNoTracking()
+            .Where(file => file.DatabaseId == databaseId)
+            .ToListAsync(cancellationToken);
+        var taskIds = files.Select(file => file.TaskId).Distinct().ToArray();
+        var tasks = await db.BackupTasks.AsNoTracking()
+            .Where(task => taskIds.Contains(task.Id))
+            .ToListAsync(cancellationToken);
+        var snapshots = await db.BackupTaskSnapshots.AsNoTracking()
+            .Where(snapshot => taskIds.Contains(snapshot.TaskId))
+            .ToListAsync(cancellationToken);
+        var taskById = tasks.ToDictionary(task => task.Id);
+        var snapshotByTask = snapshots.GroupBy(snapshot => snapshot.TaskId)
+            .ToDictionary(group => group.Key, group => group.First());
+        return files
+            .Where(file => IsPlanCopy(
+                file,
+                taskById.GetValueOrDefault(file.TaskId),
+                snapshotByTask.GetValueOrDefault(file.TaskId)))
+            .Select(file => file.Id)
+            .ToHashSet();
+    }
+
     internal static async Task<IReadOnlyList<PlanLocationAssessment>> LoadAsync(
         PlatformDbContext db,
         Guid databaseId,
@@ -121,6 +158,7 @@ internal static class PlanLocationRetentionWork
         DateTimeOffset nowUtc,
         CancellationToken cancellationToken)
     {
+        var planCopies = await PlanCopyIdsAsync(db, databaseId, cancellationToken);
         var assessments = await LoadAsync(db, databaseId, nowUtc, cancellationToken);
         var decisions = assessments.SelectMany(assessment => assessment.Copies).ToDictionary(copy => copy.FileId);
         var pending = await db.BackupFiles.AsTracking()
@@ -129,7 +167,11 @@ internal static class PlanLocationRetentionWork
         var changed = false;
         foreach (var file in pending)
         {
-            if (decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.IsDeletable(decision))
+            // 过期租约留给事务外的文件探测。删除执行者持有会话锁时，未到期租约不可能正处在解开之后。
+            if (!planCopies.Contains(file.Id)
+                || file.DeletionLeaseExpiresAtUtc is null
+                || file.DeletionLeaseExpiresAtUtc <= nowUtc
+                || (decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.IsDeletable(decision)))
             {
                 continue;
             }

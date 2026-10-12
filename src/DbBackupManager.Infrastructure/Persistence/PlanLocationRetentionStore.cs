@@ -4,6 +4,7 @@ using DbBackupManager.Application.FileStorage;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Entities;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace DbBackupManager.Infrastructure.Persistence;
@@ -59,6 +60,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             await PlanLocationRetentionWork.ReleaseSupersededAsync(context, databaseId, command.AcquiredAtUtc, token);
             var assessments = await PlanLocationRetentionWork.LoadAsync(context, databaseId, command.AcquiredAtUtc, token);
             var decisions = PlanLocationRetentionWork.Decisions(assessments);
+            var planCopies = await PlanLocationRetentionWork.PlanCopyIdsAsync(context, databaseId, token);
             var expired = await context.BackupFiles.AsTracking()
                 .Where(file => file.DatabaseId == databaseId
                     && file.Status == BackupFileStatus.DeletePending
@@ -67,16 +69,10 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                 .ToListAsync(token);
             foreach (var file in expired)
             {
-                if (!decisions.TryGetValue(file.Id, out var decision) || !PlanLocationRecovery.IsDeletable(decision))
+                if (!planCopies.Contains(file.Id)
+                    || !decisions.TryGetValue(file.Id, out var decision)
+                    || !PlanLocationRecovery.IsDeletable(decision))
                 {
-                    file.CancelDeletionLease(command.AcquiredAtUtc);
-                    context.BackupFileStateChanges.Add(Change(
-                        Guid.NewGuid(),
-                        file,
-                        BackupFileStatus.DeletePending,
-                        BackupFileStatus.Available,
-                        PlanLocationRetentionWork.ReleasedReason,
-                        command.AcquiredAtUtc));
                     continue;
                 }
 
@@ -159,7 +155,22 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
         }
 
         var now = RequireUtc(nowUtc, nameof(nowUtc));
-        return ExecuteAsync(async (context, token) =>
+        return RefreshCoreAsync(fileId, leaseToken, now, cancellationToken);
+    }
+
+    private async Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> RefreshCoreAsync(
+        Guid fileId,
+        Guid leaseToken,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var databaseId = await LookupDatabaseIdAsync(fileId, cancellationToken);
+        if (databaseId is null)
+        {
+            return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.NotFound);
+        }
+
+        return await ExecuteAsync(databaseId.Value, async (context, token) =>
         {
             var file = await context.BackupFiles.AsTracking().SingleOrDefaultAsync(item => item.Id == fileId, token);
             if (file is null)
@@ -167,12 +178,6 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                 return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.NotFound);
             }
 
-            if (!await PlanRetentionLock.TryAcquireAsync(context, file.DatabaseId, token))
-            {
-                return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.DatabaseBlocked);
-            }
-
-            await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, file.DatabaseId, token);
             if (file.DeletionLeaseToken != leaseToken || file.Status != BackupFileStatus.DeletePending)
             {
                 return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
@@ -181,6 +186,12 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             if (file.DeletionLeaseExpiresAtUtc is null || file.DeletionLeaseExpiresAtUtc <= now)
             {
                 return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.LeaseLost);
+            }
+
+            var planCopies = await PlanLocationRetentionWork.PlanCopyIdsAsync(context, file.DatabaseId, token);
+            if (!planCopies.Contains(file.Id))
+            {
+                return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
             }
 
             var decisions = PlanLocationRetentionWork.Decisions(
@@ -309,6 +320,129 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
         }, cancellationToken);
     }
 
+    public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ReadExpiredProtectedAsync(
+        Guid databaseId,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken = default)
+    {
+        RequireDatabase(databaseId);
+        var now = RequireUtc(nowUtc, nameof(nowUtc));
+        return ExecuteAsync(databaseId, async (context, token) =>
+        {
+            var planCopies = await PlanLocationRetentionWork.PlanCopyIdsAsync(context, databaseId, token);
+            var decisions = PlanLocationRetentionWork.Decisions(
+                await PlanLocationRetentionWork.LoadAsync(context, databaseId, now, token));
+            var expired = await context.BackupFiles.AsNoTracking()
+                .Where(file => file.DatabaseId == databaseId
+                    && file.Status == BackupFileStatus.DeletePending
+                    && file.DeletionLeaseExpiresAtUtc <= now)
+                .OrderBy(file => file.Id)
+                .ToListAsync(token);
+            foreach (var file in expired)
+            {
+                if (!planCopies.Contains(file.Id))
+                {
+                    continue;
+                }
+
+                if (decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.IsDeletable(decision))
+                {
+                    continue;
+                }
+
+                var endpoint = await BackupFileRetentionStore.TryCreateEndpointAsync(context, file, true, token);
+                if (endpoint is null)
+                {
+                    continue;
+                }
+
+                return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(
+                    BackupTaskStoreResultCode.Succeeded,
+                    WorkItem(file, endpoint));
+            }
+
+            return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.NotFound);
+        }, cancellationToken);
+    }
+
+    public async Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ResolveExpiredAsync(
+        Guid fileId,
+        Guid leaseToken,
+        bool stillPresent,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (fileId == Guid.Empty || leaseToken == Guid.Empty)
+        {
+            throw new ArgumentException("收口过期删除必须提供副本和租约标识。");
+        }
+
+        var now = RequireUtc(nowUtc, nameof(nowUtc));
+        var databaseId = await LookupDatabaseIdAsync(fileId, cancellationToken);
+        if (databaseId is null)
+        {
+            return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.NotFound);
+        }
+
+        return await ExecuteAsync(databaseId.Value, async (context, token) =>
+        {
+            var file = await context.BackupFiles.AsTracking().SingleOrDefaultAsync(item => item.Id == fileId, token);
+            if (file is null)
+            {
+                return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.NotFound);
+            }
+
+            if (file.Status != BackupFileStatus.DeletePending || file.DeletionLeaseToken != leaseToken)
+            {
+                return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
+            }
+
+            if (file.DeletionLeaseExpiresAtUtc is null || file.DeletionLeaseExpiresAtUtc > now)
+            {
+                return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
+            }
+
+            var planCopies = await PlanLocationRetentionWork.PlanCopyIdsAsync(context, file.DatabaseId, token);
+            if (!planCopies.Contains(file.Id))
+            {
+                return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
+            }
+
+            var decisions = PlanLocationRetentionWork.Decisions(
+                await PlanLocationRetentionWork.LoadAsync(context, file.DatabaseId, now, token));
+            var deletable = decisions.TryGetValue(file.Id, out var decision) && PlanLocationRecovery.IsDeletable(decision);
+            if (stillPresent && deletable)
+            {
+                return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.Protected);
+            }
+
+            var from = file.Status;
+            if (stillPresent)
+            {
+                file.ResolveExpiredDeletion(leaseToken, now, true);
+            }
+            else
+            {
+                file.ResolveExpiredDeletion(leaseToken, now, false);
+            }
+
+            var reason = stillPresent ? PlanLocationRetentionWork.ReleasedReason : "file.missing";
+            context.BackupFileStateChanges.Add(Change(Guid.NewGuid(), file, from, file.Status, reason, now));
+            context.AuditRecords.Add(Audit(file.Id, "backup.file.plan_retention.resolve", reason));
+            await context.SaveChangesAsync(token);
+            return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.Succeeded);
+        }, cancellationToken);
+    }
+
+    private async Task<Guid?> LookupDatabaseIdAsync(Guid fileId, CancellationToken cancellationToken)
+    {
+        await using var lookup = await contextFactory.CreateDbContextAsync(cancellationToken);
+        return await lookup.BackupFiles.AsNoTracking()
+            .Where(file => file.Id == fileId)
+            .Select(file => (Guid?)file.DatabaseId)
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+
     private async Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ExecuteAsync(
         Guid databaseId,
         Func<PlatformDbContext, CancellationToken, Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>>> operation,
@@ -332,6 +466,10 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                 return await operation(context, token);
             }, cancellationToken);
         }
+        catch (Exception exception) when (IsDeadlock(exception))
+        {
+            return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.DatabaseBlocked);
+        }
         catch (DbUpdateException)
         {
             return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.ConcurrencyConflict);
@@ -352,6 +490,19 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             await transaction.CommitAsync(cancellationToken);
             return result;
         });
+    }
+
+    private static bool IsDeadlock(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sql && sql.Number == 1205)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static BackupFileRetentionWorkItem WorkItem(BackupFile file, BackupFileEndpointInput endpoint) =>

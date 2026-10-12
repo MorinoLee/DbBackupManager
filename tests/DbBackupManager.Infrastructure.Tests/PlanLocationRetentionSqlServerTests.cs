@@ -109,7 +109,6 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now));
         Assert.Equal(chain.LocalFileId(40), claimed.Value!.FileId);
         var diff = await SeedRunningDifferentialAsync(chain, 40);
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await BackupSetTestData.RegisterAsync(database, diff)).Code);
         await using (var db = database.CreateContext())
         {
             var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
@@ -157,6 +156,170 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         Assert.Equal(BackupFileLocation.Remote, claimed.Value.Location);
         await using var db = database.CreateContext();
         Assert.Equal(BackupFileStatus.Available, (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status);
+    }
+
+    [Fact]
+    public async Task ConfirmedUnlinkIsRecordedAfterTheLeaseExpires()
+    {
+        var chain = await SeedChainAsync();
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now) with { ExpiresAtUtc = now.AddMinutes(5) });
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        var protocol = new DeletingProtocol();
+        var adapter = new BackupFileStorageAdapter(
+            [protocol],
+            new BackupArtifactDeletionGuard(Factory(), TimeProvider.System),
+            new PlanCopyDeletionCoordinator(Factory(), new SteppingClock(now)));
+        var deleted = await adapter.DeleteAsync(DeleteRequest(claimed.Value!));
+
+        Assert.Equal(BackupFileStorageOutcome.Succeeded, deleted.Outcome);
+        Assert.Equal(1, protocol.Deletes);
+        await using var db = database.CreateContext();
+        var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+        Assert.Equal(BackupFileStatus.Deleted, file.Status);
+        Assert.Equal(now.AddMinutes(10), file.DeletedAtUtc);
+        Assert.Null(file.DeletionLeaseToken);
+    }
+
+    [Fact]
+    public async Task DeletePendingBaseRejectsDifferentialAndMissingProbeDoesNotRestoreAvailable()
+    {
+        var chain = await SeedChainAsync();
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now) with { ExpiresAtUtc = now.AddMinutes(1) });
+        Assert.Equal(chain.LocalFileId(40), claimed.Value!.FileId);
+        var diff = await SeedRunningDifferentialAsync(chain, 40, registerSet: false);
+        Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await BackupSetTestData.RegisterAsync(database, diff)).Code);
+        await using (var db = database.CreateContext())
+        {
+            var pending = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+            Assert.Equal(BackupFileStatus.DeletePending, pending.Status);
+            Assert.Equal(claimed.Value.LeaseToken, pending.DeletionLeaseToken);
+        }
+
+        await StartOpenPlanTaskAsync(chain);
+        var later = now.AddMinutes(2);
+        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(chain.DatabaseId, Claim(later))).Code);
+        await using (var db = database.CreateContext())
+        {
+            var pending = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+            Assert.Equal(BackupFileStatus.DeletePending, pending.Status);
+            Assert.Equal(claimed.Value.LeaseToken, pending.DeletionLeaseToken);
+        }
+
+        var expired = await store.ReadExpiredProtectedAsync(chain.DatabaseId, later);
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, expired.Code);
+        Assert.Equal(chain.LocalFileId(40), expired.Value!.FileId);
+        var resolved = await store.ResolveExpiredAsync(expired.Value.FileId, expired.Value.LeaseToken, stillPresent: false, later);
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, resolved.Code);
+        await using (var db = database.CreateContext())
+        {
+            var missing = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+            Assert.Equal(BackupFileStatus.Missing, missing.Status);
+            Assert.Null(missing.DeletionLeaseToken);
+            Assert.True(missing.DeletionAttemptCount >= 1);
+        }
+    }
+
+    [Fact]
+    public async Task ExpiredProtectedCopyReturnsToAvailableWhenTheFileRemains()
+    {
+        var chain = await SeedChainAsync();
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now) with { ExpiresAtUtc = now.AddMinutes(1) });
+        await StartOpenPlanTaskAsync(chain);
+        var later = now.AddMinutes(2);
+        var expired = await store.ReadExpiredProtectedAsync(chain.DatabaseId, later);
+        Assert.Equal(chain.LocalFileId(40), expired.Value!.FileId);
+        var resolved = await store.ResolveExpiredAsync(expired.Value.FileId, expired.Value.LeaseToken, stillPresent: true, later);
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, resolved.Code);
+        await using var db = database.CreateContext();
+        var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+        Assert.Equal(BackupFileStatus.Available, file.Status);
+        Assert.Equal(0, file.DeletionAttemptCount);
+        Assert.Null(file.DeletionLeaseToken);
+    }
+
+    [Fact]
+    public async Task LegacyBackupSetLeaseIsLeftUntouched()
+    {
+        var work = await BackupSetTestData.WorkAsync(database);
+        var command = BackupSetTestData.Command(work);
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await BackupSetTestData.RegisterAsync(database, command)).Code);
+        var now = DateTimeOffset.UtcNow;
+        var token = Guid.NewGuid();
+        Guid fileId;
+        Guid databaseId;
+        await using (var db = database.CreateContext())
+        {
+            var snapshot = await db.BackupTaskSnapshots.SingleAsync(item => item.TaskId == work.Task.TaskId);
+            Assert.NotEqual("v3", snapshot.FileNameRuleVersion);
+            databaseId = snapshot.DatabaseId;
+            var file = BackupFile.CreateLocal(
+                Guid.NewGuid(), work.Task.TaskId, work.Lease.BackupAttemptId, snapshot.DatabaseId, snapshot.ServerId,
+                FileTransferProtocol.Smb, work.Attempt.WorkerSourceFilePath, 4096, now, snapshot.LocalRetentionDays ?? 7);
+            file.AssociateBackupSet(command.BackupSetId);
+            file.ClaimDeletion(token, "旧策略删除", now, now.AddMinutes(10));
+            db.Add(file);
+            await db.SaveChangesAsync();
+            fileId = file.Id;
+            var stored = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == fileId);
+            var coordinator = new PlanCopyDeletionCoordinator(Factory(), TimeProvider.System);
+            await using var permit = await coordinator.OpenAsync(new(
+                new(stored.Protocol, "synthetic-host", null, "synthetic-share", snapshot.SourceCredentialReferenceId, null),
+                stored.Path, stored.LengthBytes, null, 30,
+                new(stored.TaskId, null, stored.Id, BackupArtifactPathRole.RegisteredFile, token, stored.RowVersion)));
+            Assert.False(permit.Applies);
+        }
+
+        var store = new PlanLocationRetentionStore(Factory());
+        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(databaseId, Claim(now))).Code);
+        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ReadExpiredProtectedAsync(databaseId, now.AddHours(1))).Code);
+        Assert.Equal(
+            BackupTaskStoreResultCode.StateMismatch,
+            (await store.ResolveExpiredAsync(fileId, token, stillPresent: false, now.AddHours(1))).Code);
+        await using (var db = database.CreateContext())
+        {
+            var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == fileId);
+            Assert.Equal(BackupFileStatus.DeletePending, file.Status);
+            Assert.Equal(token, file.DeletionLeaseToken);
+        }
+    }
+
+    [Fact]
+    public async Task GuardStillRunsAfterAPlanPermitAllowsDeletion()
+    {
+        var chain = await SeedChainAsync();
+        var now = DateTimeOffset.UtcNow;
+        var store = new PlanLocationRetentionStore(Factory());
+        var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now));
+        var protocol = new DeletingProtocol();
+        var blocked = new BackupFileStorageAdapter(
+            [protocol],
+            new FixedGuard(false, "artifact.owner_unknown"),
+            new PlanCopyDeletionCoordinator(Factory(), TimeProvider.System));
+        var refused = await blocked.DeleteAsync(DeleteRequest(claimed.Value!));
+        Assert.Equal(BackupFileStorageOutcome.ConfirmedFailed, refused.Outcome);
+        Assert.Equal(0, protocol.Deletes);
+        await using (var db = database.CreateContext())
+        {
+            Assert.Equal(BackupFileStatus.DeletePending, (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status);
+        }
+
+        var allowed = new BackupFileStorageAdapter(
+            [protocol],
+            new FixedGuard(false, "plan.copy.protected"),
+            new PlanCopyDeletionCoordinator(Factory(), TimeProvider.System));
+        var deleted = await allowed.DeleteAsync(DeleteRequest(claimed.Value!));
+        Assert.Equal(BackupFileStorageOutcome.Succeeded, deleted.Outcome);
+        Assert.Equal(1, protocol.Deletes);
+        await using (var db = database.CreateContext())
+        {
+            Assert.Equal(BackupFileStatus.Deleted, (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status);
+        }
     }
 
     private BackupExecutionContractSqlServerTests.Factory Factory() => new(database);
@@ -227,7 +390,10 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         return chain;
     }
 
-    private async Task<RegisterBackupSetCommand> SeedRunningDifferentialAsync(Chain chain, int age)
+    private Task<RegisterBackupSetCommand> SeedRunningDifferentialAsync(Chain chain, int age, bool registerSet = true) =>
+        SeedRunningDifferentialAsyncCore(chain, age, registerSet);
+
+    private async Task<RegisterBackupSetCommand> SeedRunningDifferentialAsyncCore(Chain chain, int age, bool registerSet)
     {
         await using var db = database.CreateContext();
         var old = await db.BackupTaskSnapshots.AsNoTracking().FirstAsync(item => item.DatabaseId == chain.DatabaseId && item.Purpose != null);
@@ -255,7 +421,7 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var now = DateTimeOffset.UtcNow;
         var created = await CreateBackupAsync(old, version, chain.TargetId, BackupRunPurpose.PlanDifferential, now, now,
             new(now.AddDays(-1), BackupCompletionTimeSource.PlatformObserved, BackupCompletionTimeReason.PlatformObserved),
-            false, facts, BackupSetAssessment.FromDecision(decision), decision.ManagedFullId);
+            false, facts, BackupSetAssessment.FromDecision(decision), decision.ManagedFullId, registerSet);
         return created.Command;
     }
 
@@ -270,7 +436,8 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         bool includeBaseline,
         BackupSetMetadata metadata,
         BackupSetAssessment? assessment,
-        Guid? baseBackupSetId)
+        Guid? baseBackupSetId,
+        bool registerSet = true)
     {
         await using var db = database.CreateContext();
         var task = BackupTask.ForPlan(Guid.NewGuid(), version.PlanId, version.Id, purpose, BackupTaskTriggerType.Manual, null);
@@ -304,8 +471,11 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
             : [];
         var command = new RegisterBackupSetCommand(stored.ToLeaseHandle(), Guid.NewGuid(), old.DatabaseId, Guid.NewGuid(), observedAt,
             metadata, completion, assessment ?? BackupSetAssessment.NotApplicable, baseBackupSetId, true, observations);
-        var registered = await BackupSetTestData.RegisterAsync(database, command);
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded, registered.Code);
+        if (registerSet)
+        {
+            var registered = await BackupSetTestData.RegisterAsync(database, command);
+            Assert.Equal(BackupTaskStoreResultCode.Succeeded, registered.Code);
+        }
         var attemptStored = await db.BackupAttempts.AsNoTracking().SingleAsync(item => item.Id == attemptId);
         return new(task.Id, attemptId, leaseToken, old.DatabaseId, old.ServerId, targetId, command, attemptStored.WorkerSourceFilePath, attemptStored.RemoteFinalFilePath!, metadata);
     }
@@ -400,6 +570,53 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         public void Bind(Chain chain, int age) { _chain = chain; _age = age; }
         public void RememberLocal(Guid fileId) => _chain!.RememberLocal(_age, fileId);
         public void RememberRemote(Guid fileId) => _chain!.RememberRemote(_age, fileId);
+    }
+
+    private async Task StartOpenPlanTaskAsync(Chain chain)
+    {
+        await using var db = database.CreateContext();
+        var old = await db.BackupTaskSnapshots.AsNoTracking()
+            .FirstAsync(item => item.DatabaseId == chain.DatabaseId && item.Purpose != null);
+        var versionId = await db.BackupPlans.AsNoTracking()
+            .Where(plan => plan.DatabaseId == chain.DatabaseId)
+            .Select(plan => EF.Property<Guid?>(plan, "_currentVersionId"))
+            .SingleAsync() ?? throw new InvalidOperationException("计划没有当前版本。");
+        var version = await db.BackupPlanVersions.SingleAsync(item => item.Id == versionId);
+        var now = DateTimeOffset.UtcNow;
+        var task = BackupTask.ForPlan(Guid.NewGuid(), version.PlanId, version.Id, BackupRunPurpose.PlanFull, BackupTaskTriggerType.Manual, null);
+        var snapshot = BackupTaskSnapshot.ForPlan(task, version, "合成保留计划", BackupRunPurpose.PlanFull,
+            new(old.ServerId, old.ServerName, old.InstanceId, old.InstanceName, old.DatabaseId, old.DatabaseName),
+            new(old.ConnectionAddress, old.SqlCredentialReferenceId, old.EncryptConnection, old.TrustServerCertificate,
+                old.CertificateTrustReason, old.ConnectionTimeoutSeconds, old.AllowLegacyTls, old.LegacyTlsReason),
+            new(old.LocalSqlBackupRootPath, "v3", new(old.SourceAccessProtocol, old.SourceAccessHost, old.SourceAccessPort,
+                old.SourceAccessBasePath, old.SourceCredentialReferenceId, old.SourceSftpHostKeyFingerprint)),
+            new(chain.TargetId, new(FileTransferProtocol.Smb, "synthetic-host", null, "synthetic-share", old.SourceCredentialReferenceId, null)));
+        var attemptId = Guid.NewGuid();
+        var attempt = new BackupAttempt(attemptId, task.Id, 1, now, new(
+            $@"D:\Synthetic\Backup\{attemptId:N}.bak",
+            $@"\\synthetic-host\synthetic-share\{attemptId:N}.bak",
+            chain.TargetId,
+            $@"\\synthetic-host\synthetic-share\{attemptId:N}.bak.part",
+            $@"\\synthetic-host\synthetic-share\{attemptId:N}-remote.bak"));
+        attempt.BindSqlIdentity(Guid.NewGuid(), Guid.NewGuid());
+        task.ClaimExecution(version.StorageMode, attemptId, Guid.NewGuid(), "合成活动任务", now, now.AddHours(1));
+        db.AddRange(task, snapshot, attempt);
+        await db.SaveChangesAsync();
+    }
+
+    private sealed class SteppingClock(DateTimeOffset start) : TimeProvider
+    {
+        private int _calls;
+
+        public override DateTimeOffset GetUtcNow() =>
+            Interlocked.Increment(ref _calls) == 1 ? start : start.AddMinutes(10);
+    }
+
+    private sealed class FixedGuard(bool allowed, string? reason) : IBackupArtifactDeletionGuard
+    {
+        public Task<BackupArtifactDeletionDecision> EvaluateAsync(
+            BackupFileDeleteRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new BackupArtifactDeletionDecision(allowed, reason));
     }
 
     private sealed class DeletingProtocol : IFileStorageProtocolSessionFactory

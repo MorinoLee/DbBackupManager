@@ -124,7 +124,7 @@ internal sealed partial class BackupPlanExecutionStore
                     identity.ObservedAtUtc, facts.Metadata, facts.Completion, facts.Assessment, facts.ActualBaseBackupSetId, true,
                     observations.Select(x => new BackupSetObservation(Enum.Parse<BackupSetEvidenceSource>(x.Source.ToString()), x.Kind,
                         x.Facts.Metadata, x.Facts.Completion, x.Facts.Assessment)).ToArray());
-                var registered = await BackupSetRegistrationStore.RegisterInTransactionAsync(db, command, cancellationToken);
+                var registered = await BackupSetRegistrationStore.RegisterInTransactionAsync(db, command, now, cancellationToken);
                 if (!registered.IsSucceeded) return BackupExecutionContractCode.Conflict;
                 var set = await db.BackupSets.SingleAsync(x => x.AttemptId == attempt.Id, cancellationToken);
                 var rows = await db.BackupSetEvidence.Where(x => x.AttemptId == attempt.Id).ToArrayAsync(cancellationToken);
