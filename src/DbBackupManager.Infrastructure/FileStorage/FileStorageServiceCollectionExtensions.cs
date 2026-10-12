@@ -1,3 +1,4 @@
+using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -15,7 +16,10 @@ public static class FileStorageServiceCollectionExtensions
         services.TryAddScoped<BackupPlanFileAdapter>();
         services.TryAddScoped<IBackupFileContentVerifier>(p => p.GetRequiredService<BackupPlanFileAdapter>());
         services.TryAddScoped<IBackupPlanFileTransferExecutor>(p => p.GetRequiredService<BackupPlanFileAdapter>());
-        services.TryAddScoped<BackupFileStorageAdapter>();
+        services.TryAddScoped<BackupFileStorageAdapter>(provider => new BackupFileStorageAdapter(
+            provider.GetServices<IFileStorageProtocolSessionFactory>(),
+            provider.GetService<IBackupArtifactDeletionGuard>(),
+            provider.GetService<IPlanCopyDeletionCoordinator>()));
         services.TryAddScoped<IBackupFileStorageProbe>(provider =>
             provider.GetRequiredService<BackupFileStorageAdapter>());
         services.TryAddScoped<IBackupDirectoryPreparer>(provider =>

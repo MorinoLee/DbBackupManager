@@ -242,6 +242,27 @@ public sealed class BackupFile : ConcurrentEntity
         DeletionLeaseExpiresAtUtc = expiry;
     }
 
+    /// <summary>
+    /// 新的恢复依赖已经否定删除资格时，取消尚未执行的删除租约。
+    /// 可用状态的删除次数必须回到 0，才能满足副本状态约束。
+    /// </summary>
+    public void CancelDeletionLease(DateTimeOffset utcNow)
+    {
+        _ = BackupTaskValues.RequireUtc(utcNow, nameof(utcNow));
+        if (Status != BackupFileStatus.DeletePending)
+        {
+            throw new InvalidOperationException("只有待删除副本可以因保护取消租约。");
+        }
+
+        Status = BackupFileStatus.Available;
+        DeletionAttemptCount = 0;
+        NextDeletionAttemptAtUtc = null;
+        DeletionErrorCode = null;
+        DeletedAtUtc = null;
+        MissingDetectedAtUtc = null;
+        ClearDeletionLease();
+    }
+
     public void RecordDeleted(Guid leaseToken, DateTimeOffset deletedAtUtc)
     {
         var deletedAt = BackupTaskValues.RequireUtc(deletedAtUtc, nameof(deletedAtUtc));

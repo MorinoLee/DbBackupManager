@@ -41,6 +41,8 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
         PlatformDbContext db, RegisterBackupSetCommand command, CancellationToken token)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, token);
+        if (!await PlanRetentionLock.TryAcquireAsync(db, command.DatabaseId, token))
+            return new(BackupTaskStoreResultCode.DatabaseBlocked);
         var result = await RegisterInTransactionAsync(db, command, token);
         await transaction.CommitAsync(token);
         return result;
@@ -88,6 +90,10 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
                 x => x.Id == baseId && x.DatabaseId == command.DatabaseId, token);
             if (full is null || !DependencyMatches(command.Metadata, full))
                 return new(BackupTaskStoreResultCode.StateMismatch);
+            var baseCopies = await db.BackupFiles.Where(file => file.BackupSetId == baseId
+                && file.DatabaseId == command.DatabaseId).ToListAsync(token);
+            if (baseCopies.Count > 0 && baseCopies.All(file => file.Status is BackupFileStatus.Deleted or BackupFileStatus.Missing))
+                return new(BackupTaskStoreResultCode.StateMismatch);
         }
         if (set is null && !duplicateGuid)
         {
@@ -132,6 +138,7 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
                 observation.Kind, observation.Metadata, observation.Completion, observation.Assessment);
         }
         await db.SaveChangesAsync(token);
+        await PlanLocationRetentionWork.ReleaseSupersededAsync(db, command.DatabaseId, DateTimeOffset.UtcNow, token);
         return new(BackupTaskStoreResultCode.Succeeded,
             new(setId, check, assessment.ReasonCode == DifferentialBaselineReason.SourceConflict, assessment));
     }
@@ -186,6 +193,8 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
         return _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            if (!await PlanRetentionLock.TryAcquireAsync(db, file.DatabaseId, cancellationToken))
+                return new BackupTaskStoreResult<BackupFile>(BackupTaskStoreResultCode.DatabaseBlocked);
             var task = await LockTaskAsync(db, lease.TaskId, cancellationToken);
             if (task is null) return new BackupTaskStoreResult<BackupFile>(BackupTaskStoreResultCode.NotFound);
             var set = await db.BackupSets.SingleOrDefaultAsync(x => x.Id == file.BackupSetId
@@ -205,6 +214,7 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
             if (invalidLease is not null) return new(invalidLease.Value);
             db.BackupFiles.Add(file);
             await db.SaveChangesAsync(cancellationToken);
+            await PlanLocationRetentionWork.ReleaseSupersededAsync(db, file.DatabaseId, DateTimeOffset.UtcNow, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return new(BackupTaskStoreResultCode.Succeeded, file);
         }, cancellationToken);

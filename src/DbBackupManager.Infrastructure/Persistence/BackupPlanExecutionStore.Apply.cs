@@ -20,7 +20,9 @@ internal sealed partial class BackupPlanExecutionStore
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == identity.TaskId, cancellationToken);
             if (snapshot is null) return BackupExecutionContractCode.NotFound;
-            // 与授权/终止使用相同的数据库→任务锁顺序，事务内不发生文件或 SQL I/O。
+            // 先取保留协调锁，再锁数据库和任务，避免与删除许可交叉等待。
+            if (!await PlanRetentionLock.TryAcquireAsync(db, snapshot.DatabaseId, cancellationToken))
+                return BackupExecutionContractCode.DatabaseBlocked;
             await BackupInvocationAuthorizationStore.LockDatabaseAsync(db, snapshot.DatabaseId, cancellationToken);
             var task = await LockAsync(db, identity.TaskId, cancellationToken);
             if (task is null || !IsOpen(task, snapshot)) return BackupExecutionContractCode.StageNotOpen;
@@ -212,7 +214,10 @@ internal sealed partial class BackupPlanExecutionStore
             operation.MarkApplied();
             db.AddRange(CreateStateChange(operation.Id, task, before, stage, reason, null, now),
                 CreateAudit(null, task.Id, "plan.stage.apply", successful ? "succeeded" : "unknown", facts.ReasonCode));
+            var addedCopy = db.ChangeTracker.Entries<BackupFile>().Any(entry => entry.State == EntityState.Added);
             await db.SaveChangesAsync(cancellationToken);
+            if (addedCopy)
+                await PlanLocationRetentionWork.ReleaseSupersededAsync(db, snapshot.DatabaseId, now, cancellationToken);
             await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
