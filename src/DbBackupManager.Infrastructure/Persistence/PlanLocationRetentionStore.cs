@@ -385,11 +385,12 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             context.AuditRecords.Add(Audit(file.Id, "backup.file.plan_retention.commit", Reason(command.Outcome)));
             await context.SaveChangesAsync(token);
             var endpoint = await BackupFileRetentionStore.TryCreateEndpointAsync(context, file, false, token);
+            // 已删除、缺失和失败都会清掉文件上的租约。返回项沿用领取时的租约标识，避免提交成功后回滚。
             return endpoint is null
                 ? new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.Succeeded)
                 : new BackupTaskStoreResult<BackupFileRetentionWorkItem>(
                     BackupTaskStoreResultCode.Succeeded,
-                    WorkItem(file, endpoint));
+                    WorkItem(file, endpoint, work.LeaseToken, work.LeaseExpiresAtUtc));
         }, cancellationToken);
     }
 
@@ -579,6 +580,17 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
     }
 
     private static BackupFileRetentionWorkItem WorkItem(BackupFile file, BackupFileEndpointInput endpoint) =>
+        WorkItem(
+            file,
+            endpoint,
+            file.DeletionLeaseToken ?? throw new InvalidOperationException("删除租约缺少标识。"),
+            file.DeletionLeaseExpiresAtUtc ?? throw new InvalidOperationException("删除租约缺少到期时间。"));
+
+    private static BackupFileRetentionWorkItem WorkItem(
+        BackupFile file,
+        BackupFileEndpointInput endpoint,
+        Guid leaseToken,
+        DateTimeOffset leaseExpiresAtUtc) =>
         new(
             file.Id,
             file.TaskId,
@@ -590,8 +602,8 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             file.Path,
             file.LengthBytes,
             file.Status,
-            file.DeletionLeaseToken ?? throw new InvalidOperationException("删除租约缺少标识。"),
-            file.DeletionLeaseExpiresAtUtc ?? throw new InvalidOperationException("删除租约缺少到期时间。"),
+            leaseToken,
+            leaseExpiresAtUtc,
             file.RowVersion,
             endpoint);
 

@@ -54,7 +54,7 @@ public sealed class BackupPlanExecutionLocalDbTests(PlatformDatabaseSqlServerFix
         await test.AssertCompletedAsync(full, BackupType.Full);
         var before = await test.AssessAsync();
         var fullLocal = before.Single(item => item.Location == BackupFileLocation.Local);
-        Assert.Contains(fullLocal.Copies, copy => copy.Reason == RecoveryProtectionReason.BaselineUnresolved);
+        Assert.Contains(fullLocal.Copies, copy => copy.Reason == RecoveryProtectionReason.ActiveDifferentialBaseline);
         Assert.All(fullLocal.Copies, copy => Assert.False(PlanLocationRecovery.IsStagingReleasable(copy)));
         await using (var db = platform.CreateContext())
         {
@@ -63,9 +63,9 @@ public sealed class BackupPlanExecutionLocalDbTests(PlatformDatabaseSqlServerFix
             Assert.Null(attempt.LocalCleanupCompletedAtUtc);
             Assert.Equal(BackupTaskStage.Cleanup, (await db.BackupTasks.SingleAsync(item => item.Id == full)).CurrentStage);
             Assert.Contains(await db.BackupTaskStateChanges.Where(item => item.TaskId == full).ToArrayAsync(),
-                item => item.ReasonCode == RecoveryProtectionReason.BaselineUnresolved);
+                item => item.ReasonCode == RecoveryProtectionReason.ActiveDifferentialBaseline);
             Assert.Contains(await db.AuditRecords.Where(item => item.TargetId == full.ToString("N")).ToArrayAsync(),
-                item => item.Action == "plan.staging.retain" && item.ReasonCode == RecoveryProtectionReason.BaselineUnresolved);
+                item => item.Action == "plan.staging.retain" && item.ReasonCode == RecoveryProtectionReason.ActiveDifferentialBaseline);
         }
 
         var diff = await test.CreateTaskAsync(BackupRunPurpose.PlanDifferential);

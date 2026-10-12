@@ -471,7 +471,9 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var planMode = mode ?? (remoteOnly ? BackupPlanMode.Full : BackupPlanMode.FullAndDifferential);
         var definition = new BackupPlanDefinition(planMode,
             new(BackupScheduleType.Daily, new(2, 0), BackupWeekdays.None),
-            remoteOnly ? null : new RecurringBackupSchedule(BackupScheduleType.Daily, new(3, 0), BackupWeekdays.None),
+            planMode == BackupPlanMode.Full
+                ? null
+                : new RecurringBackupSchedule(BackupScheduleType.Daily, new(3, 0), BackupWeekdays.None),
             null, "UTC", storageMode, target.Id, localWindow, remoteWindow, true, false, 120, 60, 60);
         var plan = BackupPlan.Create(Guid.NewGuid(), old.DatabaseId, $"合成保留计划-{Guid.NewGuid():N}", Guid.NewGuid(), definition, now);
         var version = plan.CurrentVersion;
