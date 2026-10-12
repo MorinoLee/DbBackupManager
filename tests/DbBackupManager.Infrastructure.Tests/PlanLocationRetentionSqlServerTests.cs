@@ -691,8 +691,8 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         public string RemotePath { get; } = remotePath;
         public BackupSetMetadata Metadata { get; } = metadata;
         public void Bind(Chain chain, int age) { _chain = chain; _age = age; }
-        public void RememberLocal(Guid fileId) => _chain!.RememberLocal(_age, fileId);
-        public void RememberRemote(Guid fileId) => _chain!.RememberRemote(_age, fileId);
+        public void RememberLocal(Guid fileId) => _chain?.RememberLocal(_age, fileId);
+        public void RememberRemote(Guid fileId) => _chain?.RememberRemote(_age, fileId);
     }
 
     private async Task RegisterIndependentFullAsync(Chain chain)
