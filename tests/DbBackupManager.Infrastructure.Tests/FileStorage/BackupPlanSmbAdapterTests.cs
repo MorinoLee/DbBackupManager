@@ -76,7 +76,7 @@ public sealed class BackupPlanSmbAdapterTests
     public async Task SmbCapabilityPathWithoutParentIsRejectedBeforeAnyProbe()
     {
         if (!OperatingSystem.IsWindows()) return;
-        var endpoint = new BackupFileEndpointInput(FileTransferProtocol.Smb, "localhost", null, @"C:\synthetic", Guid.NewGuid(), null);
+        var endpoint = new BackupFileEndpointInput(FileTransferProtocol.Smb, "localhost", null, "synthetic", Guid.NewGuid(), null);
         var result = await new BackupPlanFileAdapter([]).CheckCapabilitiesAsync(new(Guid.NewGuid(), Guid.NewGuid(), endpoint, "file.bak", 30));
         Assert.Equal(BackupFileStorageFailureCode.PathRejected, result.Failure!.Code);
         Assert.Equal(BackupFileStorageFailurePhase.SourceInspection, result.Failure.Phase);

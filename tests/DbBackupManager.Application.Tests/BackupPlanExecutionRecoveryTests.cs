@@ -139,6 +139,16 @@ public sealed class BackupPlanExecutionOutcomeTests
     }
 
     [Fact]
+    public async Task UnobservedCommitResponseLeavesTheLiveLeaseAndDoesNotSuspend()
+    {
+        var session = Session(BackupTaskStage.Backup, BackupStorageMode.LocalOnly, frozenSql: true);
+        var store = new ScriptStore(session, []) { UnobservedApply = true };
+        var runner = Runner(store);
+        await Assert.ThrowsAsync<PlanExecutionUnobservedCommitException>(() => runner.RunTaskOnceAsync(new(store.TaskId, Guid.NewGuid())));
+        Assert.Null(store.SuspendReason);
+    }
+
+    [Fact]
     public async Task LostLeaseAfterNonFinalStageReturnsLeaseLostInsteadOfSuccess()
     {
         var session = Session(BackupTaskStage.Backup, BackupStorageMode.LocalOnly, frozenSql: true);
@@ -239,6 +249,7 @@ public sealed class BackupPlanExecutionOutcomeTests
         public string? SuspendReason { get; private set; }
         public bool FailSuspend { get; init; }
         public bool CancelRefresh { get; init; }
+        public bool UnobservedApply { get; init; }
         public Task<BackupExecutionContractResult<BackupPlanExecutionSession>> OpenAsync(Guid taskId, Guid requestMutationId, bool reconciliationOnly, Guid leaseToken, string owner, DateTimeOffset now, DateTimeOffset expires, CancellationToken cancellationToken = default) =>
             Task.FromResult(new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Succeeded, opened));
         public Task<BackupPlanExecutionSession?> RefreshAsync(Guid taskId, Guid leaseToken, CancellationToken cancellationToken = default)
@@ -253,8 +264,11 @@ public sealed class BackupPlanExecutionOutcomeTests
             Task.FromResult(BackupExecutionContractCode.Succeeded);
         public Task<QualifiedManagedFull?> FindQualifiedFullAsync(Guid databaseId, Guid backupSetGuid, CancellationToken cancellationToken = default) =>
             Task.FromResult<QualifiedManagedFull?>(null);
-        public Task<BackupExecutionContractCode> ApplyAsync(LeaseHandle lease, ReserveBackupExecutionOperation identity, DbBackupManager.Application.FileStorage.IVerifiedBackupFileHandle? protectedFile = null, DbBackupManager.Application.FileStorage.IVerifiedBackupFileHandle? protectedDependency = null, CancellationToken cancellationToken = default) =>
-            Task.FromResult(BackupExecutionContractCode.Succeeded);
+        public Task<BackupExecutionContractCode> ApplyAsync(LeaseHandle lease, ReserveBackupExecutionOperation identity, DbBackupManager.Application.FileStorage.IVerifiedBackupFileHandle? protectedFile = null, DbBackupManager.Application.FileStorage.IVerifiedBackupFileHandle? protectedDependency = null, CancellationToken cancellationToken = default)
+        {
+            if (UnobservedApply) throw new PlanExecutionUnobservedCommitException();
+            return Task.FromResult(BackupExecutionContractCode.Succeeded);
+        }
         public Task<BackupExecutionContractCode> SuspendAsync(LeaseHandle lease, Guid mutationId, string reason, CancellationToken cancellationToken = default)
         {
             SuspendReason = reason;

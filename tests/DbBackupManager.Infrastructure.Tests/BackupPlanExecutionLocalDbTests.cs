@@ -146,6 +146,7 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
         {
             await master.OpenAsync();
             await using (var create = new SqlCommand($"CREATE DATABASE [{name}];", master)) await create.ExecuteNonQueryAsync();
+            await WaitUntilRecoveryIdentityIsVisibleAsync(master, name);
             var factory = new TrackingFactory(platform, interceptors);
             var connections = new LocalSqlConnections(master.ConnectionString, factory);
             var credentials = new SyntheticCredentials();
@@ -333,6 +334,27 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
         {
             await _master.DisposeAsync();
             DeleteTestDirectory(_root);
+        }
+    }
+    // CREATE DATABASE 返回后，sys.database_recovery_status 的 GUID 可能仍为空；准备探针把空值当成无效响应。
+    private static async Task WaitUntilRecoveryIdentityIsVisibleAsync(SqlConnection master, string databaseName)
+    {
+        await using var command = new SqlCommand("""
+            SELECT rs.database_guid, rs.family_guid
+            FROM sys.database_recovery_status AS rs
+            WHERE rs.database_id = DB_ID(@database);
+            """, master);
+        command.Parameters.Add("@database", System.Data.SqlDbType.NVarChar, 128).Value = databaseName;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            var ready = false;
+            await using (var reader = await command.ExecuteReaderAsync())
+                ready = await reader.ReadAsync() && !reader.IsDBNull(0) && !reader.IsDBNull(1);
+            if (ready) return;
+            if (DateTime.UtcNow >= deadline)
+                throw new InvalidOperationException("合成数据库的 database_guid 与 family_guid 在限定时间内没有就绪。");
+            await Task.Delay(200);
         }
     }
     private static void DeleteTestDirectory(string root)

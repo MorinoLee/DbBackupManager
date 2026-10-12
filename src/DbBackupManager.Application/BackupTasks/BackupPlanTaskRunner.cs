@@ -69,7 +69,7 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
             catch { /* 暂停失败仍把取消交给调用方。 */ }
             throw;
         }
-        catch (Exception)
+        catch (Exception exception) when (exception is not PlanExecutionUnobservedCommitException)
         {
             try
             {

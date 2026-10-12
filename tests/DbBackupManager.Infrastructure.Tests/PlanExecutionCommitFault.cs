@@ -55,4 +55,4 @@ internal sealed class PlanExecutionCommitFault(string method, string? kind = nul
         }
     }
 }
-internal sealed class LostPlanCommitResponseException : Exception;
+internal sealed class LostPlanCommitResponseException : PlanExecutionUnobservedCommitException;

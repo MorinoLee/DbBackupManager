@@ -93,6 +93,8 @@ internal sealed class BackupPlanOperationFlow(IBackupPlanExecutionStore store, I
 }
 
 internal sealed class PlanExecutionLeaseLostException : Exception;
+/// <summary>持久化命令返回后响应没有交给调用方。此时不能再写暂停，以免覆盖可能已经提交的租约和事实。</summary>
+internal class PlanExecutionUnobservedCommitException : Exception;
 internal sealed class PlanExecutionConflictException(BackupExecutionContractCode code) : Exception
 {
     public BackupExecutionContractCode Code { get; } = code;
