@@ -44,8 +44,24 @@ internal sealed class SmbFileStorageSessionFactory(
 [SupportedOSPlatform("windows")]
 internal sealed class SmbFileStorageSession(
     BackupFileEndpointInput endpoint,
-    SafeAccessTokenHandle accessToken) : IFileStorageProtocolSession
+    SafeAccessTokenHandle accessToken) : IFileStorageProtocolSession, IProtectedPlanFileSession
 {
+    public NativePlanFileGuard OpenGuarded(string path, bool create, bool rename)
+    {
+        var exact = SmbPathGuard.ValidateExactFilePath(endpoint, path);
+        return WindowsIdentity.RunImpersonated(accessToken, () => NativePlanFileGuard.Open(
+            exact, SmbPathGuard.ParentDirectoryPaths(endpoint, exact), create, rename));
+    }
+
+    public void RenameGuarded(NativePlanFileGuard file, string finalPath)
+    {
+        SmbPathGuard.EnsureSameDirectory(endpoint, file.Path, finalPath);
+        WindowsIdentity.RunImpersonated(accessToken, () => file.RenameNoReplace(finalPath));
+    }
+
+    public void VerifyGuardedCapabilities(NativePlanFileGuard file) =>
+        WindowsIdentity.RunImpersonated(accessToken, file.VerifyShareDenials);
+
     public ValueTask PrepareParentDirectoryAsync(
         string filePath,
         CancellationToken cancellationToken)
@@ -462,7 +478,7 @@ internal static class SmbFileOperations
         }
     }
 
-    private static string GetFinalPath(SafeFileHandle handle)
+    internal static string GetFinalPath(SafeFileHandle handle)
     {
         var buffer = new char[32_768];
         var length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Length, 0);
@@ -479,7 +495,7 @@ internal static class SmbFileOperations
             : path;
     }
 
-    private static string? TryGetIdentity(SafeFileHandle handle)
+    internal static string? TryGetIdentity(SafeFileHandle handle)
     {
         return GetFileInformationByHandle(handle, out var information)
             ? $"{information.VolumeSerialNumber:X8}:{information.FileIndexHigh:X8}{information.FileIndexLow:X8}"

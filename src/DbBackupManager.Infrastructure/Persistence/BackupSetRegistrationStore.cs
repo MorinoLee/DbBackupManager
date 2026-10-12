@@ -41,6 +41,14 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
         PlatformDbContext db, RegisterBackupSetCommand command, CancellationToken token)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, token);
+        var result = await RegisterInTransactionAsync(db, command, token);
+        await transaction.CommitAsync(token);
+        return result;
+    }
+
+    internal static async Task<BackupTaskStoreResult<BackupSetRegistrationResult>> RegisterInTransactionAsync(
+        PlatformDbContext db, RegisterBackupSetCommand command, CancellationToken token)
+    {
         // 锁住任务后校验租约，核对记录与幂等标记在同一短事务提交。
         var task = await LockTaskAsync(db, command.Lease.TaskId, token);
         if (task is null) return new(BackupTaskStoreResultCode.NotFound);
@@ -124,7 +132,6 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
                 observation.Kind, observation.Metadata, observation.Completion, observation.Assessment);
         }
         await db.SaveChangesAsync(token);
-        await transaction.CommitAsync(token);
         return new(BackupTaskStoreResultCode.Succeeded,
             new(setId, check, assessment.ReasonCode == DifferentialBaselineReason.SourceConflict, assessment));
     }

@@ -25,8 +25,9 @@ internal sealed class BackupExecutionOperationStore(IDbContextFactory<PlatformDb
     {
         if (lease.TaskId != identity.TaskId || lease.BackupAttemptId != identity.AttemptId)
             return new(BackupExecutionContractCode.Conflict);
+        var code = await new BackupPlanExecutionStore(factory, clock).ApplyAsync(lease, identity, null, null, cancellationToken);
         var saved = await ReadAsync(identity, cancellationToken);
-        return saved.Value is null ? saved : new(BackupExecutionContractCode.StageNotOpen);
+        return new(code, saved.Value);
     }
 
     public async Task<BackupExecutionContractResult<FrozenBackupExecutionOperation>> ReadAsync(
@@ -78,6 +79,10 @@ internal sealed class BackupExecutionOperationStore(IDbContextFactory<PlatformDb
                 if (operation is null)
                 {
                     if (frozen is not null || abandon) return new BackupExecutionContractResult<FrozenBackupExecutionOperation>(BackupExecutionContractCode.NotFound);
+                    // 与取消更新共享任务行锁；取消先提交时，不预约新的远端写入。
+                    if (task.PlanId is not null && task.CancellationRequestedAtUtc is not null
+                        && identity.Kind is BackupExecutionOperationKind.Transfer or BackupExecutionOperationKind.ValidateCopy)
+                        return new BackupExecutionContractResult<FrozenBackupExecutionOperation>(BackupExecutionContractCode.CancellationRequested);
                     operation = candidate;
                     context.BackupPlanExecutionOperations.Add(operation);
                 }
@@ -92,7 +97,7 @@ internal sealed class BackupExecutionOperationStore(IDbContextFactory<PlatformDb
                 {
                     if (operation.State != BackupExecutionOperationState.Reserved)
                         return new BackupExecutionContractResult<FrozenBackupExecutionOperation>(BackupExecutionContractCode.Conflict);
-                    if (operation.Kind == BackupExecutionOperationKind.Admission)
+                    if (operation.Kind == BackupExecutionOperationKind.Admission && frozen.Facts.SqlOutcomeSource != BackupSqlOutcomeSource.NotInvoked)
                     {
                         var facts = frozen.Facts;
                         if (facts.Metadata.DatabaseGuid.Value is not { } databaseGuid
@@ -111,9 +116,9 @@ internal sealed class BackupExecutionOperationStore(IDbContextFactory<PlatformDb
                                 || facts.Metadata.RecoveryForkId.Value is not { } fork || facts.EvidenceAtUtc is not { } observed
                                 || !await context.BackupSets.AnyAsync(x => x.Id == baseId && x.DatabaseId == snapshot.DatabaseId, token)
                                 || attempt.AdmittedFullBackupSetId is { } previous && (previous != baseId
-                                    || attempt.AdmissionRecoveryForkId != fork || attempt.AdmissionObservedAtUtc != observed))
+                                    || attempt.AdmissionRecoveryForkId != fork))
                                 return new BackupExecutionContractResult<FrozenBackupExecutionOperation>(BackupExecutionContractCode.Conflict);
-                            attempt.AdmitDifferential(baseId, fork, observed);
+                            if (attempt.AdmittedFullBackupSetId is null) attempt.AdmitDifferential(baseId, fork, observed);
                         }
                     }
                     operation.Freeze(frozen.Facts);

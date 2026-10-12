@@ -3,7 +3,7 @@ using DbBackupManager.Domain.BackupTasks;
 
 namespace DbBackupManager.Application.BackupTasks;
 
-public enum BackupExecutionContractCode { Succeeded, AlreadyApplied, Conflict, NotFound, LeaseLost, DatabaseBlocked, StageNotOpen }
+public enum BackupExecutionContractCode { Succeeded, AlreadyApplied, Conflict, NotFound, LeaseLost, DatabaseBlocked, StageNotOpen, CancellationRequested }
 public sealed record BackupExecutionContractResult<T>(BackupExecutionContractCode Code, T? Value = null) where T : class;
 public sealed record ReserveBackupExecutionOperation(Guid MutationId, Guid TaskId, Guid AttemptId,
     BackupExecutionOperationKind Kind, int Sequence, Guid IntendedBackupSetId, DateTimeOffset ObservedAtUtc);
@@ -23,7 +23,7 @@ public interface IBackupExecutionOperationStore
         LeaseHandle lease, FreezeBackupExecutionOperation command, CancellationToken cancellationToken = default);
     Task<BackupExecutionContractResult<FrozenBackupExecutionOperation>> ReadAsync(
         ReserveBackupExecutionOperation identity, CancellationToken cancellationToken = default);
-    /// <summary>计划阶段应用在后续执行卡开放；当前返回 StageNotOpen，不修改回执或阶段。</summary>
+    /// <summary>应用原冻结载荷；文件阶段还必须通过计划提交端口传入本轮保护句柄。</summary>
     Task<BackupExecutionContractResult<FrozenBackupExecutionOperation>> ApplyFrozenAsync(
         LeaseHandle lease, ReserveBackupExecutionOperation identity, CancellationToken cancellationToken = default);
     Task<BackupExecutionContractResult<FrozenBackupExecutionOperation>> AbandonAsync(
@@ -50,21 +50,9 @@ public interface IBackupInvocationAuthorizationStore
         LeaseHandle lease, TerminateBackupInvocation command, CancellationToken cancellationToken = default);
 }
 
-/// <summary>8-5a 仅提供关闭的入口，不领取、不创建 Attempt、不访问外部端口。</summary>
+/// <summary>显式调用指定计划任务；不注册后台执行循环。</summary>
 public sealed record RunBackupPlanTaskRequest(Guid TaskId, Guid RequestMutationId);
 public interface IBackupPlanTaskRunner
 {
     Task<BackupExecutionContractCode> RunTaskOnceAsync(RunBackupPlanTaskRequest request, CancellationToken cancellationToken = default);
-}
-
-public sealed class BackupPlanTaskRunner : IBackupPlanTaskRunner
-{
-    public Task<BackupExecutionContractCode> RunTaskOnceAsync(RunBackupPlanTaskRequest request, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        if (request.TaskId == Guid.Empty || request.RequestMutationId == Guid.Empty)
-            throw new ArgumentException("任务与请求幂等标识不能为空。", nameof(request));
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(BackupExecutionContractCode.StageNotOpen);
-    }
 }

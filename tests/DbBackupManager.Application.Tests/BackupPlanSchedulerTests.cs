@@ -179,6 +179,21 @@ public sealed class BackupPlanSchedulerTests
             { [Key(plan, BackupType.Full, Now)] = disposition })).Key.BackupType);
     }
 
+    [Theory]
+    [InlineData(false, false, false, BackupSlotDisposition.Failed)]
+    [InlineData(true, false, false, BackupSlotDisposition.Uncertain)]
+    [InlineData(false, true, false, BackupSlotDisposition.Uncertain)]
+    [InlineData(false, false, true, BackupSlotDisposition.Uncertain)]
+    public void NotInvokedProofDoesNotHideHistoricalSuccessfulOrContradictoryFacts(bool metadata, bool local, bool contradiction,
+        BackupSlotDisposition expected)
+    {
+        var earlier = Guid.NewGuid();
+        var current = Guid.NewGuid();
+        Assert.Equal(expected, BackupPlanSlotDispositionRules.Evaluate(BackupTaskStatus.Failed, current,
+            [new(earlier, BackupInvocationStatus.Prepared, metadata, local, contradiction, true),
+                new(current, BackupInvocationStatus.ConfirmedFailed, false, false)]));
+    }
+
     [Fact]
     public void CurrentCompleteSuccessRemainsSuccessfulDespiteEarlierContradiction()
     {

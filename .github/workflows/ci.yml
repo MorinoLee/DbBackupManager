@@ -192,11 +192,16 @@ jobs:
           }
 
   infrastructure:
-    name: Infrastructure 重测试
+    name: Infrastructure 重测试（${{ matrix.group }}）
     needs: changes
     if: needs.changes.outputs.infrastructure == 'true'
     runs-on: windows-latest
-    timeout-minutes: 12
+    # 两组互补筛选，完整覆盖全部测试；隔离真实执行故障注入的累计耗时。
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [execution, remaining]
 
     steps:
       - name: 检出代码
@@ -221,7 +226,36 @@ jobs:
         run: dotnet restore tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj
 
       - name: 运行 Infrastructure 测试
-        run: dotnet test tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj --configuration Release --no-restore
+        shell: pwsh
+        env:
+          TEST_GROUP: ${{ matrix.group }}
+        run: |
+          $executionTypes = @(
+            'BackupPlanExecutionLocalDbTests', 'BackupPlanExecutionRecoveryLocalDbTests',
+            'BackupPlanExplicitClaimLocalDbTests', 'BackupPlanLeaseRenewalLocalDbTests',
+            'BackupPlanSmbAdapterTests', 'NativePlanFileGuardTests',
+            'TargetSqlPreparedInvocationLocalDbTests', 'BackupPlanRecoverySafetyLocalDbTests'
+          )
+          if ($env:TEST_GROUP -eq 'execution') {
+            $testFilter = ($executionTypes | ForEach-Object { "FullyQualifiedName~$_" }) -join '|'
+          } else {
+            $testFilter = ($executionTypes | ForEach-Object { "FullyQualifiedName!~$_" }) -join '&'
+          }
+          dotnet test tests/DbBackupManager.Infrastructure.Tests/DbBackupManager.Infrastructure.Tests.csproj `
+            --configuration Release --no-restore --filter $testFilter `
+            --logger "console;verbosity=normal" --logger "trx;LogFileName=infrastructure.trx" `
+            --results-directory TestResults/infrastructure `
+            --blame-hang --blame-hang-timeout 5m --blame-hang-dump-type none
+          exit $LASTEXITCODE
+
+      - name: 保留 Infrastructure 测试与无响应诊断
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: infrastructure-results-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: TestResults/infrastructure/
+          if-no-files-found: warn
+          retention-days: 30
 
   web:
     name: Web 重测试

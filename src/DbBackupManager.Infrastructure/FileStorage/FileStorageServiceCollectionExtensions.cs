@@ -12,6 +12,9 @@ public static class FileStorageServiceCollectionExtensions
         services.TryAddScoped<IFileStorageCredentialResolver, FileStorageCredentialResolver>();
         services.TryAddEnumerable(ServiceDescriptor.Scoped<IFileStorageProtocolSessionFactory, SmbFileStorageSessionFactory>());
         services.TryAddEnumerable(ServiceDescriptor.Scoped<IFileStorageProtocolSessionFactory, SftpFileStorageSessionFactory>());
+        services.TryAddScoped<BackupPlanFileAdapter>();
+        services.TryAddScoped<IBackupFileContentVerifier>(p => p.GetRequiredService<BackupPlanFileAdapter>());
+        services.TryAddScoped<IBackupPlanFileTransferExecutor>(p => p.GetRequiredService<BackupPlanFileAdapter>());
         services.TryAddScoped<BackupFileStorageAdapter>();
         services.TryAddScoped<IBackupFileStorageProbe>(provider =>
             provider.GetRequiredService<BackupFileStorageAdapter>());

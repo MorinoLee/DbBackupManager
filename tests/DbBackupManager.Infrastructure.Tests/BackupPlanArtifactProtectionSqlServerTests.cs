@@ -151,13 +151,12 @@ public sealed class BackupPlanArtifactProtectionSqlServerTests(PlatformDatabaseS
     }
 
     [Fact]
-    public async Task PlanExecutionAndAllLegacyRecoveryMutationEntrypointsRemainClosed()
+    public async Task AllLegacyPlanExecutionAndRecoveryMutationEntrypointsRemainClosed()
     {
         var legacy = await BackupSetTestData.WorkAsync(database);
         var plan = await ExecutionContractTestData.PlanAsync(database, legacy);
         var store = new BackupTaskExecutionStore(new BackupExecutionContractSqlServerTests.Factory(database));
         var now = DateTimeOffset.UtcNow;
-        Assert.Equal(BackupExecutionContractCode.StageNotOpen, await new BackupPlanTaskRunner().RunTaskOnceAsync(new(plan.Task.TaskId, Guid.NewGuid())));
         Assert.Equal(BackupTaskStoreResultCode.StateMismatch,
             (await store.RenewLeaseAsync(plan.Lease, now, now.AddMinutes(5))).Code);
         Assert.Equal(BackupTaskStoreResultCode.StateMismatch,

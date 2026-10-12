@@ -34,6 +34,12 @@ public static class TargetSqlServiceCollectionExtensions
             provider.GetRequiredService<SqlClientTargetSqlReadOnlyProbe>());
         services.TryAddScoped<ITargetSqlBackupEvidenceProbe>(provider =>
             provider.GetRequiredService<SqlClientTargetSqlReadOnlyProbe>());
+        services.TryAddSingleton<ITargetSqlInvocationConnectionFactory, TargetSqlInvocationConnectionFactory>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddScoped<SqlClientTargetSqlInvocation>();
+        services.TryAddScoped<ITargetSqlInvocationPreparation>(p => p.GetRequiredService<SqlClientTargetSqlInvocation>());
+        services.TryAddScoped<ITargetSqlInvocationTerminationProbe>(p => p.GetRequiredService<SqlClientTargetSqlInvocation>());
+        services.TryAddScoped<ITargetSqlActiveBaselineReader>(p => p.GetRequiredService<SqlClientTargetSqlInvocation>());
         services.TryAddScoped<SqlClientTargetSqlBackupExecutor>();
         services.TryAddScoped<ITargetSqlBackupExecutor>(provider => provider.GetRequiredService<SqlClientTargetSqlBackupExecutor>());
         services.TryAddScoped<ITargetSqlPlanBackupExecutor>(provider => provider.GetRequiredService<SqlClientTargetSqlBackupExecutor>());
