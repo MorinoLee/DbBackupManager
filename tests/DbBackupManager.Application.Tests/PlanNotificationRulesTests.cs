@@ -49,7 +49,7 @@ public sealed class PlanNotificationRulesTests
         var gaps = Location(
             BackupFileLocation.Remote,
             LocationRecoveryConclusion.NotRestorable,
-            unknown: true,
+            unknown: false,
             remoteUnrecoverable: true,
             [],
             ["remote_dependent_unconfirmed", "remote_base_unconfirmed"],
@@ -71,9 +71,50 @@ public sealed class PlanNotificationRulesTests
             [],
             target);
 
-        Assert.Equal(["remote_dependent_unconfirmed", "remote_base_unconfirmed"], PlanNotificationRules.RemoteGapCodes(gaps));
-        Assert.Equal([PlanNotificationRules.LocationNotRestorable], PlanNotificationRules.RemoteGapCodes(generic));
-        Assert.Empty(PlanNotificationRules.RemoteGapCodes(unresolved));
+        var opened = PlanNotificationRules.RemoteGapCodes(gaps);
+        Assert.True(opened.UpdatesOpenEpisodes);
+        Assert.Equal(["remote_dependent_unconfirmed", "remote_base_unconfirmed"], opened.Codes);
+        var genericCodes = PlanNotificationRules.RemoteGapCodes(generic);
+        Assert.True(genericCodes.UpdatesOpenEpisodes);
+        Assert.Equal([PlanNotificationRules.LocationNotRestorable], genericCodes.Codes);
+        Assert.False(PlanNotificationRules.RemoteGapCodes(unresolved).UpdatesOpenEpisodes);
+    }
+
+    [Fact]
+    public void UnknownOrUnprovenLocationDoesNotOpenOrCloseARemoteGap()
+    {
+        var target = Guid.NewGuid();
+        var unknownWithGap = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: true,
+            remoteUnrecoverable: true,
+            ["baseline_unresolved"],
+            ["remote_base_unconfirmed"],
+            target);
+        var restorable = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.RestorableWindowSatisfied,
+            unknown: false,
+            remoteUnrecoverable: false,
+            [],
+            [],
+            target);
+        var notRestorableButNotRemoteFailure = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: false,
+            remoteUnrecoverable: false,
+            [],
+            [],
+            target);
+
+        Assert.False(PlanNotificationRules.RemoteGapCodes(unknownWithGap).UpdatesOpenEpisodes);
+        Assert.Empty(PlanNotificationRules.RemoteGapCodes(unknownWithGap).Codes);
+        var recovered = PlanNotificationRules.RemoteGapCodes(restorable);
+        Assert.True(recovered.UpdatesOpenEpisodes);
+        Assert.Empty(recovered.Codes);
+        Assert.False(PlanNotificationRules.RemoteGapCodes(notRestorableButNotRemoteFailure).UpdatesOpenEpisodes);
     }
 
     [Fact]

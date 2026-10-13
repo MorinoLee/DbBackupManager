@@ -7,11 +7,15 @@ using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using static DbBackupManager.Infrastructure.Persistence.BackupTaskPersistence;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
-internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<PlatformDbContext> factory, TimeProvider clock)
+internal sealed partial class BackupPlanExecutionStore(
+    IDbContextFactory<PlatformDbContext> factory,
+    TimeProvider clock,
+    ILogger<BackupPlanExecutionStore>? logger = null)
     : IBackupPlanExecutionStore
 {
     private readonly BackupTaskPersistence _persistence = new(factory);
@@ -217,7 +221,7 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
         if (code == BackupExecutionContractCode.Succeeded && remoteGap is { } observation)
-            await RemoteGapNotices.TryProjectAsync(factory, observation, cancellationToken);
+            await RemoteGapNotices.TryProjectAsync(factory, observation, cancellationToken, logger);
         return code;
     }
 

@@ -242,7 +242,7 @@ internal sealed partial class BackupPlanExecutionStore
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
         if (code == BackupExecutionContractCode.Succeeded && remoteGap is { } observation)
-            await RemoteGapNotices.TryProjectAsync(factory, observation, cancellationToken);
+            await RemoteGapNotices.TryProjectAsync(factory, observation, cancellationToken, logger);
         return code;
     }
 

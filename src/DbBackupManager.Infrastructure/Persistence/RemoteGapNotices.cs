@@ -5,15 +5,27 @@ using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Notifications;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
 /// <summary>
 /// 远端缺口通知在运行事实提交之后单独投影。投影失败不回滚事实。
 /// 同一数据库、远端目标和缺口在恢复前只保留一封；恢复后再次出现可以再发。
+/// 位置未知或这次没有该目标的投影时，不新开也不关闭已打开缺口。
 /// </summary>
 internal static class RemoteGapNotices
 {
+    private static readonly Action<ILogger, string, Exception?> ProjectionFailed = LoggerMessage.Define<string>(
+        LogLevel.Warning,
+        new EventId(6401, "RemoteGapProjectionFailed"),
+        "远端缺口投影失败，已跳过这封通知。异常类型：{ExceptionType}");
+
+    private static readonly Action<ILogger, Guid, Exception?> LockUnavailable = LoggerMessage.Define<Guid>(
+        LogLevel.Warning,
+        new EventId(6402, "RemoteGapProjectionLockUnavailable"),
+        "未能取得计划保留锁，已跳过这次远端缺口投影。数据库：{DatabaseId}");
+
     internal readonly record struct Observation(
         Guid DatabaseId,
         Guid TaskId,
@@ -24,23 +36,29 @@ internal static class RemoteGapNotices
     internal static async Task TryProjectAsync(
         IDbContextFactory<PlatformDbContext> factory,
         Observation observation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         try
         {
-            await ProjectAsync(factory, observation, knownGaps: null, cancellationToken);
+            await ProjectAsync(factory, observation, knownGaps: null, cancellationToken, logger);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            // 运行事实已经提交。这次投影失败只跳过远端通知。
+            // 运行事实已经提交。这次投影失败只跳过远端通知。日志只保留异常类型。
+            if (logger is not null)
+            {
+                ProjectionFailed(logger, exception.GetType().Name, null);
+            }
         }
     }
 
     internal static async Task<bool> ProjectAsync(
         IDbContextFactory<PlatformDbContext> factory,
         Observation observation,
-        IReadOnlyDictionary<Guid, IReadOnlyCollection<string>>? knownGaps,
-        CancellationToken cancellationToken)
+        IReadOnlyDictionary<Guid, RemoteGapProjection>? knownGaps,
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         var targets = observation.StorageTargetIds.Where(id => id != Guid.Empty).Distinct().ToArray();
         if (observation.DatabaseId == Guid.Empty || observation.TaskId == Guid.Empty || targets.Length == 0)
@@ -57,6 +75,11 @@ internal static class RemoteGapNotices
                 IsolationLevel.Serializable, cancellationToken);
             if (!await PlanRetentionLock.TryAcquireAsync(context, observation.DatabaseId, cancellationToken))
             {
+                if (logger is not null)
+                {
+                    LockUnavailable(logger, observation.DatabaseId, null);
+                }
+
                 return false;
             }
 
@@ -91,7 +114,7 @@ internal static class RemoteGapNotices
         Guid taskId,
         BackupTaskStage stage,
         DateTimeOffset occurredAtUtc,
-        IReadOnlyDictionary<Guid, IReadOnlyCollection<string>> gaps,
+        IReadOnlyDictionary<Guid, RemoteGapProjection> gaps,
         CancellationToken cancellationToken)
     {
         var targets = gaps.Keys.Where(id => id != Guid.Empty).ToArray();
@@ -107,15 +130,24 @@ internal static class RemoteGapNotices
             .ToListAsync(cancellationToken);
         foreach (var episode in open)
         {
-            if (!gaps.TryGetValue(episode.StorageTargetId, out var codes) || !codes.Contains(episode.GapCode))
+            if (!gaps.TryGetValue(episode.StorageTargetId, out var projection)
+                || !projection.UpdatesOpenEpisodes
+                || projection.Codes.Contains(episode.GapCode, StringComparer.Ordinal))
             {
-                episode.MarkRecovered(occurredAtUtc);
+                continue;
             }
+
+            episode.MarkRecovered(occurredAtUtc);
         }
 
-        foreach (var (target, codes) in gaps)
+        foreach (var (target, projection) in gaps)
         {
-            foreach (var code in codes.Where(code => !string.IsNullOrWhiteSpace(code)).Distinct(StringComparer.Ordinal))
+            if (!projection.UpdatesOpenEpisodes)
+            {
+                continue;
+            }
+
+            foreach (var code in projection.Codes.Where(code => !string.IsNullOrWhiteSpace(code)).Distinct(StringComparer.Ordinal))
             {
                 if (open.Any(episode => episode.IsOpen
                     && episode.StorageTargetId == target
@@ -156,7 +188,7 @@ internal static class RemoteGapNotices
         }
     }
 
-    private static async Task<Dictionary<Guid, IReadOnlyCollection<string>>> LoadGapsAsync(
+    private static async Task<Dictionary<Guid, RemoteGapProjection>> LoadGapsAsync(
         PlatformDbContext context,
         Observation observation,
         Guid[] targets,
@@ -165,9 +197,7 @@ internal static class RemoteGapNotices
         var wanted = targets.ToHashSet();
         var surface = await PlanLocationRetentionWork.LoadSurfaceAsync(
             context, observation.DatabaseId, observation.OccurredAtUtc, cancellationToken);
-        var gaps = wanted.ToDictionary(
-            target => target,
-            _ => (IReadOnlyCollection<string>)Array.Empty<string>());
+        var gaps = new Dictionary<Guid, RemoteGapProjection>();
         foreach (var item in surface.Assessments)
         {
             if (item.Location != BackupFileLocation.Remote
@@ -190,16 +220,17 @@ internal static class RemoteGapNotices
         return gaps;
     }
 
-    private static Dictionary<Guid, IReadOnlyCollection<string>> CopyGaps(
+    private static Dictionary<Guid, RemoteGapProjection> CopyGaps(
         Guid[] targets,
-        IReadOnlyDictionary<Guid, IReadOnlyCollection<string>> knownGaps)
+        IReadOnlyDictionary<Guid, RemoteGapProjection> knownGaps)
     {
-        var gaps = new Dictionary<Guid, IReadOnlyCollection<string>>();
+        var gaps = new Dictionary<Guid, RemoteGapProjection>();
         foreach (var target in targets)
         {
-            gaps[target] = knownGaps.TryGetValue(target, out var codes)
-                ? codes
-                : Array.Empty<string>();
+            if (knownGaps.TryGetValue(target, out var projection))
+            {
+                gaps[target] = projection;
+            }
         }
 
         return gaps;

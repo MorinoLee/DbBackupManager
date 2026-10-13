@@ -6,10 +6,13 @@ using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Entities;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
-internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbContext> contextFactory)
+internal sealed class PlanLocationRetentionStore(
+    IDbContextFactory<PlatformDbContext> contextFactory,
+    ILogger<PlanLocationRetentionStore>? logger = null)
     : IPlanLocationRetentionStore
 {
     public async Task<IReadOnlyList<PlanLocationAssessment>> AssessAsync(
@@ -403,7 +406,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                     WorkItem(file, endpoint, work.LeaseToken, work.LeaseExpiresAtUtc));
         }, cancellationToken);
         if (result.Code == BackupTaskStoreResultCode.Succeeded && remoteGap is { } observation)
-            await RemoteGapNotices.TryProjectAsync(contextFactory, observation, cancellationToken);
+            await RemoteGapNotices.TryProjectAsync(contextFactory, observation, cancellationToken, logger);
         return result;
     }
 

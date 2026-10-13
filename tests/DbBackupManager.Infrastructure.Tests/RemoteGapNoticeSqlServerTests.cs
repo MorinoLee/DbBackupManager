@@ -1,3 +1,4 @@
+using DbBackupManager.Application.Notifications;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
@@ -28,12 +29,31 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
         Assert.True(await ProjectAsync(factory, graph, Opened.AddMinutes(1), gaps));
         Assert.Equal(1, await CountNoticesAsync(graph.DatabaseId));
 
-        Assert.True(await ProjectAsync(factory, graph, Opened.AddMinutes(2), Gaps(graph.TargetId)));
+        Assert.True(await ProjectAsync(factory, graph, Opened.AddMinutes(2), Recovered(graph.TargetId)));
         Assert.Equal(1, await CountNoticesAsync(graph.DatabaseId));
         Assert.Equal(0, await CountOpenAsync(graph.DatabaseId));
 
         Assert.True(await ProjectAsync(factory, graph, Opened.AddMinutes(3), gaps));
         Assert.Equal(2, await CountNoticesAsync(graph.DatabaseId));
+        Assert.Equal(1, await CountOpenAsync(graph.DatabaseId));
+    }
+
+    [Fact]
+    public async Task GapThenUnknownThenGapSendsOneNotice()
+    {
+        var graph = await SeedAsync();
+        using var provider = database.CreateServiceProvider();
+        var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var gaps = Gaps(graph.TargetId, PlanLocationRecovery.RemoteBaseUnconfirmed);
+
+        Assert.True(await ProjectAsync(factory, graph, Opened, gaps));
+        Assert.True(await ProjectAsync(factory, graph, Opened.AddMinutes(1), Unknown(graph.TargetId)));
+        Assert.True(await ProjectAsync(factory, graph, Opened.AddMinutes(2), new Dictionary<Guid, RemoteGapProjection>()));
+        Assert.Equal(1, await CountNoticesAsync(graph.DatabaseId));
+        Assert.Equal(1, await CountOpenAsync(graph.DatabaseId));
+
+        Assert.True(await ProjectAsync(factory, graph, Opened.AddMinutes(3), gaps));
+        Assert.Equal(1, await CountNoticesAsync(graph.DatabaseId));
         Assert.Equal(1, await CountOpenAsync(graph.DatabaseId));
     }
 
@@ -160,7 +180,7 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
         IDbContextFactory<PlatformDbContext> factory,
         Graph graph,
         DateTimeOffset occurredAt,
-        IReadOnlyDictionary<Guid, IReadOnlyCollection<string>> gaps) =>
+        IReadOnlyDictionary<Guid, RemoteGapProjection> gaps) =>
         RemoteGapNotices.ProjectAsync(
             factory,
             new RemoteGapNotices.Observation(graph.DatabaseId, graph.TaskId, graph.Stage, occurredAt, graph.StorageTargetIds),
@@ -206,8 +226,14 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
         return new Graph(managed.Id, Guid.NewGuid(), target.Id, other?.Id, BackupTaskStage.ValidateCopy, [target.Id]);
     }
 
-    private static Dictionary<Guid, IReadOnlyCollection<string>> Gaps(Guid targetId, params string[] codes) =>
-        new() { [targetId] = codes };
+    private static Dictionary<Guid, RemoteGapProjection> Gaps(Guid targetId, params string[] codes) =>
+        new() { [targetId] = RemoteGapProjection.Open(codes) };
+
+    private static Dictionary<Guid, RemoteGapProjection> Recovered(Guid targetId) =>
+        new() { [targetId] = RemoteGapProjection.Recovered };
+
+    private static Dictionary<Guid, RemoteGapProjection> Unknown(Guid targetId) =>
+        new() { [targetId] = RemoteGapProjection.Hold };
 
     private sealed record Graph(
         Guid DatabaseId,
