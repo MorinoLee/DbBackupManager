@@ -263,14 +263,14 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
             await using var db = temporary.CreateContext();
             var migrations = db.Database.GetMigrations().ToArray();
             var previous = migrations.Single(name => name.EndsWith("_AddRemoteUnrecoverableNotification", StringComparison.Ordinal));
-            var current = migrations.Single(name => name.EndsWith("_AddRemoteGapEpisodes", StringComparison.Ordinal));
+            var episodes = migrations.Single(name => name.EndsWith("_AddRemoteGapEpisodes", StringComparison.Ordinal));
             var migrator = db.Database.GetService<IMigrator>();
-            await migrator.MigrateAsync(previous);
-            await migrator.MigrateAsync(current);
+            // 投影会读取待补发表。先在最新结构上写入缺口，再退掉后面没有数据的迁移，单独检验缺口迁移的 Down。
             var graph = await SeedAsync(temporary);
             using var provider = temporary.CreateServiceProvider();
             var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
             Assert.True(await ProjectAsync(factory, graph, Opened, Gaps(graph.TargetId, "remote_base_unconfirmed")));
+            await migrator.MigrateAsync(episodes);
             var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
             Assert.Equal(51006, error.Number);
