@@ -71,9 +71,9 @@ public sealed class BackupPlanTaskCreationSqlServerTests(PlatformDatabaseSqlServ
                 graph.Target.CredentialReferenceId, graph.Target.SftpHostKeyFingerprint)), purpose), Guid.NewGuid(), Now);
         Assert.EndsWith(copyOnly ? "_COPYONLY.bak" : type == BackupType.Full ? "_FULL.bak" : "_DIFF.bak", paths.LocalSqlFilePath);
         Assert.Contains(type == BackupType.Differential ? @"\diff\" : @"\full\", paths.LocalSqlFilePath, StringComparison.Ordinal);
-        var old = provider.GetRequiredService<IBackupTaskExecutionStore>();
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await old.ClaimTaskAsync(task.Id, Claim())).Code);
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await old.ClaimNextAsync(Claim())).Code);
+        Assert.DoesNotContain(
+            typeof(IBackupTaskExecutionStore).GetMethods().Select(method => method.Name),
+            name => name is "ClaimTaskAsync" or "ClaimNextAsync");
     }
 
     [Theory]
@@ -532,7 +532,6 @@ public sealed class BackupPlanTaskCreationSqlServerTests(PlatformDatabaseSqlServ
         new(Guid.NewGuid(), Guid.NewGuid(), graph.Plan.Id, graph.Plan.CurrentVersionId, purpose);
     private static CreateBackupPlanTaskCommand Manual(Graph graph, CreateBackupPlanTaskRequest request) =>
         new(request, BackupTaskTriggerType.Manual, Now, graph.Actor.AdminUserId, graph.Actor.SecurityStamp);
-    private static ClaimNextBackupTaskCommand Claim() => new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "合成测试", Now, Now.AddMinutes(10));
     private async Task<BackupPlanTaskCreationResult> StoreAsync(CreateBackupPlanTaskCommand command)
     {
         using var provider = database.CreateServiceProvider();

@@ -217,9 +217,6 @@ public sealed class BackupTasksTests : MudBlazorComponentTest
 
         public Task<BackupManagementResult<Guid>> CancelAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default)
         { CancelRequests.Add(requestId); return Task.FromResult(new BackupManagementResult<Guid>(MutateCode, taskId)); }
-        public Task<BackupManagementResult<Guid>> RetryAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default) => throw new NotSupportedException();
-        public Task<BackupManagementResult<Guid>> RequestReconciliationAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default) => throw new NotSupportedException();
-        public Task<BackupManagementResult<Guid>> ConfirmFailedAsync(AdminSession actor, Guid taskId, Guid requestId, bool evidenceReviewed, CancellationToken token = default) => throw new NotSupportedException();
         public Task<BackupManagementResult<BackupTaskDetail>> DetailAsync(AdminSession actor, Guid taskId, CancellationToken token = default) => throw new NotSupportedException();
     }
 }

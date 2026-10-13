@@ -1,4 +1,3 @@
-using System.Data.Common;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
 using DbBackupManager.Domain.BackupTasks;
@@ -6,7 +5,6 @@ using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Infrastructure.FileStorage;
 using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace DbBackupManager.Infrastructure.Tests;
 
@@ -47,19 +45,9 @@ public sealed class BackupExecutionSafetyRegressionSqlServerTests(PlatformDataba
         var coordinator = new BackupInvocationAuthorizationStore(factory, TimeProvider.System);
         var command = await ExecutionContractTestData.AuthorizationAsync(database, next);
         Assert.Equal(BackupExecutionContractCode.DatabaseBlocked, (await coordinator.AuthorizeAsync(next.Lease, command)).Code);
-        var store = new BackupTaskExecutionStore(factory);
-        if (recoverSuccess)
-        {
-            var now = DateTimeOffset.UtcNow;
-            Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await store.AcquireReconciliationLeaseAsync(
-                new(work.Task.TaskId, Guid.NewGuid(), "合成核对", now, now.AddMinutes(5)))).Code);
-        }
-        else
-        {
-            Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await store.ConfirmNeedsAttentionAsync(
-                new(work.Task.TaskId, Guid.NewGuid(), DateTimeOffset.UtcNow, BackupReconciliationOutcome.Failed,
-                    "synthetic_failed", "合成人工确认"))).Code);
-        }
+        Assert.DoesNotContain(
+            typeof(IBackupTaskExecutionStore).GetMethods().Select(method => method.Name),
+            name => name is "AcquireReconciliationLeaseAsync" or "ConfirmNeedsAttentionAsync");
         var after = await coordinator.AuthorizeAsync(next.Lease, command);
         Assert.True(after.Code == BackupExecutionContractCode.DatabaseBlocked,
             $"Before=DatabaseBlocked; RecoverySuccess={recoverSuccess}; After={after.Code}; No original termination evidence was provided.");
@@ -90,10 +78,8 @@ public sealed class BackupExecutionSafetyRegressionSqlServerTests(PlatformDataba
         Assert.Equal(0, protocol.Deletes);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task LegacyBlockAndRecoveryFactsRollBackTogetherAfterDatabaseWriteFailure(bool recoverSuccess)
+    [Fact]
+    public async Task UnresolvedPlanFactsStayWithoutLegacyRecoveryWrites()
     {
         var work = await BackupSetTestData.WorkAsync(database);
         await using (var db = database.CreateContext())
@@ -108,40 +94,12 @@ public sealed class BackupExecutionSafetyRegressionSqlServerTests(PlatformDataba
                 "synthetic_unknown", "合成升级前未终止调用");
             await db.SaveChangesAsync();
         }
-        var failure = new FailAfterBlockWrite();
-        var store = new BackupTaskExecutionStore(new BackupExecutionContractSqlServerTests.Factory(database, failure));
-        if (recoverSuccess)
-        {
-            var now = DateTimeOffset.UtcNow;
-            Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await store.AcquireReconciliationLeaseAsync(
-                new(work.Task.TaskId, Guid.NewGuid(), "合成核对", now, now.AddMinutes(5)))).Code);
-        }
-        else
-            Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await store.ConfirmNeedsAttentionAsync(new(work.Task.TaskId,
-                Guid.NewGuid(), DateTimeOffset.UtcNow, BackupReconciliationOutcome.Failed, "synthetic_failed", "合成人工确认"))).Code);
-        Assert.False(failure.WroteBlock);
         await using var verified = database.CreateContext();
         Assert.Equal(BackupTaskStatus.NeedsAttention, (await verified.BackupTasks.SingleAsync(x => x.Id == work.Task.TaskId)).Status);
         Assert.Equal(BackupInvocationStatus.Indeterminate, (await verified.BackupAttempts.SingleAsync()).BackupInvocationStatus);
         Assert.Equal(0, await verified.BackupInvocationAuthorizations.CountAsync());
         Assert.Equal(0, await verified.BackupPlanExecutionOperations.CountAsync());
         Assert.Equal(0, await verified.BackupFiles.CountAsync());
-    }
-
-    private sealed class FailAfterBlockWrite : DbCommandInterceptor
-    {
-        public bool WroteBlock { get; private set; }
-        public override async ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
-            DbDataReader result, CancellationToken cancellationToken = default)
-        {
-            if (command.CommandText.Contains("INSERT INTO [BackupInvocationAuthorizations]", StringComparison.Ordinal))
-            {
-                WroteBlock = true;
-                await result.DisposeAsync();
-                throw new IOException("合成授权写入后保存失败");
-            }
-            return result;
-        }
     }
 
     private sealed class DeleteProtocol : IFileStorageProtocolSessionFactory, IFileStorageProtocolSession

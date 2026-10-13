@@ -42,10 +42,9 @@ public sealed class BackupPlanSchedulingSqlServerTests(PlatformDatabaseSqlServer
         Assert.Contains(snapshots, x => x.Purpose == BackupRunPurpose.PlanFull);
         Assert.Equal(full >= diff ? Now.UtcDateTime.Date.AddHours(diff) : (DateTimeOffset?)null,
             Assert.Single(tasks, x => x.BackupType == BackupType.Full).CoveredDifferentialSlotUtc);
-        using var provider = database.CreateServiceProvider();
-        foreach (var task in tasks)
-            Assert.Equal(BackupTaskStoreResultCode.NotFound, (await provider.GetRequiredService<IBackupTaskExecutionStore>()
-                .ClaimTaskAsync(task.Id, new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "合成", Now, Now.AddMinutes(10)))).Code);
+        Assert.DoesNotContain(
+            typeof(IBackupTaskExecutionStore).GetMethods().Select(method => method.Name),
+            name => name is "ClaimTaskAsync" or "RetryFailedAsync");
         var before = await Counts(plan.Id);
         Assert.Equal(BackupPlanSchedulingCode.NoWork, (await Schedule(plan.Id)).Code);
         Assert.Equal(before, await Counts(plan.Id));

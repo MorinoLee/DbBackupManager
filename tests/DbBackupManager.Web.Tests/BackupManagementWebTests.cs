@@ -144,13 +144,11 @@ public sealed class BackupManagementWebTests
         Assert.Null(detail.Reconciliation.NextAtUtc);
         Assert.False(detail.Reconciliation.CanRequest);
 
-        using var serviceScope = host.CreateScope();
-        var store = serviceScope.ServiceProvider.GetRequiredService<IBackupTaskExecutionStore>();
-        var now = DateTimeOffset.UtcNow;
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimTaskAsync(requestId,
-            new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "web-plan-task", now, now.AddMinutes(5)))).Code);
-        Assert.Equal(BackupTaskStoreResultCode.StateMismatch, (await store.RetryFailedAsync(
-            new(requestId, Guid.NewGuid(), now))).Code);
+        foreach (var path in new[] { "retry", "reconcile", "confirm-failed" })
+        {
+            using var closed = await client.PostAsync($"/api/v1/backup-tasks/{requestId}/{path}", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
+            Assert.Equal(HttpStatusCode.NotFound, closed.StatusCode);
+        }
         // 旧 /backups 入口保留兼容跳转，指向拆分后的任务记录页。
         using var backupsPage = await client.GetAsync("/backups");
         Assert.Equal(HttpStatusCode.Redirect, backupsPage.StatusCode);

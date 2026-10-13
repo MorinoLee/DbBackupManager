@@ -47,35 +47,12 @@ internal sealed class BackupManagementService(
             new(choices, pageRows, rows.Count > 50));
     });
     public Task<BackupManagementResult<Guid>> CancelAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default) =>
-        Mutate(actor, taskId, requestId, false, token);
-    public Task<BackupManagementResult<Guid>> RetryAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default) =>
-        Mutate(actor, taskId, requestId, true, token);
-    public Task<BackupManagementResult<Guid>> RequestReconciliationAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default) => Guard(async () =>
-    {
-        if (requestId == Guid.Empty || taskId == Guid.Empty) throw new Rejected(BackupManagementCode.Invalid);
-        var result = await store.RequestReconciliationAsync(new BackupTaskMutationCommand(
-            taskId,
-            requestId,
-            DateTimeOffset.UtcNow,
-            actor.AdminUserId,
-            actor.SecurityStamp), token);
-        return new BackupManagementResult<Guid>(MapCode(result.Code), result.Value?.TaskId ?? Guid.Empty);
-    });
-    public Task<BackupManagementResult<Guid>> ConfirmFailedAsync(AdminSession actor, Guid taskId, Guid requestId, bool evidenceReviewed, CancellationToken token = default) => Guard(async () =>
-    {
-        if (requestId == Guid.Empty || taskId == Guid.Empty || !evidenceReviewed)
-            throw new Rejected(BackupManagementCode.Invalid);
-        var result = await store.ConfirmNeedsAttentionAsync(new ConfirmNeedsAttentionCommand(
-            taskId, requestId, DateTimeOffset.UtcNow, BackupReconciliationOutcome.Failed,
-            "admin_confirmed_failed", "管理员已核对外部执行及相关文件、记录，确认本阶段失败。",
-            actor.AdminUserId, actor.SecurityStamp), token);
-        return new BackupManagementResult<Guid>(MapCode(result.Code), result.Value?.TaskId ?? Guid.Empty);
-    });
-    private Task<BackupManagementResult<Guid>> Mutate(AdminSession actor, Guid taskId, Guid requestId, bool retry, CancellationToken token) => Guard(async () =>
+        Mutate(actor, taskId, requestId, token);
+    private Task<BackupManagementResult<Guid>> Mutate(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token) => Guard(async () =>
     {
         if (requestId == Guid.Empty || taskId == Guid.Empty) throw new Rejected(BackupManagementCode.Invalid);
         var command = new BackupTaskMutationCommand(taskId, requestId, DateTimeOffset.UtcNow, actor.AdminUserId, actor.SecurityStamp);
-        var result = retry ? await store.RetryFailedAsync(command, token) : await store.RequestCancellationAsync(command, token);
+        var result = await store.RequestCancellationAsync(command, token);
         return new BackupManagementResult<Guid>(MapCode(result.Code), result.Value?.TaskId ?? Guid.Empty);
     });
     public Task<BackupManagementResult<BackupTaskDetail>> DetailAsync(AdminSession actor, Guid taskId, CancellationToken token = default) => Guard(async () =>

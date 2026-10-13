@@ -1,6 +1,6 @@
 @*
     任务详情：独立路由呈现摘要、阶段历史、尝试记录与已验证文件，便于刷新与分享本机链接。
-    实时通知只触发重新查询；取消、重试与重新核对各自持有 RequestId，互不混用。
+    实时通知只触发重新查询。取消持有自己的 RequestId。页面不提供重试、重新核对或确认失败。
 *@
 @page "/backup-tasks/{Id:guid}"
 @attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
@@ -90,34 +90,13 @@
                         }
                         @if (_detail.Task.Status == "NeedsAttention")
                         {
-                            <MudAlert Severity="Severity.Warning">外部执行结果尚未确定。请保留文件与任务记录，核对完成前不要重复发起同一备份。</MudAlert>
+                            <MudAlert Severity="Severity.Warning">外部执行结果尚未确定。请保留文件与任务记录，不要把未知结果当成失败或成功。</MudAlert>
                             <section data-testid="reconciliation-panel">
                                 <MudStack Spacing="2">
                                     <MudText Typo="Typo.body2">最近核对原因：@BackupPresentation.ReconciliationReason(_detail.Reconciliation.ReasonCode)</MudText>
                                     <MudText Typo="Typo.body2">已完成核对次数：@_detail.Reconciliation.AttemptCount</MudText>
                                     <MudText Typo="Typo.body2">下次核对时间：@Formatters.LocalDateTime(_detail.Reconciliation.NextAtUtc)</MudText>
-                                    <MudAlert Severity="Severity.Info">重新核对不会重新备份。</MudAlert>
-                                    @if (_detail.Reconciliation.CanRequest)
-                                    {
-                                        <MudButton OnClick="ReconcileAsync"
-                                                   Disabled="_busy"
-                                                   Color="Color.Primary"
-                                                   data-testid="reconcile-task">
-                                            重新核对
-                                        </MudButton>
-                                        <MudDivider />
-                                        <MudText Typo="Typo.body2">人工确认前，请检查本次尝试对应的外部执行、文件及完成记录。证据不足时继续核对。</MudText>
-                                        <MudCheckBox T="bool" @bind-Value="_failureEvidenceReviewed"
-                                                     Disabled="_busy" data-testid="confirm-failed-evidence"
-                                                     Label="我已确认本次外部执行已结束，并核对文件及完成记录，确认本阶段失败。" />
-                                        <MudText Typo="Typo.caption">确认失败只更新任务结论，保留文件和记录；如需重试，确认后单独操作。</MudText>
-                                        <MudButton OnClick="ConfirmFailedAsync"
-                                                   Disabled="@(_busy || !_failureEvidenceReviewed)"
-                                                   Color="Color.Warning" Variant="Variant.Outlined"
-                                                   data-testid="confirm-failed-task">
-                                            确认失败
-                                        </MudButton>
-                                    }
+                                    <MudAlert Severity="Severity.Info">当前没有自动核对、重试或确认失败。结果未知时保留记录。</MudAlert>
                                 </MudStack>
                             </section>
                         }
@@ -139,11 +118,7 @@
                         <MudStack Row="true" Spacing="2">
                             @if (_detail.Task.Status is "Pending" or "Running")
                             {
-                                <MudButton OnClick="@(() => MutateAsync(false))" Disabled="@(_busy || _detail.Task.CancellationRequested)" data-testid="cancel-task">请求取消</MudButton>
-                            }
-                            @if (_detail.Task.Status == "Failed")
-                            {
-                                <MudButton OnClick="@(() => MutateAsync(true))" Disabled="_busy" Color="Color.Primary" data-testid="retry-task">重试</MudButton>
+                                <MudButton OnClick="CancelAsync" Disabled="@(_busy || _detail.Task.CancellationRequested)" data-testid="cancel-task">请求取消</MudButton>
                             }
                         </MudStack>
                     </MudStack>
@@ -230,9 +205,6 @@
     private enum MutationKind
     {
         Cancel,
-        Retry,
-        Reconcile,
-        ConfirmFailed,
     }
 
     private readonly Dictionary<MutationKind, Guid> _mutationRequests = new();
@@ -240,7 +212,6 @@
     private IDisposable? _notifications;
     private IDisposable? _reconnect;
     private bool _busy, _disposed, _login, _initialized, _refreshPending;
-    private bool _failureEvidenceReviewed;
     private Guid _loadedId;
     private int _routeVersion;
     private string? _error, _message;
@@ -292,7 +263,6 @@
         _message = null;
         _refreshPending = false;
         _mutationRequests.Clear();
-        _failureEvidenceReviewed = false;
         await RefreshAsync();
     }
 
@@ -363,64 +333,26 @@
         if (result.Code == BackupManagementCode.Succeeded)
         {
             _detail = result.Value;
-            if (_detail?.Task.Status != "NeedsAttention" || !_detail.Reconciliation.CanRequest)
-                _failureEvidenceReviewed = false;
             return;
         }
         if (result.Code == BackupManagementCode.NotFound) { _detail = null; return; }
         Failure(result.Code);
     }
 
-    private Task MutateAsync(bool retry) => RunAsync(async actor =>
+    private Task CancelAsync() => RunAsync(async actor =>
     {
         var version = _routeVersion;
         var taskId = Id;
-        var kind = retry ? MutationKind.Retry : MutationKind.Cancel;
-        if (!_mutationRequests.TryGetValue(kind, out var request)) _mutationRequests[kind] = request = Guid.NewGuid();
-        var result = retry
-            ? await Management.RetryAsync(actor, taskId, request, _lifetime.Token)
-            : await Management.CancelAsync(actor, taskId, request, _lifetime.Token);
+        if (!_mutationRequests.TryGetValue(MutationKind.Cancel, out var request))
+            _mutationRequests[MutationKind.Cancel] = request = Guid.NewGuid();
+        var result = await Management.CancelAsync(actor, taskId, request, _lifetime.Token);
         // 命令执行中切换了任务：不写成功消息或错误、不清理新任务的 RequestId、不把旧任务查询写回。
         if (_disposed || version != _routeVersion) return;
         if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
-        _mutationRequests.Remove(kind);
-        _message = retry ? "已提交重试。" : "已提交取消请求。";
+        _mutationRequests.Remove(MutationKind.Cancel);
+        _message = "已提交取消请求。";
         await LoadAsync(actor);
     });
-
-    private Task ReconcileAsync() => RunAsync(async actor =>
-    {
-        var version = _routeVersion;
-        var taskId = Id;
-        if (!_mutationRequests.TryGetValue(MutationKind.Reconcile, out var request)) _mutationRequests[MutationKind.Reconcile] = request = Guid.NewGuid();
-        var result = await Management.RequestReconciliationAsync(actor, taskId, request, _lifetime.Token);
-        // 命令执行中切换了任务：不写成功消息或错误、不清理新任务的 RequestId、不把旧任务查询写回。
-        if (_disposed || version != _routeVersion) return;
-        if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
-        _mutationRequests.Remove(MutationKind.Reconcile);
-        _message = "已提交重新核对，等待 Worker 处理";
-        await LoadAsync(actor);
-    });
-
-    private Task ConfirmFailedAsync()
-    {
-        if (!_failureEvidenceReviewed || _detail?.Task.Status != "NeedsAttention" || !_detail.Reconciliation.CanRequest)
-            return Task.CompletedTask;
-        return RunAsync(async actor =>
-        {
-            var version = _routeVersion;
-            var taskId = Id;
-            if (!_mutationRequests.TryGetValue(MutationKind.ConfirmFailed, out var request))
-                _mutationRequests[MutationKind.ConfirmFailed] = request = Guid.NewGuid();
-            var result = await Management.ConfirmFailedAsync(actor, taskId, request, true, _lifetime.Token);
-            if (_disposed || version != _routeVersion) return;
-            if (result.Code != BackupManagementCode.Succeeded) { Failure(result.Code); return; }
-            _mutationRequests.Remove(MutationKind.ConfirmFailed);
-            _failureEvidenceReviewed = false;
-            _message = "已确认本阶段失败，未发起重试。";
-            await LoadAsync(actor);
-        });
-    }
 
     private void Failure(BackupManagementCode code)
     {

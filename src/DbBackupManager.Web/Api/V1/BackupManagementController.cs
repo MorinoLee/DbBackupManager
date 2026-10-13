@@ -31,15 +31,6 @@ public sealed class BackupManagementController(IBackupManagementService service)
     [HttpPost("backup-tasks/{id:guid}/cancel")]
     [ProducesResponseType<BackupTaskCommandResponse>(200, "application/json")]
     public Task<IActionResult> Cancel(Guid id, BackupTaskCommandRequest request, CancellationToken token) => Execute(async actor => Reply(await service.CancelAsync(actor, id, request.RequestId, token)));
-    [HttpPost("backup-tasks/{id:guid}/retry")]
-    [ProducesResponseType<BackupTaskCommandResponse>(200, "application/json")]
-    public Task<IActionResult> Retry(Guid id, BackupTaskCommandRequest request, CancellationToken token) => Execute(async actor => Reply(await service.RetryAsync(actor, id, request.RequestId, token)));
-    [HttpPost("backup-tasks/{id:guid}/reconcile")]
-    [ProducesResponseType<BackupTaskCommandResponse>(200, "application/json")]
-    public Task<IActionResult> Reconcile(Guid id, BackupTaskCommandRequest request, CancellationToken token) => Execute(async actor => Reply(await service.RequestReconciliationAsync(actor, id, request.RequestId, token)));
-    [HttpPost("backup-tasks/{id:guid}/confirm-failed")]
-    [ProducesResponseType<BackupTaskCommandResponse>(200, "application/json")]
-    public Task<IActionResult> ConfirmFailed(Guid id, ConfirmBackupTaskFailedRequest request, CancellationToken token) => Execute(async actor => Reply(await service.ConfirmFailedAsync(actor, id, request.RequestId, request.EvidenceReviewed, token)));
     [HttpGet("backup-tasks/{id:guid}")]
     [ProducesResponseType<BackupTaskDetailResponse>(200, "application/json")]
     public Task<IActionResult> Detail(Guid id, CancellationToken token) => Execute(async actor =>

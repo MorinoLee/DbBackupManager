@@ -180,13 +180,10 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
         var graph = await GraphAsync(database);
         var planTask = Task(graph.Plan, BackupRunPurpose.PlanFull);
         await SaveAsync(database, planTask, Snapshot(graph, planTask, BackupRunPurpose.PlanFull));
-        using var provider = database.CreateServiceProvider();
-        var store = provider.GetRequiredService<IBackupTaskExecutionStore>();
-        var now = DateTimeOffset.UtcNow;
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(
-            new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "合成旧入口", now, now.AddMinutes(5)))).Code);
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimTaskAsync(planTask.Id,
-            new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "合成旧入口", now, now.AddMinutes(5)))).Code);
+        Assert.DoesNotContain(
+            typeof(IBackupTaskExecutionStore).GetMethods().Select(method => method.Name),
+            name => name is "ClaimNextAsync" or "ClaimTaskAsync" or "RetryFailedAsync"
+                or "RequestReconciliationAsync" or "ConfirmNeedsAttentionAsync");
         await using var db = database.CreateContext();
         Assert.Equal(BackupTaskStatus.Pending, (await db.BackupTasks.SingleAsync(x => x.Id == planTask.Id)).Status);
         Assert.False(await db.BackupAttempts.AnyAsync(x => x.TaskId == planTask.Id));
@@ -194,9 +191,9 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
 
     public static TheoryData<string, string, string, int> ConstraintViolations => new()
     {
-        { "BackupTasks", "Identity", "[PlanId]=NULL", 547 },
-        { "BackupTasks", "Identity", "[PlanVersionId]=NULL", 547 },
-        { "BackupTasks", "Identity", "[PlanId]=NULL,[PlanVersionId]=NULL", 547 },
+        { "BackupTasks", "Identity", "[PlanId]=NULL", 515 },
+        { "BackupTasks", "Identity", "[PlanVersionId]=NULL", 515 },
+        { "BackupTasks", "Identity", "[PlanId]=NULL,[PlanVersionId]=NULL", 515 },
         { "BackupTasks", "BackupType", "[BackupType]=NULL", 515 },
         { "BackupTasks", "BackupType", "[BackupType]='Other'", 547 },
         { "BackupTasks", "CoveredDifferentialSlot", "[BackupType]='Differential',[CoveredDifferentialSlotUtc]='2026-10-08T00:00:00+00:00'", 547 },

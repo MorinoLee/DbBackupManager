@@ -96,6 +96,14 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                 name: "CK_BackupTasks_Identity",
                 table: "BackupTasks");
 
+            migrationBuilder.DropForeignKey(
+                name: "FK_BackupTasks_BackupPlanVersions_PlanId_PlanVersionId",
+                table: "BackupTasks");
+
+            migrationBuilder.DropIndex(
+                name: "UX_BackupTasks_PlanVersion_Type_Slot",
+                table: "BackupTasks");
+
             migrationBuilder.AlterColumn<Guid>(
                 name: "PlanVersionId",
                 table: "BackupTasks",
@@ -117,6 +125,21 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                 table: "BackupTasks",
                 type: "uniqueidentifier",
                 nullable: true);
+
+            migrationBuilder.CreateIndex(
+                name: "UX_BackupTasks_PlanVersion_Type_Slot",
+                table: "BackupTasks",
+                columns: new[] { "PlanId", "PlanVersionId", "BackupType", "ScheduledSlotAtUtc" },
+                unique: true,
+                filter: "[PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL AND [BackupType] IS NOT NULL AND [ScheduledSlotAtUtc] IS NOT NULL");
+
+            migrationBuilder.AddForeignKey(
+                name: "FK_BackupTasks_BackupPlanVersions_PlanId_PlanVersionId",
+                table: "BackupTasks",
+                columns: new[] { "PlanId", "PlanVersionId" },
+                principalTable: "BackupPlanVersions",
+                principalColumns: new[] { "PlanId", "Id" },
+                onDelete: ReferentialAction.Restrict);
 
             migrationBuilder.CreateTable(
                 name: "BackupPolicies",

@@ -13,10 +13,6 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
 {
     internal const string CancellationReason = "task.cancellation_requested";
 
-    private const string RetryReason = "task.retry_requested";
-
-    private const string AdminReconciliationReason = "admin_reconciliation_requested";
-
     public Task<BackupTaskStoreResult<BackupTaskStateModel>> RequestCancellationAsync(
         BackupTaskMutationCommand command,
         CancellationToken cancellationToken = default)
@@ -36,51 +32,6 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
                 return BackupTaskStoreResultCode.Succeeded;
             },
             cancellationToken);
-    }
-
-    public Task<BackupTaskStoreResult<BackupTaskStateModel>> RetryFailedAsync(
-        BackupTaskMutationCommand command,
-        CancellationToken cancellationToken = default)
-    {
-        return MutateTaskAsync(
-            command,
-            RetryReason,
-            "backup.task.retry",
-            (task, storageMode) =>
-            {
-                if (task.PlanId is not null) return BackupTaskStoreResultCode.StateMismatch;
-                task.RetryFailed(storageMode, command.OccurredAtUtc);
-                return BackupTaskStoreResultCode.Succeeded;
-            },
-            cancellationToken);
-    }
-
-    public Task<BackupTaskStoreResult<BackupTaskStateModel>> RequestReconciliationAsync(
-        BackupTaskMutationCommand command,
-        CancellationToken cancellationToken = default)
-    {
-        return MutateTaskAsync(
-            command,
-            AdminReconciliationReason,
-            "backup.task.reconciliation.request",
-            (task, _) =>
-            {
-                task.RequestReconciliation(command.OccurredAtUtc);
-                return BackupTaskStoreResultCode.Succeeded;
-            },
-            cancellationToken,
-            requireActor: true);
-    }
-
-    public async Task<BackupTaskStateModel?> FindTaskAsync(
-        Guid taskId,
-        CancellationToken cancellationToken = default)
-    {
-        await using var context = await persistence.CreateDbContextAsync(cancellationToken);
-        var task = await context.BackupTasks.SingleOrDefaultAsync(
-            item => item.Id == taskId,
-            cancellationToken);
-        return task?.ToStateModel();
     }
 
     private async Task<BackupTaskStoreResult<BackupTaskStateModel>> MutateTaskAsync(

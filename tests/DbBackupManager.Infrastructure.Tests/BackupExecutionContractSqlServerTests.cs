@@ -63,23 +63,6 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
     }
 
     [Fact]
-    public async Task LegacyAuthorizationReplayRejectsChangedIdentityAndNeverGrantsAnotherCall()
-    {
-        var work = await BackupSetTestData.WorkAsync(database);
-        var store = new BackupTaskExecutionStore(new Factory(database));
-        var now = DateTimeOffset.UtcNow;
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded,
-            (await store.MarkBackupInvocationStartedAsync(work.Lease, work.Attempt.RowVersion, now)).Code);
-        var replay = await store.MarkBackupInvocationStartedAsync(work.Lease, work.Attempt.RowVersion, now);
-        Assert.Equal(BackupTaskStoreResultCode.AlreadyApplied, replay.Code);
-        Assert.Null(replay.Value);
-        Assert.Equal(BackupTaskStoreResultCode.ConcurrencyConflict,
-            (await store.MarkBackupInvocationStartedAsync(work.Lease, work.Attempt.RowVersion, now.AddSeconds(1))).Code);
-        await using var db = database.CreateContext();
-        Assert.Equal(1, await db.BackupInvocationAuthorizations.CountAsync());
-    }
-
-    [Fact]
     public async Task ContradictoryFailureAndSuccessFactsCannotTerminateAuthorization()
     {
         var work = await BackupSetTestData.WorkAsync(database);
@@ -148,7 +131,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
         var frozen = await store.FreezeAsync(work.Lease, command);
         Assert.Equal(BackupExecutionContractCode.Succeeded, frozen.Code);
         Assert.Equal(command.Facts, frozen.Value!.Facts);
-        Assert.Equal(BackupExecutionContractCode.StageNotOpen, (await store.ApplyFrozenAsync(work.Lease, identity)).Code);
+        Assert.Equal(BackupExecutionContractCode.Conflict, (await store.ApplyFrozenAsync(work.Lease, identity)).Code);
         Assert.Equal(BackupExecutionContractCode.AlreadyApplied, (await store.FreezeAsync(work.Lease, command)).Code);
         Assert.Equal(BackupExecutionContractCode.Conflict,
             (await store.FreezeAsync(work.Lease, command with { Facts = facts with { Content = facts.Content with { DigestHex = new string('a', 62) + "02" } } })).Code);
@@ -235,6 +218,12 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
     public async Task AdmissionIdentityIsAtomicAndCannotBeReplacedOrFilledAfterInvocation()
     {
         var work = await BackupSetTestData.WorkAsync(database);
+        await using (var clear = database.CreateContext())
+        {
+            await clear.Database.ExecuteSqlRawAsync(
+                "UPDATE [BackupAttempts] SET [ExpectedDatabaseGuid] = NULL, [ExpectedFamilyGuid] = NULL WHERE [Id] = {0}",
+                work.Attempt.Id);
+        }
         var factory = new Factory(database);
         var store = new BackupExecutionOperationStore(factory, TimeProvider.System);
         var identity = ExecutionContractTestData.Identity(work) with { Kind = BackupExecutionOperationKind.Admission };
@@ -265,13 +254,11 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
     public async Task RecoveryTerminationNeedsOriginalBindingMatchingSourcesAndPositiveTerminalProof(bool knownSession, bool terminalObservation)
     {
         var work = await BackupSetTestData.WorkAsync(database);
-        var metadata = BackupSetTestData.Full();
-        await using (var db = database.CreateContext())
+        var metadata = BackupSetTestData.Full() with
         {
-            var attempt = await db.BackupAttempts.AsTracking().SingleAsync();
-            attempt.BindSqlIdentity(metadata.DatabaseGuid.Value!.Value, metadata.FamilyGuid.Value!.Value);
-            await db.SaveChangesAsync();
-        }
+            DatabaseGuid = BackupMetadata.Known(work.Attempt.ExpectedDatabaseGuid!.Value),
+            FamilyGuid = BackupMetadata.Known(work.Attempt.ExpectedFamilyGuid!.Value),
+        };
         var factory = new Factory(database);
         var coordinator = new BackupInvocationAuthorizationStore(factory, TimeProvider.System);
         var command = await ExecutionContractTestData.AuthorizationAsync(database, work);
@@ -336,11 +323,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
                 if (dataKind == "authorization") await new BackupInvocationAuthorizationStore(new Factory(temporary), TimeProvider.System)
                     .AuthorizeAsync(work.Lease, await ExecutionContractTestData.AuthorizationAsync(temporary, work));
                 if (dataKind == "binding")
-                {
-                    var attempt = await db.BackupAttempts.AsTracking().SingleAsync();
-                    attempt.BindSqlIdentity(Guid.NewGuid(), Guid.NewGuid());
-                    await db.SaveChangesAsync();
-                }
+                    Assert.NotNull(work.Attempt.ExpectedDatabaseGuid);
                 var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
                 Assert.Equal(51004, error.Number);
                 Assert.Equal(history, await db.Database.GetAppliedMigrationsAsync());

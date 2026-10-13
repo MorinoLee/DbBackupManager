@@ -7,11 +7,6 @@ public sealed class BackupTaskCommandRequest
     [JsonRequired] public Guid RequestId { get; init; }
 }
 public sealed record BackupTaskCommandResponse(Guid TaskId);
-public sealed class ConfirmBackupTaskFailedRequest
-{
-    [JsonRequired] public Guid RequestId { get; init; }
-    [JsonRequired] public bool EvidenceReviewed { get; init; }
-}
 public sealed record BackupDatabaseChoiceResponse(Guid Id, string Label);
 public sealed record BackupTaskSummaryResponse(Guid Id, string PolicyName, string DatabaseName, string Status, string? Stage,
     DateTimeOffset CreatedAtUtc, DateTimeOffset? CompletedAtUtc, string? ErrorCode, bool CancellationRequested, long? FileLength)

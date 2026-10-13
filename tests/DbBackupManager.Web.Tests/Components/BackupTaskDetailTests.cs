@@ -65,8 +65,10 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
         Assert.Contains("已完成核对次数：1", panel.TextContent, StringComparison.Ordinal);
         Assert.Contains("下次核对时间：", panel.TextContent, StringComparison.Ordinal);
         Assert.Contains("核对结果待确认", panel.TextContent, StringComparison.Ordinal);
-        Assert.Contains("重新核对不会重新备份", panel.TextContent, StringComparison.Ordinal);
-        Assert.NotNull(page.Find("[data-testid='reconcile-task']"));
+        Assert.Contains("当前没有自动核对、重试或确认失败", panel.TextContent, StringComparison.Ordinal);
+        Assert.Empty(page.FindAll("[data-testid='reconcile-task']"));
+        Assert.Empty(page.FindAll("[data-testid='retry-task']"));
+        Assert.Empty(page.FindAll("[data-testid='confirm-failed-task']"));
         Assert.DoesNotContain("synthetic_unknown", panel.TextContent, StringComparison.Ordinal);
         // 错误码收进技术详情，不在摘要或核对面板直接外露。
         Assert.Contains("synthetic_unknown", page.Find("[data-testid='technical-details']").TextContent, StringComparison.Ordinal);
@@ -315,139 +317,6 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
     }
 
     [Fact]
-    public void ReconciliationButtonHiddenWhenCannotRequest()
-    {
-        Authenticate();
-        _service.CanRequest = false;
-        var page = Render<Page>(parameters => parameters.Add(x => x.Id, FakeManagement.TaskId));
-
-        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='reconciliation-panel']")));
-        Assert.Contains("重新核对不会重新备份", page.Markup, StringComparison.Ordinal);
-        Assert.Empty(page.FindAll("[data-testid='reconcile-task']"));
-        Assert.Empty(_service.ReconcileCalls);
-    }
-
-    [Fact]
-    public void ReconciliationSuccessClearsRequestIdAndShowsFixedMessage()
-    {
-        Authenticate();
-        var page = Render<Page>(parameters => parameters.Add(x => x.Id, FakeManagement.TaskId));
-        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='reconcile-task']")));
-
-        page.Find("[data-testid='reconcile-task']").Click();
-        page.WaitForAssertion(() => Assert.Contains("已提交重新核对，等待 Worker 处理", page.Markup, StringComparison.Ordinal));
-        Assert.Single(_service.ReconcileCalls);
-        var first = _service.ReconcileCalls[0].RequestId;
-
-        page.Find("[data-testid='reconcile-task']").Click();
-        page.WaitForAssertion(() => Assert.Equal(2, _service.ReconcileCalls.Count));
-        Assert.NotEqual(first, _service.ReconcileCalls[1].RequestId);
-        Assert.Empty(_service.CancelCalls);
-    }
-
-    [Fact]
-    public void ReconciliationFailureReplaysTheSameRequestId()
-    {
-        Authenticate();
-        _service.ReconcileCode = BackupManagementCode.Conflict;
-        var page = Render<Page>(parameters => parameters.Add(x => x.Id, FakeManagement.TaskId));
-        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='reconcile-task']")));
-
-        page.Find("[data-testid='reconcile-task']").Click();
-        page.WaitForAssertion(() => Assert.Single(_service.ReconcileCalls));
-        page.Find("[data-testid='reconcile-task']").Click();
-        page.WaitForAssertion(() => Assert.Equal(2, _service.ReconcileCalls.Count));
-
-        Assert.Equal(_service.ReconcileCalls[0].RequestId, _service.ReconcileCalls[1].RequestId);
-        Assert.Contains("状态不允许此操作", page.Markup, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ReconciliationInFlightDisablesButtonAndDoesNotSendAgain()
-    {
-        Authenticate();
-        var page = Render<Page>(parameters => parameters.Add(x => x.Id, FakeManagement.TaskId));
-        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='reconcile-task']")));
-
-        var gate = new TaskCompletionSource<BackupManagementResult<Guid>>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        _service.ReconcileGate = gate;
-        page.Find("[data-testid='reconcile-task']").Click();
-        page.WaitForAssertion(() => Assert.True(page.Find("[data-testid='reconcile-task']").HasAttribute("disabled")));
-        Assert.Single(_service.ReconcileCalls);
-
-        _service.ReconcileGate = null;
-        gate.SetResult(new BackupManagementResult<Guid>(BackupManagementCode.Succeeded, FakeManagement.TaskId));
-        page.WaitForAssertion(() => Assert.Contains("已提交重新核对，等待 Worker 处理", page.Markup, StringComparison.Ordinal));
-        Assert.Single(_service.ReconcileCalls);
-    }
-
-    [Fact]
-    public void ReconciliationAuthenticationFailureClearsSensitiveContent()
-    {
-        Authenticate();
-        _service.ReconcileCode = BackupManagementCode.AuthenticationRequired;
-        var page = Render<Page>(parameters => parameters.Add(x => x.Id, FakeManagement.TaskId));
-        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='reconcile-task']")));
-
-        page.Find("[data-testid='reconcile-task']").Click();
-        page.WaitForAssertion(() => Assert.Contains("重新登录", page.Markup, StringComparison.Ordinal));
-        Assert.DoesNotContain("外部执行结果尚未确定", page.Markup, StringComparison.Ordinal);
-        Assert.Empty(page.FindAll("[data-testid='task-summary']"));
-        Assert.Empty(page.FindAll("[data-testid='reconciliation-panel']"));
-    }
-
-    [Fact]
-    public void SwitchingRouteClearsReconciliationRequestIdAndMessage()
-    {
-        Authenticate();
-        _service.ReconcileCode = BackupManagementCode.Conflict;
-        var host = Render<DetailHost>(parameters => parameters.Add(x => x.InitialId, FakeManagement.TaskId));
-        host.WaitForAssertion(() => Assert.NotNull(host.Find("[data-testid='reconcile-task']")));
-
-        host.Find("[data-testid='reconcile-task']").Click();
-        host.WaitForAssertion(() => Assert.Single(_service.ReconcileCalls));
-        Assert.Contains("状态不允许此操作", host.Markup, StringComparison.Ordinal);
-
-        _service.ReconcileCode = BackupManagementCode.Succeeded;
-        host.InvokeAsync(() => host.Instance.Show(FakeManagement.OtherTaskId));
-        host.WaitForAssertion(() => Assert.Contains("另一备份", host.Markup, StringComparison.Ordinal));
-        Assert.DoesNotContain("测试备份", host.Markup, StringComparison.Ordinal);
-        Assert.DoesNotContain("状态不允许此操作", host.Markup, StringComparison.Ordinal);
-        Assert.DoesNotContain("已提交重新核对，等待 Worker 处理", host.Markup, StringComparison.Ordinal);
-
-        host.Find("[data-testid='reconcile-task']").Click();
-        host.WaitForAssertion(() => Assert.Equal(2, _service.ReconcileCalls.Count));
-        Assert.Equal(FakeManagement.TaskId, _service.ReconcileCalls[0].TaskId);
-        Assert.Equal(FakeManagement.OtherTaskId, _service.ReconcileCalls[1].TaskId);
-        Assert.NotEqual(_service.ReconcileCalls[0].RequestId, _service.ReconcileCalls[1].RequestId);
-        Assert.Empty(_service.CancelCalls);
-    }
-
-    [Fact]
-    public void InFlightReconciliationMustNotWriteAfterRouteSwitch()
-    {
-        Authenticate();
-        var host = Render<DetailHost>(parameters => parameters.Add(x => x.InitialId, FakeManagement.TaskId));
-        host.WaitForAssertion(() => Assert.NotNull(host.Find("[data-testid='reconcile-task']")));
-
-        var gate = new TaskCompletionSource<BackupManagementResult<Guid>>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        _service.ReconcileGate = gate;
-        host.Find("[data-testid='reconcile-task']").Click();
-        host.WaitForAssertion(() => Assert.Single(_service.ReconcileCalls));
-
-        host.InvokeAsync(() => host.Instance.Show(FakeManagement.OtherTaskId));
-        _service.ReconcileGate = null;
-        gate.SetResult(new BackupManagementResult<Guid>(BackupManagementCode.Succeeded, FakeManagement.TaskId));
-
-        host.WaitForAssertion(() => Assert.Contains("另一备份", host.Markup, StringComparison.Ordinal));
-        Assert.DoesNotContain("已提交重新核对，等待 Worker 处理", host.Markup, StringComparison.Ordinal);
-        Assert.DoesNotContain("测试备份", host.Markup, StringComparison.Ordinal);
-        Assert.Equal(FakeManagement.OtherTaskId, _service.LastRequestedId);
-    }
-
-    [Fact]
     public void KnownReconciliationReasonIsMappedWithoutEchoingCode()
     {
         Authenticate();
@@ -458,68 +327,6 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
         var panel = page.Find("[data-testid='reconciliation-panel']").TextContent;
         Assert.Contains("只读核对未找到任务专属备份文件", panel, StringComparison.Ordinal);
         Assert.DoesNotContain("reconciliation.file_missing", panel, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ConfirmFailedRequiresEvidenceAndReusesRequestAfterUncertainResponseWithoutRetrying()
-    {
-        Authenticate();
-        var page = Render<Page>(parameters => parameters.Add(x => x.Id, FakeManagement.TaskId));
-        page.WaitForAssertion(() => Assert.True(page.Find("[data-testid='confirm-failed-task']").HasAttribute("disabled")));
-        Assert.Empty(_service.ConfirmCalls);
-        page.Find("[data-testid='confirm-failed-evidence']").Change(true);
-        _service.ConfirmCode = BackupManagementCode.Unavailable;
-        page.Find("[data-testid='confirm-failed-task']").Click();
-        page.WaitForAssertion(() => Assert.Single(_service.ConfirmCalls));
-        _service.ConfirmCode = BackupManagementCode.Succeeded;
-        page.Find("[data-testid='confirm-failed-task']").Click();
-        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='retry-task']")));
-        Assert.Equal(2, _service.ConfirmCalls.Count);
-        Assert.Equal(_service.ConfirmCalls[0], _service.ConfirmCalls[1]);
-        Assert.True(_service.ConfirmCalls[0].EvidenceReviewed);
-        Assert.Contains("已确认本阶段失败，未发起重试", page.Markup, StringComparison.Ordinal);
-        Assert.Empty(_service.RetryCalls);
-        page.Find("[data-testid='retry-task']").Click();
-        page.WaitForAssertion(() => Assert.Single(_service.RetryCalls));
-    }
-
-    [Fact]
-    public void ConfirmFailedIsHiddenDuringActiveLeaseOrOutsideNeedsAttention()
-    {
-        Authenticate();
-        _service.CanRequest = false;
-        var page = Render<Page>(parameters => parameters.Add(x => x.Id, FakeManagement.TaskId));
-        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='task-summary']")));
-        Assert.Empty(page.FindAll("[data-testid='confirm-failed-task']"));
-        _service.ServePendingCancelable = true;
-        _notifier.Publish();
-        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='cancel-task']")));
-        Assert.Empty(page.FindAll("[data-testid='confirm-failed-evidence']"));
-        Assert.Empty(_service.ConfirmCalls);
-    }
-
-    [Fact]
-    public void RouteSwitchClearsConfirmationAndDiscardsOldConfirmationResponse()
-    {
-        Authenticate();
-        var host = Render<DetailHost>(parameters => parameters.Add(x => x.InitialId, FakeManagement.TaskId));
-        host.WaitForAssertion(() => Assert.NotNull(host.Find("[data-testid='confirm-failed-evidence']")));
-        host.Find("[data-testid='confirm-failed-evidence']").Change(true);
-        var gate = new TaskCompletionSource<BackupManagementResult<Guid>>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _service.ConfirmGate = gate;
-        host.Find("[data-testid='confirm-failed-task']").Click();
-        host.WaitForAssertion(() => Assert.Single(_service.ConfirmCalls));
-        host.InvokeAsync(() => host.Instance.Show(FakeManagement.OtherTaskId));
-        _service.ConfirmGate = null;
-        gate.SetResult(new(BackupManagementCode.Succeeded, FakeManagement.TaskId));
-        host.WaitForAssertion(() => Assert.Contains("另一备份", host.Markup, StringComparison.Ordinal));
-        Assert.DoesNotContain("已确认本阶段失败，未发起重试", host.Markup, StringComparison.Ordinal);
-        Assert.True(host.Find("[data-testid='confirm-failed-task']").HasAttribute("disabled"));
-        host.Find("[data-testid='confirm-failed-evidence']").Change(true);
-        host.Find("[data-testid='confirm-failed-task']").Click();
-        host.WaitForAssertion(() => Assert.Equal(2, _service.ConfirmCalls.Count));
-        Assert.Equal(FakeManagement.OtherTaskId, _service.ConfirmCalls[1].TaskId);
-        Assert.NotEqual(_service.ConfirmCalls[0].RequestId, _service.ConfirmCalls[1].RequestId);
     }
 
     /// <summary>模拟路由器复用页面组件实例：同一宿主只改变 Id 参数重新下发。</summary>
@@ -585,20 +392,12 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
         public Guid LastRequestedId;
         public BackupManagementCode Code = BackupManagementCode.Succeeded;
         public BackupManagementCode CancelCode = BackupManagementCode.Succeeded;
-        public BackupManagementCode ReconcileCode = BackupManagementCode.Succeeded;
-        public BackupManagementCode ConfirmCode = BackupManagementCode.Succeeded;
         public bool ServePendingCancelable;
         public bool CanRequest = true;
         public string? ReconciliationReasonCode = "synthetic_unknown";
         public TaskCompletionSource<BackupManagementResult<BackupTaskDetail>>? Gate;
         public TaskCompletionSource<BackupManagementResult<Guid>>? CancelGate;
-        public TaskCompletionSource<BackupManagementResult<Guid>>? ReconcileGate;
-        public TaskCompletionSource<BackupManagementResult<Guid>>? ConfirmGate;
-        public List<(Guid TaskId, Guid RequestId, bool EvidenceReviewed)> ConfirmCalls { get; } = [];
-        public List<Guid> RetryCalls { get; } = [];
-        private readonly HashSet<Guid> _failedTasks = [];
         public List<(Guid TaskId, Guid RequestId)> CancelCalls { get; } = [];
-        public List<(Guid TaskId, Guid RequestId)> ReconcileCalls { get; } = [];
 
         public static BackupTaskDetail DetailFor(Guid taskId)
         {
@@ -625,26 +424,6 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
             return Task.FromResult(new BackupManagementResult<Guid>(CancelCode,
                 CancelCode == BackupManagementCode.Succeeded ? taskId : Guid.Empty));
         }
-        public Task<BackupManagementResult<Guid>> RetryAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default)
-        { RetryCalls.Add(taskId); return Task.FromResult(new BackupManagementResult<Guid>(BackupManagementCode.Succeeded, taskId)); }
-        public Task<BackupManagementResult<Guid>> ConfirmFailedAsync(AdminSession actor, Guid taskId, Guid requestId, bool evidenceReviewed, CancellationToken token = default)
-        {
-            ConfirmCalls.Add((taskId, requestId, evidenceReviewed));
-            if (ConfirmGate is not null) return ConfirmGate.Task;
-            if (ConfirmCode == BackupManagementCode.Succeeded) _failedTasks.Add(taskId);
-            return Task.FromResult(new BackupManagementResult<Guid>(ConfirmCode, taskId));
-        }
-        public Task<BackupManagementResult<Guid>> RequestReconciliationAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default)
-        {
-            ReconcileCalls.Add((taskId, requestId));
-            if (ReconcileGate is not null)
-            {
-                return ReconcileGate.Task;
-            }
-
-            return Task.FromResult(new BackupManagementResult<Guid>(ReconcileCode,
-                ReconcileCode == BackupManagementCode.Succeeded ? taskId : Guid.Empty));
-        }
         public Task<BackupManagementResult<BackupTaskDetail>> DetailAsync(AdminSession actor, Guid taskId, CancellationToken token = default)
         {
             DetailCalls++;
@@ -664,7 +443,7 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
                 var detail = DetailFor(taskId);
                 return detail with
                 {
-                    Task = _failedTasks.Contains(taskId) ? detail.Task with { Status = "Failed" } : detail.Task,
+                    Task = detail.Task,
                     Reconciliation = new BackupReconciliationSummary(
                         detail.Reconciliation.AttemptCount,
                         detail.Reconciliation.NextAtUtc,
