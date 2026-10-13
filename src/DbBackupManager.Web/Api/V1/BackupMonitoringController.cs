@@ -25,7 +25,7 @@ public sealed class BackupMonitoringController(IBackupMonitoringService service)
         var result = await service.OverviewAsync(actor, token);
         if (result.Code != BackupManagementCode.Succeeded) return Failure(result.Code);
         var x = result.Value!;
-        return Ok(new BackupOverviewResponse(x.GeneratedAtUtc, x.RecentFromUtc, x.ManagedDatabases, x.WithoutEnabledPolicy,
+        return Ok(new BackupOverviewResponse(x.GeneratedAtUtc, x.RecentFromUtc, x.ManagedDatabases,
             x.NeverVerified, x.WithVerifiedFile, x.PendingTasks, x.RunningTasks, x.NeedsAttentionTasks, x.RecentFailedTasks,
             new(x.Worker.Status, x.Worker.LastSeenAtUtc, x.Worker.OfflineAfterSeconds),
             x.RecentTasks.Select(Map).ToArray(), x.RecentFailures.Select(Map).ToArray(), x.RecentFiles.Select(Map).ToArray()));

@@ -228,7 +228,7 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
             environment.FileVerifier = adapter;
             IBackupPlanFileTransferExecutor planTransfer = adapter;
             if (fault is not null) planTransfer = fault.Wrap(planTransfer);
-            var deletion = new BackupFileStorageAdapter([local], new BackupArtifactDeletionGuard(factory, TimeProvider.System), new PlanCopyDeletionCoordinator(factory, TimeProvider.System));
+            var deletion = new BackupFileStorageAdapter([local], new BackupArtifactDeletionGuard(factory), new PlanCopyDeletionCoordinator(factory, TimeProvider.System));
             var staging = new PlanRemoteStagingCleaner(new PlanLocationRetentionStore(factory), store, simple, deletion, TimeProvider.System);
             environment.Runner = new(store, operations, authorizations, environment, environment, simple, simple, adapter, planTransfer, stages, staging, TimeProvider.System);
             environment.Staging = staging;

@@ -4,7 +4,9 @@ using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Identity;
 using DbBackupManager.Application.TargetSql;
 using DbBackupManager.Contracts.Api.V1;
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
+using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Infrastructure.Persistence;
 using DbBackupManager.Web.Authentication;
 using Microsoft.EntityFrameworkCore;
@@ -91,46 +93,43 @@ public sealed class BackupManagementWebTests
                 IsEnabled = true,
             }, token);
         var target = (await storage.Content.ReadFromJsonAsync<StorageTargetResponse>())!;
-        using var remotePolicyResponse = await SendAsync(client, HttpMethod.Post, "/api/v1/manual-backup-policies",
-            new SaveManualBackupRequest
-            {
-                DatabaseId = database.Id,
-                Name = "合成远程手动备份",
-                RetentionDays = 7,
-                BackupTimeoutMinutes = 120,
-                VerifyTimeoutMinutes = 60,
-                UseCompression = false,
-                IsEnabled = true,
-                StorageMode = 2,
-                StorageTargetId = target.Id,
-                RemoteRetentionDays = 14,
-                TransferTimeoutMinutes = 90,
-            }, token);
-        Assert.Equal(HttpStatusCode.OK, remotePolicyResponse.StatusCode);
-        var remotePolicy = (await remotePolicyResponse.Content.ReadFromJsonAsync<ManualBackupPolicyResponse>())!;
-        Assert.Equal(2, remotePolicy.Settings.StorageMode);
-        Assert.Equal(target.Id, remotePolicy.Settings.StorageTargetId);
-        Assert.Equal(14, remotePolicy.Settings.RemoteRetentionDays);
-        using var rejectedLocalWithTarget = await SendAsync(client, HttpMethod.Post, "/api/v1/manual-backup-policies",
-            new SaveManualBackupRequest
-            {
-                DatabaseId = database.Id,
-                Name = "本地不应带目标",
-                RetentionDays = 7,
-                BackupTimeoutMinutes = 120,
-                VerifyTimeoutMinutes = 60,
-                UseCompression = false,
-                IsEnabled = true,
-                StorageTargetId = target.Id,
-            }, token);
-        Assert.Equal(HttpStatusCode.BadRequest, rejectedLocalWithTarget.StatusCode);
-        var policy = remotePolicy;
+        Assert.NotEqual(Guid.Empty, target.Id);
+        using var planResponse = await SendAsync(client, HttpMethod.Post, "/api/v1/backup-plans", new SaveBackupPlanRequest
+        {
+            DatabaseId = database.Id,
+            Name = "合成备份计划",
+            Mode = 1,
+            FullSchedule = new BackupPlanScheduleRequest { ScheduleType = 2, LocalTime = new TimeOnly(1, 15), DaysOfWeek = 1 },
+            TimeZoneId = "UTC",
+            StorageMode = 1,
+            LocalRecoveryWindowDays = 7,
+            UseCompression = false,
+            BackupTimeoutMinutes = 60,
+            VerifyTimeoutMinutes = 30,
+            TransferTimeoutMinutes = 45,
+            IsPaused = true,
+        }, token);
+        Assert.Equal(HttpStatusCode.OK, planResponse.StatusCode);
+        var plan = (await planResponse.Content.ReadFromJsonAsync<BackupPlanResponse>())!;
         var requestId = Guid.NewGuid();
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync($"/api/v1/manual-backup-policies/{policy.Id}/run", new BackupTaskCommandRequest { RequestId = requestId })).StatusCode);
-        using var run = await SendAsync(client, HttpMethod.Post, $"/api/v1/manual-backup-policies/{policy.Id}/run", new BackupTaskCommandRequest { RequestId = requestId }, token);
-        Assert.Equal(HttpStatusCode.OK, run.StatusCode);
-        using var replay = await SendAsync(client, HttpMethod.Post, $"/api/v1/manual-backup-policies/{policy.Id}/run", new BackupTaskCommandRequest { RequestId = requestId }, token);
-        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        using (var scope = host.CreateScope())
+        {
+            var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+            await using var db = await factory.CreateDbContextAsync();
+            var version = await db.BackupPlanVersions.SingleAsync(item => item.Id == plan.CurrentVersionId);
+            var managed = await db.ManagedDatabases.SingleAsync(item => item.Id == database.Id);
+            var instanceEntity = await db.DatabaseInstances.SingleAsync(item => item.Id == managed.InstanceId);
+            var serverEntity = await db.DatabaseServers.SingleAsync(item => item.Id == instanceEntity.ServerId);
+            var task = BackupTask.ForPlan(requestId, plan.Id, version.Id, BackupRunPurpose.PlanFull, BackupTaskTriggerType.Manual, null);
+            var snapshot = BackupTaskSnapshot.ForPlan(task, version, plan.Name, BackupRunPurpose.PlanFull,
+                new(serverEntity.Id, serverEntity.Name, instanceEntity.Id, instanceEntity.Name, managed.Id, managed.DatabaseName),
+                new(instanceEntity.ConnectionAddress, instanceEntity.SqlCredentialReferenceId, true, false, null, instanceEntity.ConnectionTimeoutSeconds),
+                new(serverEntity.LocalBackupRootPath, "v3", new(serverEntity.StagingAccessProtocol, serverEntity.StagingAccessHost,
+                    serverEntity.StagingAccessPort, serverEntity.StagingAccessBasePath, serverEntity.StagingCredentialReferenceId,
+                    serverEntity.StagingSftpHostKeyFingerprint)));
+            db.AddRange(task, snapshot);
+            await db.SaveChangesAsync();
+        }
         var dashboard = (await client.GetFromJsonAsync<BackupDashboardResponse>("/api/v1/backup-dashboard"))!;
         Assert.Single(dashboard.Tasks); Assert.Equal("Pending", dashboard.Tasks[0].Status);
         using var detailResponse = await client.GetAsync($"/api/v1/backup-tasks/{requestId}");
@@ -145,87 +144,12 @@ public sealed class BackupManagementWebTests
         Assert.Null(detail.Reconciliation.NextAtUtc);
         Assert.False(detail.Reconciliation.CanRequest);
 
-        var reconciliationTaskId = Guid.NewGuid();
-        using var secondRun = await SendAsync(client, HttpMethod.Post, $"/api/v1/manual-backup-policies/{policy.Id}/run",
-            new BackupTaskCommandRequest { RequestId = reconciliationTaskId }, token);
-        Assert.Equal(HttpStatusCode.OK, secondRun.StatusCode);
-        using var serviceScope = host.CreateScope();
-        var store = serviceScope.ServiceProvider.GetRequiredService<IBackupTaskExecutionStore>();
-        var now = DateTimeOffset.UtcNow;
-        var claimed = await store.ClaimTaskAsync(
-            reconciliationTaskId,
-            new ClaimNextBackupTaskCommand(
-                Guid.NewGuid(),
-                Guid.NewGuid(),
-                Guid.NewGuid(),
-                "web-reconciliation-test",
-                now,
-                now.AddMinutes(5)));
-        var marked = await store.MarkBackupInvocationStartedAsync(
-            claimed.Value!.Lease,
-            claimed.Value.Attempt.RowVersion,
-            now.AddSeconds(1));
-        var unknown = await store.CommitStageAsync(
-            marked.Value!,
-            new BackupStageCommitCommand(
-                Guid.NewGuid(),
-                BackupStageOutcome.Indeterminate,
-                now.AddSeconds(2),
-                ErrorCode: "synthetic_result_unknown",
-                ErrorMessage: "合成结果不确定"));
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded, unknown.Code);
-
-        using var anonymous = host.CreateHttpClient();
-        var anonymousToken = (await anonymous.GetFromJsonAsync<CsrfTokenResponse>("/api/v1/auth/csrf"))!.Token;
-        using var unauthorized = await SendAsync(anonymous, HttpMethod.Post,
-            $"/api/v1/backup-tasks/{reconciliationTaskId}/reconcile",
-            new BackupTaskCommandRequest { RequestId = Guid.NewGuid() }, anonymousToken);
-        Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
-        using var missingCsrf = await client.PostAsJsonAsync(
-            $"/api/v1/backup-tasks/{reconciliationTaskId}/reconcile",
-            new BackupTaskCommandRequest { RequestId = Guid.NewGuid() });
-        Assert.Equal(HttpStatusCode.BadRequest, missingCsrf.StatusCode);
-        using var invalidReconciliation = await SendAsync(client, HttpMethod.Post,
-            $"/api/v1/backup-tasks/{reconciliationTaskId}/reconcile",
-            new BackupTaskCommandRequest { RequestId = Guid.Empty }, token);
-        Assert.Equal(HttpStatusCode.BadRequest, invalidReconciliation.StatusCode);
-
-        var reconciliationRequestId = Guid.NewGuid();
-        using var requestedReconciliation = await SendAsync(client, HttpMethod.Post,
-            $"/api/v1/backup-tasks/{reconciliationTaskId}/reconcile",
-            new BackupTaskCommandRequest { RequestId = reconciliationRequestId }, token);
-        using var replayedReconciliation = await SendAsync(client, HttpMethod.Post,
-            $"/api/v1/backup-tasks/{reconciliationTaskId}/reconcile",
-            new BackupTaskCommandRequest { RequestId = reconciliationRequestId }, token);
-        Assert.Equal(HttpStatusCode.OK, requestedReconciliation.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, replayedReconciliation.StatusCode);
-        var reconciliationDetail = (await client.GetFromJsonAsync<BackupTaskDetailResponse>(
-            $"/api/v1/backup-tasks/{reconciliationTaskId}"))!;
-        Assert.Equal("NeedsAttention", reconciliationDetail.Task.Status);
-        Assert.Equal(0, reconciliationDetail.Reconciliation.AttemptCount);
-        Assert.NotNull(reconciliationDetail.Reconciliation.NextAtUtc);
-        Assert.Equal("synthetic_result_unknown", reconciliationDetail.Reconciliation.ReasonCode);
-        Assert.True(reconciliationDetail.Reconciliation.CanRequest);
-        var reconciliationRaw = await client.GetStringAsync($"/api/v1/backup-tasks/{reconciliationTaskId}");
-        Assert.DoesNotContain("leaseToken", reconciliationRaw, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("rowVersion", reconciliationRaw, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("errorMessage", reconciliationRaw, StringComparison.OrdinalIgnoreCase);
-
-        var activeLease = await store.AcquireReconciliationLeaseAsync(new AcquireReconciliationLeaseCommand(
-            reconciliationTaskId,
-            Guid.NewGuid(),
-            "web-reconciliation-active",
-            DateTimeOffset.UtcNow.AddSeconds(1),
-            DateTimeOffset.UtcNow.AddMinutes(1)));
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded, activeLease.Code);
-        using var conflictingReconciliation = await SendAsync(client, HttpMethod.Post,
-            $"/api/v1/backup-tasks/{reconciliationTaskId}/reconcile",
-            new BackupTaskCommandRequest { RequestId = Guid.NewGuid() }, token);
-        Assert.Equal(HttpStatusCode.Conflict, conflictingReconciliation.StatusCode);
-        Assert.False((await client.GetFromJsonAsync<BackupTaskDetailResponse>(
-            $"/api/v1/backup-tasks/{reconciliationTaskId}"))!.Reconciliation.CanRequest);
-        await VerifyConfirmFailedAsync(host, store, serviceScope.ServiceProvider,
-            reconciliationTaskId, requestId, activeLease.Value!.Lease, token);
+        foreach (var path in new[] { "retry", "reconcile", "confirm-failed" })
+        {
+            using var closed = await client.PostAsync($"/api/v1/backup-tasks/{requestId}/{path}", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
+            // 这三个动作已从 API 删除。未匹配的 POST 会落到只接受 GET 的页面终结点，因此返回 405。
+            Assert.Equal(HttpStatusCode.MethodNotAllowed, closed.StatusCode);
+        }
         // 旧 /backups 入口保留兼容跳转，指向拆分后的任务记录页。
         using var backupsPage = await client.GetAsync("/backups");
         Assert.Equal(HttpStatusCode.Redirect, backupsPage.StatusCode);
@@ -239,78 +163,6 @@ public sealed class BackupManagementWebTests
         using var updateWithoutVersion = await SendAsync(client, HttpMethod.Put, $"/api/v1/servers/{server.Id}", serverRequest, token);
         Assert.Equal(HttpStatusCode.BadRequest, updateWithoutVersion.StatusCode);
     }
-    private static async Task VerifyConfirmFailedAsync(AuthTestHost host, IBackupTaskExecutionStore store,
-        IServiceProvider services, Guid taskId, Guid cancelledTaskId, LeaseHandle lease, string token)
-    {
-        var client = host.Client;
-        var path = $"/api/v1/backup-tasks/{taskId}/confirm-failed";
-        var command = new ConfirmBackupTaskFailedRequest { RequestId = Guid.NewGuid(), EvidenceReviewed = true };
-        using var anonymous = host.CreateHttpClient();
-        var anonymousToken = (await anonymous.GetFromJsonAsync<CsrfTokenResponse>("/api/v1/auth/csrf"))!.Token;
-        using var unauthenticated = await SendAsync(anonymous, HttpMethod.Post, path, command, anonymousToken);
-        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
-        using var noCsrf = await client.PostAsJsonAsync(path, command);
-        Assert.Equal(HttpStatusCode.BadRequest, noCsrf.StatusCode);
-        using var missingReview = await SendAsync(client, HttpMethod.Post, path, new { command.RequestId }, token);
-        Assert.Equal(HttpStatusCode.BadRequest, missingReview.StatusCode);
-        using var notReviewed = await SendAsync(client, HttpMethod.Post, path,
-            new ConfirmBackupTaskFailedRequest { RequestId = command.RequestId }, token);
-        Assert.Equal(HttpStatusCode.BadRequest, notReviewed.StatusCode);
-        using var emptyRequest = await SendAsync(client, HttpMethod.Post, path,
-            new ConfirmBackupTaskFailedRequest { RequestId = Guid.Empty, EvidenceReviewed = true }, token);
-        Assert.Equal(HttpStatusCode.BadRequest, emptyRequest.StatusCode);
-        using var active = await SendAsync(client, HttpMethod.Post, path, command, token);
-        Assert.Equal(HttpStatusCode.Conflict, active.StatusCode);
-
-        var factory = services.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            var admin = await db.AdminUsers.SingleAsync();
-            var rejected = await services.GetRequiredService<IBackupManagementService>().ConfirmFailedAsync(
-                new AdminSession(admin.Id, admin.Username, "stale-security-stamp"), taskId, command.RequestId, true);
-            Assert.Equal(BackupManagementCode.AuthenticationRequired, rejected.Code);
-            Assert.False(await db.BackupTaskStateChanges.AnyAsync(x => x.MutationId == command.RequestId));
-        }
-        var released = await store.CommitReconciliationAsync(lease,
-            new ReconciliationCommitCommand(Guid.NewGuid(), BackupReconciliationOutcome.Inconclusive,
-                DateTimeOffset.UtcNow.AddSeconds(2), ErrorCode: "reconciliation.file_missing", ErrorMessage: "合成文件缺失"));
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded, released.Code);
-        using var wrongState = await SendAsync(client, HttpMethod.Post,
-            $"/api/v1/backup-tasks/{cancelledTaskId}/confirm-failed", command, token);
-        Assert.Equal(HttpStatusCode.Conflict, wrongState.StatusCode);
-        using var missing = await SendAsync(client, HttpMethod.Post,
-            $"/api/v1/backup-tasks/{Guid.NewGuid()}/confirm-failed", command, token);
-        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
-        using var confirmed = await SendAsync(client, HttpMethod.Post, path, command, token);
-        using var replay = await SendAsync(client, HttpMethod.Post, path, command, token);
-        Assert.Equal(HttpStatusCode.OK, confirmed.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
-        using var reused = await SendAsync(client, HttpMethod.Post,
-            $"/api/v1/backup-tasks/{cancelledTaskId}/confirm-failed", command, token);
-        Assert.Equal(HttpStatusCode.Conflict, reused.StatusCode);
-        using var repeatedConclusion = await SendAsync(client, HttpMethod.Post, path,
-            new ConfirmBackupTaskFailedRequest { RequestId = Guid.NewGuid(), EvidenceReviewed = true }, token);
-        Assert.Equal(HttpStatusCode.Conflict, repeatedConclusion.StatusCode);
-        var detail = (await client.GetFromJsonAsync<BackupTaskDetailResponse>($"/api/v1/backup-tasks/{taskId}"))!;
-        Assert.Equal("Failed", detail.Task.Status);
-        Assert.Equal("admin_confirmed_failed", detail.Task.ErrorCode);
-        Assert.Equal("ConfirmedFailed", Assert.Single(detail.Attempts).InvocationStatus);
-        Assert.Empty(detail.Files);
-        Assert.True(await host.HasAuditAsync("backup.task.reconciliation.confirm_failed"));
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            Assert.Equal(0, (await db.BackupTasks.SingleAsync(x => x.Id == taskId)).RetryCount);
-            Assert.Equal(1, await db.BackupTaskStateChanges.CountAsync(x => x.MutationId == command.RequestId));
-            Assert.Equal(1, await db.TaskEvents.CountAsync(x => x.EventId == command.RequestId));
-            Assert.Equal(1, await db.NotificationOutbox.CountAsync(x => x.MutationId == command.RequestId));
-            Assert.Equal(1, await db.AuditRecords.CountAsync(x => x.Action == "backup.task.reconciliation.confirm_failed"));
-        }
-        using var retry = await SendAsync(client, HttpMethod.Post, $"/api/v1/backup-tasks/{taskId}/retry",
-            new BackupTaskCommandRequest { RequestId = Guid.NewGuid() }, token);
-        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
-        Assert.Equal("Pending", (await client.GetFromJsonAsync<BackupTaskDetailResponse>($"/api/v1/backup-tasks/{taskId}"))!.Task.Status);
-    }
-
     private static Task<HttpResponseMessage> SendAsync<T>(HttpClient client, HttpMethod method, string path, T value, string token)
     {
         var request = new HttpRequestMessage(method, path) { Content = JsonContent.Create(value) };

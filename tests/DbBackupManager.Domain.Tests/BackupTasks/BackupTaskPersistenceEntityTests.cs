@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 
@@ -306,21 +307,27 @@ public sealed class BackupTaskPersistenceEntityTests
     public void TriggerTypeAndScheduledSlotMustMatch()
     {
         Assert.Throws<ArgumentException>(() =>
-            new BackupTask(
+            BackupTask.ForPlan(
                 Guid.NewGuid(),
                 Guid.NewGuid(),
+                Guid.NewGuid(),
+                BackupRunPurpose.PlanFull,
                 BackupTaskTriggerType.Scheduled,
                 null));
         Assert.Throws<ArgumentException>(() =>
-            new BackupTask(
+            BackupTask.ForPlan(
                 Guid.NewGuid(),
                 Guid.NewGuid(),
+                Guid.NewGuid(),
+                BackupRunPurpose.PlanFull,
                 BackupTaskTriggerType.Manual,
                 BaselineUtc));
         Assert.Throws<ArgumentException>(() =>
-            new BackupTask(
+            BackupTask.ForPlan(
                 Guid.NewGuid(),
                 Guid.NewGuid(),
+                Guid.NewGuid(),
+                BackupRunPurpose.PlanFull,
                 BackupTaskTriggerType.Scheduled,
                 BaselineUtc.ToOffset(TimeSpan.FromHours(8))));
     }
@@ -538,9 +545,11 @@ public sealed class BackupTaskPersistenceEntityTests
     public void AdminReconciliationRequestRejectsOtherStatesAndActiveLease()
     {
         var now = BaselineUtc;
-        var pending = new BackupTask(
+        var pending = BackupTask.ForPlan(
             Guid.NewGuid(),
             Guid.NewGuid(),
+            Guid.NewGuid(),
+            BackupRunPurpose.PlanFull,
             BackupTaskTriggerType.Manual,
             null);
         var attention = P57ReconciliationTaskFactory.CreateNeedsAttention(
@@ -631,9 +640,11 @@ public sealed class BackupTaskPersistenceEntityTests
     public void AdminConfirmRejectsActiveLeaseAndNonAttention()
     {
         var now = BaselineUtc;
-        var pending = new BackupTask(
+        var pending = BackupTask.ForPlan(
             Guid.NewGuid(),
             Guid.NewGuid(),
+            Guid.NewGuid(),
+            BackupRunPurpose.PlanFull,
             BackupTaskTriggerType.Manual,
             null);
         var attention = P57ReconciliationTaskFactory.CreateNeedsAttention(
@@ -820,9 +831,11 @@ public sealed class BackupTaskPersistenceEntityTests
 
     private static BackupTask CreateManualTask()
     {
-        return new BackupTask(
+        return BackupTask.ForPlan(
             Guid.NewGuid(),
             Guid.NewGuid(),
+            Guid.NewGuid(),
+            BackupRunPurpose.PlanFull,
             BackupTaskTriggerType.Manual,
             null);
     }

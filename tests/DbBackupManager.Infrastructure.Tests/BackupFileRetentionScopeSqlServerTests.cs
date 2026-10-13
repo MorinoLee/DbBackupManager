@@ -24,16 +24,7 @@ public sealed class BackupFileRetentionScopeSqlServerTests(PlatformDatabaseSqlSe
         var copy = Copy(work);
         copy.AssociateBackupSet(command.BackupSetId);
         Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await service.RegisterCopyAsync(work.Lease, copy)).Code);
-        Guid? policyId;
-        await using (var lookup = database.CreateContext())
-        {
-            policyId = await lookup.BackupTasks.AsNoTracking()
-                .Where(task => task.Id == work.Task.TaskId)
-                .Select(task => task.PolicyId)
-                .SingleAsync();
-        }
-
-        var historicalWork = await BackupSetTestData.WorkAsync(database, policyId);
+        var historicalWork = await BackupSetTestData.WorkAsync(database, work.Snapshot.Identity.DatabaseId);
         var historicalCommand = BackupSetTestData.Command(historicalWork);
         await BackupSetTestData.RegisterAsync(database, historicalCommand);
         var historical = Copy(historicalWork);

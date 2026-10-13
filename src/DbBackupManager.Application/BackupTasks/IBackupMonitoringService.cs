@@ -21,7 +21,7 @@ public sealed record BackupFileSummary(Guid TaskId, Guid DatabaseId, string Data
 }
 public sealed record WorkerPresence(string Status, DateTimeOffset? LastSeenAtUtc, int OfflineAfterSeconds = 90);
 public sealed record BackupOverview(DateTimeOffset GeneratedAtUtc, DateTimeOffset RecentFromUtc,
-    int ManagedDatabases, int WithoutEnabledPolicy, int NeverVerified, int WithVerifiedFile,
+    int ManagedDatabases, int NeverVerified, int WithVerifiedFile,
     int PendingTasks, int RunningTasks, int NeedsAttentionTasks, int RecentFailedTasks,
     WorkerPresence Worker, IReadOnlyList<BackupTaskSummary> RecentTasks,
     IReadOnlyList<BackupTaskSummary> RecentFailures, IReadOnlyList<BackupFileSummary> RecentFiles);

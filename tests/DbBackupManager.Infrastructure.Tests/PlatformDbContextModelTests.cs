@@ -59,7 +59,6 @@ public sealed class PlatformDbContextModelTests
             typeof(DatabaseInstance),
             typeof(ManagedDatabase),
             typeof(StorageTarget),
-            typeof(BackupPolicy),
         ];
 
         foreach (var entityType in entityTypes)
@@ -89,16 +88,11 @@ public sealed class PlatformDbContextModelTests
         Assert.Contains("CREATE TABLE [DatabaseInstances]", script, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE [ManagedDatabases]", script, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE [StorageTargets]", script, StringComparison.Ordinal);
-        Assert.Contains("CREATE TABLE [BackupPolicies]", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE TABLE [BackupPolicies]", script, StringComparison.Ordinal);
         Assert.Contains("CK_DatabaseInstances_EncryptConnection", script, StringComparison.Ordinal);
         Assert.Contains("CK_StorageTargets_Endpoint", script, StringComparison.Ordinal);
-        Assert.Contains("CK_BackupPolicies_Storage", script, StringComparison.Ordinal);
-        Assert.Contains("CK_BackupPolicies_ScheduleEffectiveFrom", script, StringComparison.Ordinal);
-        Assert.Contains(
-            "UX_BackupPolicies_DatabaseId_BackupType_Enabled",
-            script,
-            StringComparison.Ordinal);
-        Assert.Contains("WHERE [IsEnabled] = 1", script, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE [BackupPlans]", script, StringComparison.Ordinal);
+        Assert.Contains("UX_BackupPlans_DatabaseId", script, StringComparison.Ordinal);
         Assert.DoesNotContain("[Password]", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("[PrivateKey]", script, StringComparison.OrdinalIgnoreCase);
     }
@@ -155,7 +149,8 @@ public sealed class PlatformDbContextModelTests
         Assert.Contains("CREATE TABLE [BackupTaskSnapshots]", script, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE [BackupAttempts]", script, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE [BackupTaskStateChanges]", script, StringComparison.Ordinal);
-        Assert.Contains("UX_BackupTasks_PolicyId_ScheduledSlotAtUtc", script, StringComparison.Ordinal);
+        Assert.Contains("UX_BackupTasks_PlanVersion_Type_Slot", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("UX_BackupTasks_PolicyId_ScheduledSlotAtUtc", script, StringComparison.Ordinal);
         Assert.Contains("UX_BackupTaskStateChanges_MutationId", script, StringComparison.Ordinal);
         Assert.Contains("CK_BackupTasks_LeaseState", script, StringComparison.Ordinal);
         Assert.Contains("CK_BackupTasks_ReconciliationSchedule", script, StringComparison.Ordinal);

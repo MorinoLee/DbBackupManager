@@ -19,7 +19,6 @@ public sealed class BackupPlanTaskIdentityTests
         var task = BackupTask.ForPlan(Guid.NewGuid(), plan.Id, plan.CurrentVersionId, purpose,
             BackupTaskTriggerType.Manual, null);
         var snapshot = Snapshot(task, plan, purpose);
-        Assert.Null(task.PolicyId);
         Assert.Equal(plan.Id, task.PlanId);
         Assert.Equal(plan.CurrentVersionId, task.PlanVersionId);
         Assert.Equal(type, task.BackupType);
@@ -34,15 +33,10 @@ public sealed class BackupPlanTaskIdentityTests
     }
 
     [Fact]
-    public void LegacySnapshotDoesNotInferPlanPurposeFromCopyOnly()
+    public void SnapshotWithoutPlanPurposeStaysEmpty()
     {
-        var task = new BackupTask(Guid.NewGuid(), Guid.NewGuid(), BackupTaskTriggerType.Manual, null);
-        var snapshot = new BackupTaskSnapshot(task.Id, "旧策略", Identity(), Sql(), Source("v2"),
+        var snapshot = new BackupTaskSnapshot(Guid.NewGuid(), "未关联计划", Identity(), Sql(), Source("v2"),
             new(BackupStorageMode.LocalOnly, null, 7, null, true, false, true, 120, 60, 60, "UTC"));
-        Assert.NotNull(task.PolicyId);
-        Assert.Null(task.PlanId);
-        Assert.Null(task.PlanVersionId);
-        Assert.Equal(BackupType.Full, task.BackupType);
         Assert.Null(snapshot.Purpose);
         Assert.True(snapshot.UseCopyOnly);
         Assert.Equal("v2", snapshot.FileNameRuleVersion);

@@ -1,5 +1,6 @@
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Identity;
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Domain.Entities;
@@ -106,27 +107,6 @@ public sealed class TaskEventStoreSqlServerTests(PlatformDatabaseSqlServerFixtur
         instance.RecordConnectionSucceeded(DateTimeOffset.UtcNow, "15.0.synthetic", null, null);
         var managed = new ManagedDatabase(Guid.NewGuid(), instance.Id, $"db-{suffix}", false, true, DateTimeOffset.UtcNow);
         managed.SetManaged(true);
-        var policy = new BackupPolicy(
-            Guid.NewGuid(),
-            $"policy-{suffix}",
-            managed.Id,
-            new(
-                BackupStorageMode.LocalOnly,
-                null,
-                BackupScheduleType.Daily,
-                TimeOnly.MinValue,
-                BackupWeekdays.None,
-                "UTC",
-                7,
-                null,
-                true,
-                false,
-                true,
-                120,
-                60,
-                60),
-            true,
-            true);
         await using var db = database.CreateContext();
         db.AddRange(
             file,
@@ -134,7 +114,6 @@ public sealed class TaskEventStoreSqlServerTests(PlatformDatabaseSqlServerFixtur
             server,
             instance,
             managed,
-            policy,
             new AdminUser(
                 actor.AdminUserId,
                 actor.Username,
@@ -142,17 +121,20 @@ public sealed class TaskEventStoreSqlServerTests(PlatformDatabaseSqlServerFixtur
                 "synthetic-hash",
                 actor.SecurityStamp));
         await db.SaveChangesAsync();
-        var taskId = Guid.NewGuid();
-        var created = await new BackupTaskExecutionStore(factory).CreateTaskAsync(new(
-            taskId,
-            policy.Id,
-            BackupTaskTriggerType.Manual,
-            null,
-            taskId,
-            DateTimeOffset.UtcNow,
-            actor.AdminUserId,
-            actor.SecurityStamp));
-        Assert.True(created.IsSucceeded);
+        var definition = new BackupPlanDefinition(BackupPlanMode.Full,
+            new(BackupScheduleType.Daily, TimeOnly.MinValue, BackupWeekdays.None),
+            null, null, "UTC", BackupStorageMode.LocalOnly, null, 7, null, true, false, 120, 60, 60);
+        var plan = BackupPlan.Create(Guid.NewGuid(), managed.Id, $"plan-{suffix}", Guid.NewGuid(), definition, DateTimeOffset.UtcNow);
+        await new BackupPlanStore(factory).AddAsync(plan);
+        var task = BackupTask.ForPlan(Guid.NewGuid(), plan.Id, plan.CurrentVersionId, BackupRunPurpose.PlanFull,
+            BackupTaskTriggerType.Manual, null);
+        var snapshot = BackupTaskSnapshot.ForPlan(task, plan.CurrentVersion, plan.Name, BackupRunPurpose.PlanFull,
+            new(server.Id, server.Name, instance.Id, instance.Name, managed.Id, managed.DatabaseName),
+            new(instance.ConnectionAddress, sql.Id, true, false, null, 15),
+            new(@"D:\Synthetic", "v3", new(FileTransferProtocol.Smb, "synthetic-host", null, "synthetic-share", file.Id, null)));
+        db.AddRange(task, snapshot);
+        await db.SaveChangesAsync();
+        var taskId = task.Id;
         var events = new TaskEventStore(factory);
         var existing = await events.ReadPendingAsync(100, CancellationToken.None);
         if (existing.Count > 0)

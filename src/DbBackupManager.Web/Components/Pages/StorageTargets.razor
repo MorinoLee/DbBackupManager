@@ -23,7 +23,7 @@
     <Authorized Context="authState">
         <MudStack Spacing="3">
             <PageHeader Title="存储目标"
-                        Description="远程备份副本的 SMB/SFTP 目的地。先在“暂存访问凭据”录入账号，再添加目标并测试连接，最后在备份配置中选择。">
+                        Description="远程备份副本的 SMB/SFTP 目的地。先在“暂存访问凭据”录入账号，再添加目标并测试连接，最后在备份计划中选择。">
                 <Actions>
                     @if (!_login)
                     {
@@ -58,7 +58,7 @@
             {
                 <EmptyState Title="暂无存储目标"
                             Icon="@Icons.Material.Outlined.CloudUpload"
-                            Description="存储目标是远程备份副本的目的地；添加目标并测试连接后，才能在备份配置中启用远程副本。">
+                            Description="存储目标是远程备份副本的目的地；添加目标并测试连接后，才能在备份计划中启用远程副本。">
                     <Actions>
                         <MudButton OnClick="@(() => OpenEditorAsync(null))"
                                    Variant="Variant.Filled"

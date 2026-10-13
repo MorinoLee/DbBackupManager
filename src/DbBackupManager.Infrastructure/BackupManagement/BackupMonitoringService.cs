@@ -15,7 +15,6 @@ internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContex
         var now = await db.Database.SqlQuery<DateTimeOffset>($"SELECT TODATETIMEOFFSET(SYSUTCDATETIME(), '+00:00') AS [Value]").SingleAsync(token);
         var since = now.AddHours(-24);
         var managed = db.ManagedDatabases.Where(x => x.IsManaged);
-        var without = managed.Where(d => !db.BackupPolicies.Any(p => p.DatabaseId == d.Id && p.IsEnabled));
         var never = managed.Where(d => !db.BackupFiles.Any(f =>
             f.DatabaseId == d.Id && f.Status == BackupFileStatus.Available));
         var heartbeat = await db.WorkerHeartbeats.SingleOrDefaultAsync(token);
@@ -26,7 +25,7 @@ internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContex
         var failures = rows.Where(x => x.Task.Status == BackupTaskStatus.Failed && x.Task.CompletedAtUtc >= since && x.Task.CompletedAtUtc < now);
         var managedCount = await managed.CountAsync(token);
         var neverCount = await never.CountAsync(token);
-        return new BackupOverview(now, since, managedCount, await without.CountAsync(token), neverCount, managedCount - neverCount,
+        return new BackupOverview(now, since, managedCount, neverCount, managedCount - neverCount,
             await db.BackupTasks.CountAsync(x => x.Status == BackupTaskStatus.Pending, token),
             await db.BackupTasks.CountAsync(x => x.Status == BackupTaskStatus.Running, token),
             await db.BackupTasks.CountAsync(x => x.Status == BackupTaskStatus.NeedsAttention, token),

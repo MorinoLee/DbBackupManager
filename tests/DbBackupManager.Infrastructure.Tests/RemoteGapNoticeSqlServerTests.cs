@@ -254,6 +254,7 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
             await temporary.InitializeAsync();
             await using var db = temporary.CreateContext();
             var migrations = db.Database.GetMigrations().ToArray();
+            var pendingMigration = migrations.Single(name => name.EndsWith("_AddRemoteGapProjectionPendings", StringComparison.Ordinal));
             var previous = migrations.Single(name => name.EndsWith("_AddRemoteGapEpisodes", StringComparison.Ordinal));
             var graph = await SeedAsync(temporary);
             await using (var write = temporary.CreateContext())
@@ -264,8 +265,10 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
                     CancellationToken.None);
             }
 
-            var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var migrator = db.Database.GetService<IMigrator>();
+            // 删表迁移不守卫待补发行，先单独退掉，再检验待补发迁移自身的 Down。
+            await migrator.MigrateAsync(pendingMigration);
+            var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
             Assert.Equal(51007, error.Number);
             Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());

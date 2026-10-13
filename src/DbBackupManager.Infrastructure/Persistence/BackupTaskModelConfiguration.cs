@@ -13,14 +13,12 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
         builder.ToTable("BackupTasks", table =>
         {
             table.HasCheckConstraint("CK_BackupTasks_Identity",
-                "([PolicyId] IS NOT NULL AND [PlanId] IS NULL AND [PlanVersionId] IS NULL) OR "
-                + "([PolicyId] IS NULL AND [PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL)");
+                "[PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL");
             table.HasCheckConstraint("CK_BackupTasks_BackupType",
-                "[BackupType] IS NOT NULL AND [BackupType] IN ('Full', 'Differential', 'Log') "
-                + "AND ([PolicyId] IS NULL OR [BackupType] = 'Full')");
+                "[BackupType] IS NOT NULL AND [BackupType] IN ('Full', 'Differential', 'Log')");
             table.HasCheckConstraint("CK_BackupTasks_CoveredDifferentialSlot",
                 "[CoveredDifferentialSlotUtc] IS NULL OR ([PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL "
-                + "AND [PolicyId] IS NULL AND [BackupType] IS NOT NULL AND [BackupType] = 'Full' "
+                + "AND [BackupType] IS NOT NULL AND [BackupType] = 'Full' "
                 + "AND DATEPART(TZOFFSET, [CoveredDifferentialSlotUtc]) = 0)");
             table.HasCheckConstraint(
                 "CK_BackupTasks_Trigger",
@@ -80,6 +78,8 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
                 + "([Status] NOT IN ('Running', 'NeedsAttention') AND [LeasePurpose] IS NULL)");
         });
         builder.ConfigureConcurrency();
+        builder.Property(x => x.PlanId).IsRequired();
+        builder.Property(x => x.PlanVersionId).IsRequired();
         builder.Property(x => x.BackupType).HasConversion<string>().HasMaxLength(20)
             .HasDefaultValue(BackupType.Full).HasSentinel(BackupType.Full).IsRequired();
         builder.Property(x => x.CoveredDifferentialSlotUtc).HasPrecision(7);
@@ -97,10 +97,6 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
         builder.Property(x => x.LeaseOwner).HasMaxLength(200);
         builder.Property(x => x.LeaseAcquiredAtUtc).HasPrecision(7);
         builder.Property(x => x.LeaseExpiresAtUtc).HasPrecision(7);
-        builder.HasIndex(x => new { x.PolicyId, x.ScheduledSlotAtUtc })
-            .IsUnique()
-            .HasFilter("[PolicyId] IS NOT NULL AND [ScheduledSlotAtUtc] IS NOT NULL")
-            .HasDatabaseName("UX_BackupTasks_PolicyId_ScheduledSlotAtUtc");
         builder.HasIndex(x => new { x.PlanId, x.PlanVersionId, x.BackupType, x.ScheduledSlotAtUtc })
             .IsUnique()
             .HasFilter("[PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL "
@@ -123,15 +119,12 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
             x.LeaseExpiresAtUtc,
         })
             .HasDatabaseName("IX_BackupTasks_ReconciliationQueue");
-        builder.HasOne<BackupPolicy>()
-            .WithMany()
-            .HasForeignKey(x => x.PolicyId)
-            .OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<BackupPlanVersion>()
             .WithMany()
             .HasForeignKey(x => new { x.PlanId, x.PlanVersionId })
             .HasPrincipalKey(x => new { x.PlanId, PlanVersionId = x.Id })
-            .OnDelete(DeleteBehavior.Restrict);
+            .OnDelete(DeleteBehavior.Restrict)
+            .IsRequired();
         builder.HasOne<BackupAttempt>()
             .WithMany()
             .HasForeignKey(x => new { TaskId = x.Id, AttemptId = x.CurrentBackupAttemptId })

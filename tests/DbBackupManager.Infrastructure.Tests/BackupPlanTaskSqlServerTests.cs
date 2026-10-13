@@ -30,7 +30,6 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
         await using var db = database.CreateContext();
         var read = await db.BackupTasks.AsNoTracking().SingleAsync(x => x.Id == task.Id);
         var frozen = await db.BackupTaskSnapshots.AsNoTracking().SingleAsync(x => x.TaskId == task.Id);
-        Assert.Null(read.PolicyId);
         Assert.Equal(graph.Plan.Id, read.PlanId);
         Assert.Equal(graph.Plan.CurrentVersionId, read.PlanVersionId);
         Assert.Equal(type, read.BackupType);
@@ -181,13 +180,10 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
         var graph = await GraphAsync(database);
         var planTask = Task(graph.Plan, BackupRunPurpose.PlanFull);
         await SaveAsync(database, planTask, Snapshot(graph, planTask, BackupRunPurpose.PlanFull));
-        using var provider = database.CreateServiceProvider();
-        var store = provider.GetRequiredService<IBackupTaskExecutionStore>();
-        var now = DateTimeOffset.UtcNow;
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(
-            new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "合成旧入口", now, now.AddMinutes(5)))).Code);
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimTaskAsync(planTask.Id,
-            new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "合成旧入口", now, now.AddMinutes(5)))).Code);
+        Assert.DoesNotContain(
+            typeof(IBackupTaskExecutionStore).GetMethods().Select(method => method.Name),
+            name => name is "ClaimNextAsync" or "ClaimTaskAsync" or "RetryFailedAsync"
+                or "RequestReconciliationAsync" or "ConfirmNeedsAttentionAsync");
         await using var db = database.CreateContext();
         Assert.Equal(BackupTaskStatus.Pending, (await db.BackupTasks.SingleAsync(x => x.Id == planTask.Id)).Status);
         Assert.False(await db.BackupAttempts.AnyAsync(x => x.TaskId == planTask.Id));
@@ -195,15 +191,12 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
 
     public static TheoryData<string, string, string, int> ConstraintViolations => new()
     {
-        { "BackupTasks", "Identity", "[PlanId]=NULL", 547 },
-        { "BackupTasks", "Identity", "[PlanVersionId]=NULL", 547 },
-        { "BackupTasks", "Identity", "[PlanId]=NULL,[PlanVersionId]=NULL,[PolicyId]=NULL", 547 },
-        { "BackupTasks", "Identity", "[PolicyId]=@policy", 547 },
+        { "BackupTasks", "Identity", "[PlanId]=NULL", 515 },
+        { "BackupTasks", "Identity", "[PlanVersionId]=NULL", 515 },
+        { "BackupTasks", "Identity", "[PlanId]=NULL,[PlanVersionId]=NULL", 515 },
         { "BackupTasks", "BackupType", "[BackupType]=NULL", 515 },
         { "BackupTasks", "BackupType", "[BackupType]='Other'", 547 },
-        { "BackupTasks", "BackupType", "[PlanId]=NULL,[PlanVersionId]=NULL,[PolicyId]=@policy,[BackupType]='Differential'", 547 },
         { "BackupTasks", "CoveredDifferentialSlot", "[BackupType]='Differential',[CoveredDifferentialSlotUtc]='2026-10-08T00:00:00+00:00'", 547 },
-        { "BackupTasks", "CoveredDifferentialSlot", "[PlanId]=NULL,[PlanVersionId]=NULL,[PolicyId]=@policy,[CoveredDifferentialSlotUtc]='2026-10-08T00:00:00+00:00'", 547 },
         { "BackupTasks", "CoveredDifferentialSlot", "[CoveredDifferentialSlotUtc]='2026-10-08T08:00:00+08:00'", 547 },
         { "BackupTaskSnapshots", "BackupType", "[BackupType]=NULL", 515 },
         { "BackupTaskSnapshots", "BackupType", "[BackupType]='Other'", 547 },
@@ -224,10 +217,9 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
         var task = Task(graph.Plan, BackupRunPurpose.PlanFull);
         await SaveAsync(database, task, Snapshot(graph, task, BackupRunPurpose.PlanFull));
         await using var db = database.CreateContext();
-        var policy = await db.BackupTasks.Where(x => x.Id == graph.Legacy.TaskId).Select(x => x.PolicyId).SingleAsync();
         var sql = $"UPDATE [{table}] SET {assignments} WHERE [{(table == "BackupTasks" ? "Id" : "TaskId")}] = @id";
         var error = await Assert.ThrowsAsync<SqlException>(() => db.Database.ExecuteSqlRawAsync(sql,
-            new SqlParameter("@id", task.Id), new SqlParameter("@policy", policy!.Value)));
+            new SqlParameter("@id", task.Id)));
         Assert.Equal(number, error.Number);
         if (number == 547) Assert.Contains($"CK_{table}_{constraint}", error.Message, StringComparison.Ordinal);
     }
@@ -241,29 +233,25 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
         try
         {
             await temporary.InitializeAsync();
-            var legacy = await BackupSetTestData.WorkAsync(temporary);
+            var host = await BackupSetTestData.HostSnapshotAsync(temporary);
             await using var db = temporary.CreateContext();
-            await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE [BackupTaskSnapshots] SET [UseCopyOnly]={legacyCopyOnly} WHERE [TaskId]={legacy.Task.TaskId}");
-            var previous = db.Database.GetMigrations().Single(x => x.EndsWith("_AddBackupSets", StringComparison.Ordinal));
             var migrator = db.GetService<IMigrator>();
+            var beforeRemoval = db.Database.GetMigrations().Single(x =>
+                x.EndsWith("_AddRemoteGapProjectionPendings", StringComparison.Ordinal));
+            var previous = db.Database.GetMigrations().Single(x => x.EndsWith("_AddBackupSets", StringComparison.Ordinal));
+            await migrator.MigrateAsync(beforeRemoval);
+            var legacyTaskId = await InsertLegacyPolicyTaskAsync(db, host, legacyCopyOnly);
             await migrator.MigrateAsync(previous);
             Assert.Equal(0, await NewColumnCountAsync(db));
-            await migrator.MigrateAsync();
+            await migrator.MigrateAsync(beforeRemoval);
             Assert.Equal(5, await NewColumnCountAsync(db));
-            var oldTask = await db.BackupTasks.AsNoTracking().SingleAsync(x => x.Id == legacy.Task.TaskId);
-            var oldSnapshot = await db.BackupTaskSnapshots.AsNoTracking().SingleAsync(x => x.TaskId == oldTask.Id);
-            Assert.NotNull(oldTask.PolicyId);
-            Assert.Null(oldTask.PlanId);
-            Assert.Null(oldSnapshot.Purpose);
-            Assert.Equal(BackupType.Full, oldTask.BackupType);
-            Assert.Equal("v2", oldSnapshot.FileNameRuleVersion);
-            Assert.Equal(legacyCopyOnly, oldSnapshot.UseCopyOnly);
+            Assert.Equal(1, await LegacyIdentityCountAsync(db, legacyTaskId, legacyCopyOnly));
             var graph = await GraphAsync(temporary);
             var task = Task(graph.Plan, BackupRunPurpose.PlanFull, Slot, Slot.AddMinutes(-30));
             await SaveAsync(temporary, task, Snapshot(graph, task, BackupRunPurpose.PlanFull));
-            // 后续迁移各自拥有事务；先退到本项要验证的迁移，避免把较新迁移的合法 Down 算作历史变化。
-            var identityMigration = db.Database.GetMigrations().Single(x => x.EndsWith("_AddBackupTaskPlanIdentity", StringComparison.Ordinal));
+            // 停在删表迁移之前。后续迁移各自拥有事务；先退到本项要验证的迁移。
+            var identityMigration = db.Database.GetMigrations().Single(x =>
+                x.EndsWith("_AddBackupTaskPlanIdentity", StringComparison.Ordinal));
             await migrator.MigrateAsync(identityMigration);
             var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
@@ -272,6 +260,93 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
             Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
             Assert.Equal(Slot.AddMinutes(-30), (await db.BackupTasks.SingleAsync(x => x.Id == task.Id)).CoveredDifferentialSlotUtc);
             Assert.Equal(BackupRunPurpose.PlanFull, (await db.BackupTaskSnapshots.SingleAsync(x => x.TaskId == task.Id)).Purpose);
+            Assert.Equal(1, await LegacyIdentityCountAsync(db, legacyTaskId, legacyCopyOnly));
+        }
+        finally { await temporary.DisposeAsync(); }
+    }
+
+    [Fact]
+    public async Task EmptyDatabaseMigratesToLatestWithoutBackupPolicies()
+    {
+        var temporary = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await temporary.InitializeAsync();
+            await using var db = temporary.CreateContext();
+            Assert.Equal(0, await TableCountAsync(db, "BackupPolicies"));
+            Assert.Equal(0, await ColumnCountAsync(db, "BackupTasks", "PolicyId"));
+            Assert.Equal(0, await PlanIdentityDefaultCountAsync(db));
+            Assert.Contains("[PlanId] IS NOT NULL AND [PlanVersionId] IS NOT NULL",
+                await CheckDefinitionAsync(db, "CK_BackupTasks_Identity"), StringComparison.Ordinal);
+            Assert.DoesNotContain("PolicyId", await CheckDefinitionAsync(db, "CK_BackupTasks_Identity"), StringComparison.Ordinal);
+        }
+        finally { await temporary.DisposeAsync(); }
+    }
+
+    [Fact]
+    public async Task RemoveBackupPoliciesDownRestoresSchemaAndMigratesUpAgain()
+    {
+        var temporary = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await temporary.InitializeAsync();
+            var graph = await GraphAsync(temporary);
+            var task = Task(graph.Plan, BackupRunPurpose.PlanDifferential);
+            await SaveAsync(temporary, task, Snapshot(graph, task, BackupRunPurpose.PlanDifferential));
+            await using var db = temporary.CreateContext();
+            var migrator = db.GetService<IMigrator>();
+            var beforeRemoval = db.Database.GetMigrations().Single(x =>
+                x.EndsWith("_AddRemoteGapProjectionPendings", StringComparison.Ordinal));
+            await migrator.MigrateAsync(beforeRemoval);
+            Assert.Equal(18, await RestoredPolicyShapeCountAsync(db));
+            Assert.Contains("[PolicyId] IS NOT NULL", await CheckDefinitionAsync(db, "CK_BackupTasks_Identity"), StringComparison.Ordinal);
+            Assert.Equal(task.PlanId, await db.Database.SqlQueryRaw<Guid?>("""
+                SELECT [PlanId] AS [Value] FROM [BackupTasks] WHERE [Id] = {0}
+                """, task.Id).SingleAsync());
+            Assert.Equal(1, await db.Database.SqlQueryRaw<int>("""
+                SELECT COUNT(*) AS [Value] FROM [BackupTasks]
+                WHERE [Id] = {0} AND [PolicyId] IS NULL AND [PlanVersionId] IS NOT NULL
+                """, task.Id).SingleAsync());
+            await migrator.MigrateAsync();
+            Assert.Equal(0, await TableCountAsync(db, "BackupPolicies"));
+            Assert.Equal(0, await ColumnCountAsync(db, "BackupTasks", "PolicyId"));
+            Assert.Equal(BackupType.Differential, (await db.BackupTasks.SingleAsync(x => x.Id == task.Id)).BackupType);
+        }
+        finally { await temporary.DisposeAsync(); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RemoveBackupPoliciesUpRejectsUnmigratedPolicyData(bool includePolicyTask)
+    {
+        var temporary = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await temporary.InitializeAsync();
+            var host = await BackupSetTestData.HostSnapshotAsync(temporary);
+            await using var db = temporary.CreateContext();
+            var migrator = db.GetService<IMigrator>();
+            var beforeRemoval = db.Database.GetMigrations().Single(x =>
+                x.EndsWith("_AddRemoteGapProjectionPendings", StringComparison.Ordinal));
+            await migrator.MigrateAsync(beforeRemoval);
+            if (includePolicyTask)
+            {
+                await InsertLegacyPolicyTaskAsync(db, host, copyOnly: false);
+            }
+            else
+            {
+                await InsertLegacyPolicyAsync(db, host);
+            }
+
+            var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
+            var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync());
+            Assert.Equal(51008, error.Number);
+            Assert.Contains("已拒绝删除", error.Message, StringComparison.Ordinal);
+            Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
+            Assert.Equal(1, await TableCountAsync(db, "BackupPolicies"));
+            Assert.Equal(1, await ColumnCountAsync(db, "BackupTasks", "PolicyId"));
+            Assert.Equal(1, await db.Database.SqlQueryRaw<int>("SELECT COUNT(*) AS [Value] FROM [BackupPolicies]").SingleAsync());
         }
         finally { await temporary.DisposeAsync(); }
     }
@@ -281,6 +356,140 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
         WHERE (object_id=OBJECT_ID(N'BackupTasks') AND name IN ('PlanId','PlanVersionId','BackupType','CoveredDifferentialSlotUtc'))
            OR (object_id=OBJECT_ID(N'BackupTaskSnapshots') AND name='Purpose')
         """).SingleAsync();
+
+    private static async Task<Guid> InsertLegacyPolicyAsync(PlatformDbContext db, BackupTaskSnapshot host)
+    {
+        var policyId = Guid.NewGuid();
+        var name = $"legacy-policy-{policyId:N}";
+        var now = DateTimeOffset.UtcNow;
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO [BackupPolicies] (
+                [Id], [Name], [NormalizedName], [DatabaseId], [BackupType], [StorageMode], [StorageTargetId],
+                [ScheduleType], [LocalTime], [DaysOfWeek], [TimeZoneId], [LocalRetentionDays], [RemoteRetentionDays],
+                [UseChecksum], [UseCompression], [UseCopyOnly], [BackupTimeoutMinutes], [VerifyTimeoutMinutes],
+                [TransferTimeoutMinutes], [IsEnabled], [IsManualOnly], [ScheduleEffectiveFromUtc],
+                [CreatedAtUtc], [UpdatedAtUtc])
+            VALUES (
+                {policyId}, {name}, {name}, {host.DatabaseId}, {"Full"}, {"LocalOnly"}, {(Guid?)null},
+                {"Daily"}, {new TimeOnly(2, 0)}, {0}, {"UTC"}, {7}, {(int?)null},
+                {true}, {true}, {false}, {120}, {60},
+                {180}, {true}, {false}, {now},
+                {now}, {now})
+            """);
+        return policyId;
+    }
+
+    private static async Task<Guid> InsertLegacyPolicyTaskAsync(
+        PlatformDbContext db, BackupTaskSnapshot host, bool copyOnly)
+    {
+        var policyId = await InsertLegacyPolicyAsync(db, host);
+        var taskId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO [BackupTasks] (
+                [Id], [PolicyId], [PlanId], [PlanVersionId], [BackupType], [CoveredDifferentialSlotUtc],
+                [TriggerType], [ScheduledSlotAtUtc], [Status], [CurrentStage], [RetryCount],
+                [ReconciliationAttemptCount], [CreatedAtUtc], [UpdatedAtUtc])
+            VALUES (
+                {taskId}, {policyId}, {(Guid?)null}, {(Guid?)null}, {"Full"}, {(DateTimeOffset?)null},
+                {"Manual"}, {(DateTimeOffset?)null}, {"Pending"}, {"Backup"}, {0},
+                {0}, {now}, {now})
+            """);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO [BackupTaskSnapshots] (
+                [TaskId], [PolicyName], [ServerId], [ServerName], [InstanceId], [InstanceName],
+                [DatabaseId], [DatabaseName], [ConnectionAddress], [SqlCredentialReferenceId],
+                [EncryptConnection], [TrustServerCertificate], [CertificateTrustReason],
+                [AllowLegacyTls], [LegacyTlsReason], [ConnectionTimeoutSeconds],
+                [UseChecksum], [UseCompression], [UseCopyOnly],
+                [BackupTimeoutMinutes], [VerifyTimeoutMinutes], [TransferTimeoutMinutes],
+                [LocalSqlBackupRootPath], [FileNameRuleVersion], [SourceAccessProtocol], [SourceAccessHost],
+                [SourceAccessPort], [SourceAccessBasePath], [SourceCredentialReferenceId],
+                [SourceSftpHostKeyFingerprint], [StorageMode], [StorageTargetId], [LocalRetentionDays],
+                [RemoteRetentionDays], [TimeZoneId], [Purpose], [BackupType])
+            VALUES (
+                {taskId}, {"合成旧策略"}, {host.ServerId}, {host.ServerName}, {host.InstanceId}, {host.InstanceName},
+                {host.DatabaseId}, {host.DatabaseName}, {host.ConnectionAddress}, {host.SqlCredentialReferenceId},
+                {host.EncryptConnection}, {host.TrustServerCertificate}, {host.CertificateTrustReason},
+                {host.AllowLegacyTls}, {host.LegacyTlsReason}, {host.ConnectionTimeoutSeconds},
+                {true}, {true}, {copyOnly},
+                {120}, {60}, {180},
+                {host.LocalSqlBackupRootPath}, {"v2"}, {host.SourceAccessProtocol.ToString()}, {host.SourceAccessHost},
+                {host.SourceAccessPort}, {host.SourceAccessBasePath}, {host.SourceCredentialReferenceId},
+                {host.SourceSftpHostKeyFingerprint}, {"LocalOnly"}, {(Guid?)null}, {7},
+                {(int?)null}, {host.TimeZoneId}, {(string?)null}, {"Full"})
+            """);
+        return taskId;
+    }
+
+    private static Task<int> LegacyIdentityCountAsync(PlatformDbContext db, Guid taskId, bool copyOnly) =>
+        db.Database.SqlQueryRaw<int>("""
+            SELECT COUNT(*) AS [Value]
+            FROM [BackupTasks] AS [task]
+            INNER JOIN [BackupTaskSnapshots] AS [snapshot] ON [snapshot].[TaskId] = [task].[Id]
+            WHERE [task].[Id] = {0}
+              AND [task].[PolicyId] IS NOT NULL
+              AND [task].[PlanId] IS NULL
+              AND [task].[PlanVersionId] IS NULL
+              AND [task].[BackupType] = 'Full'
+              AND [snapshot].[Purpose] IS NULL
+              AND [snapshot].[FileNameRuleVersion] = 'v2'
+              AND [snapshot].[UseCopyOnly] = {1}
+            """, taskId, copyOnly).SingleAsync();
+
+    private static Task<int> TableCountAsync(PlatformDbContext db, string name) =>
+        db.Database.SqlQueryRaw<int>("""
+            SELECT COUNT(*) AS [Value] FROM sys.tables WHERE [name] = {0}
+            """, name).SingleAsync();
+
+    private static Task<int> ColumnCountAsync(PlatformDbContext db, string table, string column) =>
+        db.Database.SqlQueryRaw<int>("""
+            SELECT COUNT(*) AS [Value] FROM sys.columns
+            WHERE object_id = OBJECT_ID({0}) AND [name] = {1}
+            """, table, column).SingleAsync();
+
+    private static Task<int> PlanIdentityDefaultCountAsync(PlatformDbContext db) =>
+        db.Database.SqlQueryRaw<int>("""
+            SELECT COUNT(*) AS [Value]
+            FROM sys.default_constraints AS [constraint]
+            INNER JOIN sys.columns AS [column]
+                ON [constraint].[parent_object_id] = [column].[object_id]
+               AND [constraint].[parent_column_id] = [column].[column_id]
+            WHERE [constraint].[parent_object_id] = OBJECT_ID(N'BackupTasks')
+              AND [column].[name] IN ('PlanId', 'PlanVersionId')
+            """).SingleAsync();
+
+    private static Task<int> RestoredPolicyShapeCountAsync(PlatformDbContext db) =>
+        db.Database.SqlQueryRaw<int>("""
+            SELECT COUNT(*) AS [Value] FROM (
+                SELECT [name] FROM sys.tables WHERE [name] = 'BackupPolicies'
+                UNION ALL
+                SELECT [name] FROM sys.columns
+                WHERE object_id = OBJECT_ID(N'BackupTasks') AND [name] = 'PolicyId'
+                UNION ALL
+                SELECT [name] FROM sys.indexes WHERE [name] IN (
+                    'UX_BackupPolicies_NormalizedName', 'IX_BackupPolicies_StorageTargetId',
+                    'UX_BackupPolicies_DatabaseId_BackupType_Enabled',
+                    'UX_BackupTasks_PolicyId_ScheduledSlotAtUtc')
+                UNION ALL
+                SELECT [name] FROM sys.foreign_keys WHERE [name] IN (
+                    'FK_BackupPolicies_ManagedDatabases_DatabaseId',
+                    'FK_BackupPolicies_StorageTargets_StorageTargetId',
+                    'FK_BackupTasks_BackupPolicies_PolicyId')
+                UNION ALL
+                SELECT [name] FROM sys.check_constraints WHERE [name] IN (
+                    'CK_BackupPolicies_BackupType', 'CK_BackupPolicies_Name_NotEmpty',
+                    'CK_BackupPolicies_NormalizedName_NotEmpty', 'CK_BackupPolicies_Schedule',
+                    'CK_BackupPolicies_ScheduleEffectiveFrom', 'CK_BackupPolicies_Storage',
+                    'CK_BackupPolicies_TimeZoneId_NotEmpty', 'CK_BackupPolicies_Timeouts',
+                    'CK_BackupTasks_Identity')
+            ) AS [expected]
+            """).SingleAsync();
+
+    private static Task<string> CheckDefinitionAsync(PlatformDbContext db, string name) =>
+        db.Database.SqlQueryRaw<string>("""
+            SELECT [definition] AS [Value] FROM sys.check_constraints WHERE [name] = {0}
+            """, name).SingleAsync();
     private static async Task SaveAsync(PlatformDatabaseSqlServerFixture database, BackupTask task, BackupTaskSnapshot snapshot)
     {
         await using var db = database.CreateContext();
@@ -302,12 +511,18 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
     }
     private static async Task<Graph> GraphAsync(PlatformDatabaseSqlServerFixture database)
     {
-        var work = await BackupSetTestData.WorkAsync(database);
-        await using var db = database.CreateContext();
-        var snapshot = await db.BackupTaskSnapshots.AsNoTracking().SingleAsync(x => x.TaskId == work.Task.TaskId);
-        var plan = BackupPlan.Create(Guid.NewGuid(), snapshot.DatabaseId, "合成计划", Guid.NewGuid(), Definition(14), Slot);
+        var host = await BackupSetTestData.HostSnapshotAsync(database);
+        var plan = BackupPlan.Create(Guid.NewGuid(), host.DatabaseId, "合成计划", Guid.NewGuid(), Definition(14), Slot);
         using var provider = database.CreateServiceProvider();
         await new BackupPlanStore(provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>()).AddAsync(plan);
+        var task = Task(plan, BackupRunPurpose.PlanFull);
+        var snapshot = BackupTaskSnapshot.ForPlan(task, plan.CurrentVersion, plan.Name, BackupRunPurpose.PlanFull,
+            new(host.ServerId, host.ServerName, host.InstanceId, host.InstanceName, host.DatabaseId, host.DatabaseName),
+            new(host.ConnectionAddress, host.SqlCredentialReferenceId, host.EncryptConnection, host.TrustServerCertificate,
+                host.CertificateTrustReason, host.ConnectionTimeoutSeconds, host.AllowLegacyTls, host.LegacyTlsReason),
+            new(host.LocalSqlBackupRootPath, "v3", new(host.SourceAccessProtocol, host.SourceAccessHost, host.SourceAccessPort,
+                host.SourceAccessBasePath, host.SourceCredentialReferenceId, host.SourceSftpHostKeyFingerprint)));
+        await SaveAsync(database, task, snapshot);
         return new(plan, snapshot);
     }
     private static BackupPlanDefinition Definition(int days) => new(BackupPlanMode.FullAndDifferentialAndLog,

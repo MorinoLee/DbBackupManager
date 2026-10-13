@@ -43,7 +43,8 @@ public sealed class BackupTasksTests : MudBlazorComponentTest
         Assert.Equal(1, _service.LastPage);
         Assert.Contains("待核对", page.Markup, StringComparison.Ordinal);
         Assert.Contains("完整", page.Markup, StringComparison.Ordinal);
-        Assert.Contains("旧策略任务", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("测试备份", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("未知", page.Markup, StringComparison.Ordinal);
         Assert.Contains("SQL 未知", page.Markup, StringComparison.Ordinal);
         Assert.Contains("/backup-plans", page.Markup, StringComparison.Ordinal);
         Assert.Equal($"/backup-tasks/{FakeManagement.TaskId}?page=1&back=%2Fbackup-tasks%3Fpage%3D1",
@@ -198,7 +199,7 @@ public sealed class BackupTasksTests : MudBlazorComponentTest
         public static BackupDashboard Dashboard(string databaseName)
         {
             var task = new BackupTaskSummary(TaskId, "测试备份", databaseName, "NeedsAttention", "Backup", DateTimeOffset.UtcNow, null, "synthetic_unknown", false, null);
-            return new([], [], [task], false);
+            return new([], [task], false);
         }
 
         public Task<BackupManagementResult<BackupDashboard>> ListAsync(AdminSession actor, int page = 0, CancellationToken token = default)
@@ -211,16 +212,11 @@ public sealed class BackupTasksTests : MudBlazorComponentTest
             }
 
             var task = new BackupTaskSummary(TaskId, "测试备份", DatabaseName, TaskStatus, "Backup", DateTimeOffset.UtcNow, null, "synthetic_unknown", false, null);
-            return Task.FromResult(new BackupManagementResult<BackupDashboard>(ListCode, new([], [], [task], false)));
+            return Task.FromResult(new BackupManagementResult<BackupDashboard>(ListCode, new([], [task], false)));
         }
 
-        public Task<BackupManagementResult<ManualBackupPolicy>> SavePolicyAsync(AdminSession actor, Guid? id, string? version, ManualBackupInput input, CancellationToken token = default) => throw new NotSupportedException();
-        public Task<BackupManagementResult<Guid>> StartAsync(AdminSession actor, Guid policyId, Guid requestId, CancellationToken token = default) => throw new NotSupportedException();
         public Task<BackupManagementResult<Guid>> CancelAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default)
         { CancelRequests.Add(requestId); return Task.FromResult(new BackupManagementResult<Guid>(MutateCode, taskId)); }
-        public Task<BackupManagementResult<Guid>> RetryAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default) => throw new NotSupportedException();
-        public Task<BackupManagementResult<Guid>> RequestReconciliationAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default) => throw new NotSupportedException();
-        public Task<BackupManagementResult<Guid>> ConfirmFailedAsync(AdminSession actor, Guid taskId, Guid requestId, bool evidenceReviewed, CancellationToken token = default) => throw new NotSupportedException();
         public Task<BackupManagementResult<BackupTaskDetail>> DetailAsync(AdminSession actor, Guid taskId, CancellationToken token = default) => throw new NotSupportedException();
     }
 }

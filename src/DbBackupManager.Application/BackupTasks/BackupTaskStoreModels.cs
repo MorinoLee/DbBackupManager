@@ -35,72 +35,10 @@ public sealed record BackupTaskStoreResult<T>(BackupTaskStoreResultCode Code, T?
         or BackupTaskStoreResultCode.AlreadyExists;
 }
 
-public sealed record CreateBackupTaskCommand(
-    Guid TaskId,
-    Guid PolicyId,
-    BackupTaskTriggerType TriggerType,
-    DateTimeOffset? ScheduledSlotAtUtc,
-    Guid MutationId,
-    DateTimeOffset OccurredAtUtc,
-    Guid? ActorAdminUserId = null,
-    string? ActorSecurityStamp = null);
-
-public sealed record ClaimNextBackupTaskCommand(
-    Guid LeaseToken,
-    Guid BackupAttemptId,
-    Guid MutationId,
-    string LeaseOwner,
-    DateTimeOffset AcquiredAtUtc,
-    DateTimeOffset ExpiresAtUtc);
-
-public sealed record BackupStageCommitCommand(
-    Guid MutationId,
-    BackupStageOutcome Outcome,
-    DateTimeOffset OccurredAtUtc,
-    DateTimeOffset? EvidenceAtUtc = null,
-    long? SourceLengthBytes = null,
-    string? ErrorCode = null,
-    string? ErrorMessage = null,
-    BackupSqlOutcomeSource? SqlOutcomeSource = null,
-    bool? UsedCopyOnly = null, bool? UsedChecksum = null, bool? UsedCompression = null);
-
 public sealed record BackupTaskMutationCommand(
     Guid TaskId,
     Guid MutationId,
     DateTimeOffset OccurredAtUtc,
-    Guid? ActorAdminUserId = null,
-    string? ActorSecurityStamp = null);
-
-public sealed record ExpireExecutionLeaseCommand(
-    Guid TaskId,
-    Guid MutationId,
-    DateTimeOffset UtcNow,
-    string ErrorCode,
-    string ErrorMessage);
-
-public sealed record AcquireReconciliationLeaseCommand(
-    Guid TaskId,
-    Guid LeaseToken,
-    string LeaseOwner,
-    DateTimeOffset AcquiredAtUtc,
-    DateTimeOffset ExpiresAtUtc);
-
-public sealed record ReconciliationCommitCommand(
-    Guid MutationId,
-    BackupReconciliationOutcome Outcome,
-    DateTimeOffset OccurredAtUtc,
-    DateTimeOffset? EvidenceAtUtc = null,
-    long? SourceLengthBytes = null,
-    string? ErrorCode = null,
-    string? ErrorMessage = null);
-
-public sealed record ConfirmNeedsAttentionCommand(
-    Guid TaskId,
-    Guid MutationId,
-    DateTimeOffset OccurredAtUtc,
-    BackupReconciliationOutcome Outcome,
-    string? ErrorCode = null,
-    string? ErrorMessage = null,
     Guid? ActorAdminUserId = null,
     string? ActorSecurityStamp = null);
 

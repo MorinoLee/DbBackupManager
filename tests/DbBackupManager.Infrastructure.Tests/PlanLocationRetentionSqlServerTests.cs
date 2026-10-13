@@ -199,7 +199,7 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var protocol = new DeletingProtocol();
         var adapter = new BackupFileStorageAdapter(
             [protocol],
-            new BackupArtifactDeletionGuard(Factory(), TimeProvider.System),
+            new BackupArtifactDeletionGuard(Factory()),
             new PlanCopyDeletionCoordinator(Factory(), TimeProvider.System));
         var deleted = await adapter.DeleteAsync(DeleteRequest(claimed.Value!));
         Assert.Equal(BackupFileStorageOutcome.Succeeded, deleted.Outcome);
@@ -330,7 +330,7 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var protocol = new DeletingProtocol();
         var adapter = new BackupFileStorageAdapter(
             [protocol],
-            new BackupArtifactDeletionGuard(Factory(), TimeProvider.System),
+            new BackupArtifactDeletionGuard(Factory()),
             new PlanCopyDeletionCoordinator(Factory(), TimeProvider.System));
         var deleted = await adapter.DeleteAsync(DeleteRequest(fresh.Value!));
         Assert.Equal(BackupFileStorageOutcome.Succeeded, deleted.Outcome);
@@ -402,7 +402,7 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var protocol = new DeletingProtocol();
         var adapter = new BackupFileStorageAdapter(
             [protocol],
-            new BackupArtifactDeletionGuard(Factory(), TimeProvider.System),
+            new BackupArtifactDeletionGuard(Factory()),
             new PlanCopyDeletionCoordinator(Factory(), new SteppingClock(now)));
         var deleted = await adapter.DeleteAsync(DeleteRequest(claimed.Value!));
 
@@ -477,52 +477,6 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
     }
 
     [Fact]
-    public async Task LegacyBackupSetLeaseIsLeftUntouched()
-    {
-        var work = await BackupSetTestData.WorkAsync(database);
-        var command = BackupSetTestData.Command(work);
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await BackupSetTestData.RegisterAsync(database, command)).Code);
-        var now = DateTimeOffset.UtcNow;
-        var token = Guid.NewGuid();
-        Guid fileId;
-        Guid databaseId;
-        await using (var db = database.CreateContext())
-        {
-            var snapshot = await db.BackupTaskSnapshots.SingleAsync(item => item.TaskId == work.Task.TaskId);
-            Assert.NotEqual("v3", snapshot.FileNameRuleVersion);
-            databaseId = snapshot.DatabaseId;
-            var file = BackupFile.CreateLocal(
-                Guid.NewGuid(), work.Task.TaskId, work.Lease.BackupAttemptId, snapshot.DatabaseId, snapshot.ServerId,
-                FileTransferProtocol.Smb, work.Attempt.WorkerSourceFilePath, 4096, now, snapshot.LocalRetentionDays ?? 7);
-            file.AssociateBackupSet(command.BackupSetId);
-            file.ClaimDeletion(token, "旧策略删除", now, now.AddMinutes(10));
-            db.Add(file);
-            await db.SaveChangesAsync();
-            fileId = file.Id;
-            var stored = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == fileId);
-            var coordinator = new PlanCopyDeletionCoordinator(Factory(), TimeProvider.System);
-            await using var permit = await coordinator.OpenAsync(new(
-                new(stored.Protocol, "synthetic-host", null, "synthetic-share", snapshot.SourceCredentialReferenceId, null),
-                stored.Path, stored.LengthBytes, null, 30,
-                new(stored.TaskId, null, stored.Id, BackupArtifactPathRole.RegisteredFile, token, stored.RowVersion)));
-            Assert.False(permit.Applies);
-        }
-
-        var store = new PlanLocationRetentionStore(Factory());
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(databaseId, Claim(now))).Code);
-        Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ReadExpiredProtectedAsync(databaseId, now.AddHours(1))).Code);
-        Assert.Equal(
-            BackupTaskStoreResultCode.StateMismatch,
-            (await store.ResolveExpiredAsync(fileId, token, stillPresent: false, now.AddHours(1))).Code);
-        await using (var db = database.CreateContext())
-        {
-            var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == fileId);
-            Assert.Equal(BackupFileStatus.DeletePending, file.Status);
-            Assert.Equal(token, file.DeletionLeaseToken);
-        }
-    }
-
-    [Fact]
     public async Task GuardStillRunsAfterAPlanPermitAllowsDeletion()
     {
         var chain = await SeedChainAsync();
@@ -576,9 +530,8 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         bool registerRemote = true)
     {
         ages ??= [40, 10, 1];
-        var legacy = await BackupSetTestData.WorkAsync(database);
+        var old = await BackupSetTestData.HostSnapshotAsync(database);
         await using var db = database.CreateContext();
-        var old = await db.BackupTaskSnapshots.SingleAsync(item => item.TaskId == legacy.Task.TaskId);
         var now = DateTimeOffset.UtcNow;
         var remoteOnly = storageMode == BackupStorageMode.RemoteOnly;
         var target = new StorageTarget(Guid.NewGuid(), $"合成目标-{Guid.NewGuid():N}",

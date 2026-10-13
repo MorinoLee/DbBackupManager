@@ -23,11 +23,8 @@ public static class WorkerHost
         builder.Services.AddHostedService<WorkerStartupService>();
         builder.Services.AddPlatformDatabaseReadiness();
         builder.Services.AddHostedService<WorkerHeartbeatService>();
-        builder.Services.AddHostedService<BackupRecoveryWorkerService>();
-        builder.Services.AddHostedService<BackupWorkerService>();
         builder.Services.AddHostedService<BackupRetentionWorkerService>();
         builder.Services.AddHostedService<BackupNotificationWorkerService>();
-        builder.Services.AddHostedService<BackupScheduleWorkerService>();
         return builder;
     }
 }

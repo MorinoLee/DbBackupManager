@@ -92,6 +92,8 @@ public sealed class SqlServer2019AcceptanceGuardTests
             script,
             StringComparison.Ordinal);
         Assert.Contains("CK_BackupPolicies_ScheduleEffectiveFrom", script, StringComparison.Ordinal);
+        Assert.Contains("DROP TABLE [BackupPolicies]", script, StringComparison.Ordinal);
+        Assert.Contains("51008", script, StringComparison.Ordinal);
         Assert.Contains("IX_TaskEvents_Published_OccurredAtUtc_EventId", script, StringComparison.Ordinal);
         Assert.Contains("CK_DatabaseInstances_EncryptConnection", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Password=", script, StringComparison.OrdinalIgnoreCase);

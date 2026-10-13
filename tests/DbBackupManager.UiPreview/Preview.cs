@@ -130,45 +130,29 @@ internal static class Preview
         foreach (var database in inventory.Databases)
         {
             await Post<DatabaseResponse>(client, $"/api/v1/databases/{database.Id}/managed", new SetDatabaseManagedRequest { Version = database.Version, IsManaged = true }, token);
-            var policy = await Post<ManualBackupPolicyResponse>(client, "/api/v1/manual-backup-policies", new SaveManualBackupRequest
+            await Post<BackupPlanResponse>(client, "/api/v1/backup-plans", new SaveBackupPlanRequest
             {
                 DatabaseId = database.Id,
-                Name = database.Name + " 手动备份",
-                RetentionDays = 7,
+                Name = database.Name + " 备份计划",
+                Mode = 1,
+                FullSchedule = new BackupPlanScheduleRequest { ScheduleType = 2, LocalTime = new TimeOnly(2, 0), DaysOfWeek = 1 },
+                TimeZoneId = "UTC",
+                StorageMode = 1,
+                LocalRecoveryWindowDays = 7,
+                UseCompression = false,
                 BackupTimeoutMinutes = 120,
                 VerifyTimeoutMinutes = 60,
-                IsEnabled = true,
+                TransferTimeoutMinutes = 90,
+                IsPaused = true,
             }, token);
-            await Post<object>(client, $"/api/v1/manual-backup-policies/{policy.Id}/run", new BackupTaskCommandRequest { RequestId = Guid.NewGuid() }, token);
         }
     }
 
     private static async Task SeedMonitoring(HttpClient client, string token, IServiceProvider services)
     {
-        var dashboard = (await client.GetFromJsonAsync<BackupDashboardResponse>("/api/v1/backup-dashboard"))!;
-        for (var i = 0; i < 22; i++)
-            await Post<object>(client, $"/api/v1/manual-backup-policies/{dashboard.Policies[0].Id}/run",
-                new BackupTaskCommandRequest { RequestId = Guid.NewGuid() }, token);
+        _ = client;
+        _ = token;
         using var scope = services.CreateScope();
-        var store = scope.ServiceProvider.GetRequiredService<IBackupTaskExecutionStore>();
-        // 仅向此夹具随机 LocalDB 写入合成阶段结果，不调用 Worker 或任何外部适配器。
-        for (var i = 0; i < 3; i++)
-        {
-            var now = DateTimeOffset.UtcNow;
-            var item = (await store.ClaimNextAsync(new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "synthetic-preview", now, now.AddMinutes(5)))).Value!;
-            var lease = (await store.MarkBackupInvocationStartedAsync(item.Lease, item.Attempt.RowVersion, DateTimeOffset.UtcNow)).Value!;
-            if (i == 0)
-            {
-                var backedUp = (await store.CommitStageAsync(lease, new(Guid.NewGuid(), BackupStageOutcome.Succeeded, DateTimeOffset.UtcNow))).Value!;
-                await store.CommitStageAsync(backedUp.Lease!, new(Guid.NewGuid(), BackupStageOutcome.Succeeded, DateTimeOffset.UtcNow, SourceLengthBytes: 921572864));
-            }
-            else
-            {
-                var result = await store.CommitStageAsync(lease, new(Guid.NewGuid(), i == 1 ? BackupStageOutcome.ConfirmedFailed : BackupStageOutcome.Indeterminate,
-                    DateTimeOffset.UtcNow, ErrorCode: i == 1 ? "smb_credential_decryption_failed" : "backup_outcome_unknown", ErrorMessage: "合成验收结果。"));
-                if (!result.IsSucceeded) throw new InvalidOperationException("合成任务结果未能登记。");
-            }
-        }
         await scope.ServiceProvider.GetRequiredService<IWorkerHeartbeatStore>().RegisterAsync(Guid.NewGuid(), CancellationToken.None);
     }
 

@@ -36,12 +36,15 @@ internal sealed partial class BackupPlanExecutionStore
             if (operation.State != BackupExecutionOperationState.Frozen) return BackupExecutionContractCode.Conflict;
             if (ValidateLease(task, lease, clock.GetUtcNow()) is not null) return BackupExecutionContractCode.LeaseLost;
             var attempt = await db.BackupAttempts.AsTracking().SingleAsync(x => x.Id == identity.AttemptId && x.TaskId == task.Id, cancellationToken);
-            var sqlOperation = await db.BackupPlanExecutionOperations.SingleAsync(x => x.AttemptId == attempt.Id && x.Kind == BackupExecutionOperationKind.SqlResult, cancellationToken);
-            if (identity.IntendedBackupSetId != sqlOperation.IntendedBackupSetId) return BackupExecutionContractCode.Conflict;
-            var sqlFacts = sqlOperation.Facts.SqlSuccessObserved ? sqlOperation.Facts
-                : await db.BackupPlanExecutionOperations.Where(x => x.AttemptId == attempt.Id && x.Kind == BackupExecutionOperationKind.Recovery
+            var sqlOperation = await db.BackupPlanExecutionOperations.SingleOrDefaultAsync(x => x.AttemptId == attempt.Id && x.Kind == BackupExecutionOperationKind.SqlResult, cancellationToken);
+            if (sqlOperation is not null && identity.IntendedBackupSetId != sqlOperation.IntendedBackupSetId)
+                return BackupExecutionContractCode.Conflict;
+            var recoveredFacts = sqlOperation is { Facts.SqlSuccessObserved: false }
+                ? await db.BackupPlanExecutionOperations.Where(x => x.AttemptId == attempt.Id && x.Kind == BackupExecutionOperationKind.Recovery
                     && x.State == BackupExecutionOperationState.Applied && x.Facts.SqlSuccessObserved && x.Facts.SqlOutcomeSource == BackupSqlOutcomeSource.RecoveredEvidence)
-                    .OrderByDescending(x => x.Sequence).Select(x => x.Facts).FirstOrDefaultAsync(cancellationToken) ?? sqlOperation.Facts;
+                    .OrderByDescending(x => x.Sequence).Select(x => x.Facts).FirstOrDefaultAsync(cancellationToken)
+                : null;
+            var sqlFacts = sqlOperation is { Facts.SqlSuccessObserved: true } ? sqlOperation.Facts : recoveredFacts ?? sqlOperation?.Facts ?? operation.Facts;
             var facts = operation.Facts;
             var now = clock.GetUtcNow();
             var evidenceTime = facts.EvidenceAtUtc ?? identity.ObservedAtUtc;

@@ -30,12 +30,9 @@ public sealed class BackupMetadataReconciliationSqlServerTests(PlatformDatabaseS
         var preparedFull = await service.PrepareAsync(BoundRequest(fullWork, full));
         Assert.Equal(DifferentialBaselineConclusion.Verified, preparedFull.ActiveBaseline.Conclusion);
         Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await service.CommitAsync(preparedFull)).Code);
-        Guid policy;
-        await using (var context = database.CreateContext())
-            policy = await context.BackupTasks.Where(x => x.Id == fullWork.Task.TaskId).Select(x => x.PolicyId).SingleAsync() ?? throw new InvalidOperationException("合成旧任务缺少策略身份。");
         await sql.ChangeAsync();
         var diff = await sql.BackupAsync("diff", Domain.BackupPlans.BackupRunPurpose.PlanDifferential);
-        var diffWork = await BackupSetTestData.WorkAsync(database, policy);
+        var diffWork = await BackupSetTestData.WorkAsync(database, fullWork.Snapshot.Identity.DatabaseId);
         await BindFile(diffWork, diff);
         var request = BoundRequest(diffWork, diff);
         var prepared = await service.PrepareAsync(request);
@@ -66,7 +63,7 @@ public sealed class BackupMetadataReconciliationSqlServerTests(PlatformDatabaseS
 
         async Task BindFile(BackupExecutionWorkItem work, ProofBackup file)
         {
-            // 旧策略夹具生成任务；仅绑定本次合成快照与临时文件，不更改生产任务模型。
+            // 计划夹具生成任务；仅绑定本次合成快照与临时文件，不更改生产任务模型。
             await using var context = database.CreateContext();
             await context.Database.ExecuteSqlInterpolatedAsync(
                 $"UPDATE [BackupTaskSnapshots] SET [DatabaseName]={sql.DatabaseName} WHERE [TaskId]={work.Task.TaskId}");
@@ -83,10 +80,7 @@ public sealed class BackupMetadataReconciliationSqlServerTests(PlatformDatabaseS
         var fullWork = await BackupSetTestData.WorkAsync(database);
         var full = BackupSetTestData.Command(fullWork);
         await BackupSetTestData.RegisterAsync(database, full);
-        Guid policy;
-        await using (var db = database.CreateContext())
-            policy = await db.BackupTasks.Where(x => x.Id == fullWork.Task.TaskId).Select(x => x.PolicyId).SingleAsync() ?? throw new InvalidOperationException("合成旧任务缺少策略身份。");
-        var work = await BackupSetTestData.WorkAsync(database, policy);
+        var work = await BackupSetTestData.WorkAsync(database, fullWork.Snapshot.Identity.DatabaseId);
         var metadata = full.Metadata with
         {
             Type = BackupMetadata.Known(BackupType.Differential),

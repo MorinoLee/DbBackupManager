@@ -42,7 +42,7 @@
                     <RowTemplate Context="task">
                         <MudTd DataLabel="数据库 / 配置">@task.DatabaseName / @task.PolicyName</MudTd>
                         <MudTd DataLabel="类型">@BackupPlanPresentation.BackupType(task.BackupType)</MudTd>
-                        <MudTd DataLabel="计划版本">@(task.PlanVersionNumber is int version ? $"v{version}" : "旧策略任务")</MudTd>
+                        <MudTd DataLabel="计划版本">@(task.PlanVersionNumber is int version ? $"v{version}" : "未知")</MudTd>
                         <MudTd DataLabel="状态与阶段"><div><TaskStatusChip Status="@task.Status" /> <span>@BackupPresentation.Stage(task.Stage)</span>
                             @if (task.ErrorCode is not null) { <MudText Typo="Typo.caption">@BackupPresentation.FailureReason(task.ErrorCode)</MudText> }
                             @if (task.CancellationRequested && task.Status is "Pending" or "Running") { <MudText Typo="Typo.caption">已请求取消，等待安全边界。</MudText> }
@@ -54,8 +54,7 @@
                         <MudTd DataLabel="副本大小">@Formatters.Bytes(task.FileLength)</MudTd>
                         <MudTd DataLabel="操作">
                             <MudButton Size="Size.Small" Href="@($"/backup-tasks/{task.Id}?page={Page}&back={Uri.EscapeDataString(ListUrl)}")" Disabled="Disabled" data-testid="task-detail">详情</MudButton>
-                            @if (task.Status is "Pending" or "Running") { <MudButton Size="Size.Small" OnClick="@(() => MutateAsync(task.Id, false))" Disabled="@(Disabled || task.CancellationRequested)" data-testid="cancel-task">请求取消</MudButton> }
-                            @if (task.Status == "Failed") { <MudButton Size="Size.Small" OnClick="@(() => MutateAsync(task.Id, true))" Disabled="Disabled" data-testid="retry-task">重试</MudButton> }
+                            @if (task.Status is "Pending" or "Running") { <MudButton Size="Size.Small" OnClick="@(() => CancelAsync(task.Id))" Disabled="@(Disabled || task.CancellationRequested)" data-testid="cancel-task">请求取消</MudButton> }
                         </MudTd>
                     </RowTemplate>
                     <NoRecordsContent><MudText Class="pa-4">暂无符合条件的任务。可调整筛选，或从备份计划查看当前配置。</MudText></NoRecordsContent>
@@ -72,7 +71,7 @@
 </AuthorizeView>
 @code {
     private BackupPage<BackupTaskSummary> _data = new([], 0, 0);
-    private readonly Dictionary<(Guid, bool), Guid> _requests = new();
+    private readonly Dictionary<Guid, Guid> _requests = new();
     private bool _mutating;
     private string? _commandError, _message;
     private bool Disabled => Busy || _mutating;
@@ -83,7 +82,7 @@
         return () => _data = result;
     }
     protected override void ClearData() => _data = new([], 0, 0);
-    private async Task MutateAsync(Guid id, bool retry)
+    private async Task CancelAsync(Guid id)
     {
         if (Disabled || IsDisposed) return;
         _mutating = true; _commandError = null; _message = null;
@@ -91,8 +90,8 @@
         {
             var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
             if (actor is null) { ClearData(); await RefreshAsync(); return; }
-            if (!_requests.TryGetValue((id, retry), out var request)) _requests[(id, retry)] = request = Guid.NewGuid();
-            var result = retry ? await Management.RetryAsync(actor, id, request, LifetimeToken) : await Management.CancelAsync(actor, id, request, LifetimeToken);
+            if (!_requests.TryGetValue(id, out var request)) _requests[id] = request = Guid.NewGuid();
+            var result = await Management.CancelAsync(actor, id, request, LifetimeToken);
             if (IsDisposed) return;
             if (result.Code != BackupManagementCode.Succeeded)
             {
@@ -100,8 +99,8 @@
                 if (result.Code == BackupManagementCode.AuthenticationRequired) { ClearData(); await RefreshAsync(); }
                 return;
             }
-            _requests.Remove((id, retry));
-            _message = retry ? "已提交重试。" : "已提交取消请求。";
+            _requests.Remove(id);
+            _message = "已提交取消请求。";
             await RefreshAsync();
         }
         catch (Exception) { _commandError = "操作暂未得到确认，请重试；会保留同一请求标识。"; }

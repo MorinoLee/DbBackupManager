@@ -90,8 +90,7 @@ public sealed class BackupSetSqlServerTests(PlatformDatabaseSqlServerFixture dat
         var full = BackupSetTestData.Command(fullWork);
         await BackupSetTestData.RegisterAsync(database, full);
         await using var db = database.CreateContext();
-        var policyId = await db.BackupTasks.Where(x => x.Id == fullWork.Task.TaskId).Select(x => x.PolicyId).SingleAsync();
-        var diffWork = await BackupSetTestData.WorkAsync(database, policyId);
+        var diffWork = await BackupSetTestData.WorkAsync(database, fullWork.Snapshot.Identity.DatabaseId);
         var facts = full.Metadata with
         {
             BackupSetGuid = BackupMetadata.Known(Guid.NewGuid()),
@@ -399,19 +398,32 @@ public sealed class BackupSetSqlServerTests(PlatformDatabaseSqlServerFixture dat
             await migrator.MigrateAsync();
             Assert.Equal(2, await TableCountAsync(db));
             Assert.True(await HasAssociationColumnAsync(db));
-            var work = await BackupSetTestData.WorkAsync(temporary);
-            var command = BackupSetTestData.Command(work);
-            Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await BackupSetTestData.RegisterAsync(temporary, command)).Code);
-            // 后续兼容迁移可以先独立回退；以下实际检验备份集迁移自身的守卫及历史保留。
+            // 计划任务带有计划身份和 SQL 身份绑定，51003 与 51004 会拒绝带着它们回退。
+            // 空库先退到备份集迁移，再写入备份集，单独检验 51001。父行属于已删除的策略任务模型，只为本测试关闭外键。
             var setMigration = migrations.Single(x => x.EndsWith("_AddBackupSets", StringComparison.Ordinal));
             await migrator.MigrateAsync(setMigration);
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                ALTER TABLE [BackupSets] NOCHECK CONSTRAINT [FK_BackupSets_BackupAttempts_TaskId_AttemptId];
+                ALTER TABLE [BackupSets] NOCHECK CONSTRAINT [FK_BackupSets_ManagedDatabases_DatabaseId];
+                """);
+            var metadata = BackupSetTestData.Full();
+            var observedAt = new DateTimeOffset(2026, 10, 7, 18, 1, 0, TimeSpan.Zero);
+            var completion = new BackupCompletionTimeDecision(observedAt, BackupCompletionTimeSource.PlatformObserved,
+                BackupCompletionTimeReason.PlatformObserved);
+            var set = new BackupSet(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+                metadata, completion, BackupSetAssessment.NotApplicable, null, true);
+            set.Reconcile(metadata, completion, BackupSetAssessment.NotApplicable, null, true);
+            db.Add(set);
+            await db.SaveChangesAsync();
             var setHistory = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
             Assert.Equal(51001, error.Number);
             Assert.Equal(2, await TableCountAsync(db));
             Assert.True(await HasAssociationColumnAsync(db));
             Assert.Equal(setHistory, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
-            Assert.Equal(command.Metadata, (await db.BackupSets.SingleAsync()).Metadata);
+            db.ChangeTracker.Clear();
+            Assert.Equal(metadata, (await db.BackupSets.AsNoTracking().SingleAsync()).Metadata);
         }
         finally { await temporary.DisposeAsync(); }
     }

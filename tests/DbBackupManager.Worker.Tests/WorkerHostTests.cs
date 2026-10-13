@@ -39,19 +39,18 @@ public sealed class WorkerHostTests
         Assert.NotNull(context);
         Assert.Equal(System.Data.ConnectionState.Closed, context.Database.GetDbConnection().State);
         using var scope = host.Services.CreateScope();
-        Assert.IsType<BackupTaskRecovery>(scope.ServiceProvider.GetRequiredService<IBackupTaskRecovery>());
         var evidenceProbe = scope.ServiceProvider.GetRequiredService<ITargetSqlBackupEvidenceProbe>();
         Assert.False(evidenceProbe is ITargetSqlBackupExecutor);
-        Assert.Contains(
+        Assert.DoesNotContain(
             host.Services.GetServices<IHostedService>(),
-            service => service.GetType().Name == "BackupRecoveryWorkerService");
+            service => service.GetType().Name is "BackupRecoveryWorkerService" or "BackupWorkerService");
         Assert.Contains(
             host.Services.GetServices<IHostedService>(),
             service => service.GetType().Name == "BackupRetentionWorkerService");
         Assert.Contains(
             host.Services.GetServices<IHostedService>(),
             service => service.GetType().Name == "BackupNotificationWorkerService");
-        Assert.Contains(
+        Assert.DoesNotContain(
             host.Services.GetServices<IHostedService>(),
             service => service.GetType().Name == "BackupScheduleWorkerService");
         Assert.DoesNotContain(
