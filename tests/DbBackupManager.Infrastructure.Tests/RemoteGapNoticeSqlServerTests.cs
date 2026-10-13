@@ -1,3 +1,4 @@
+using System.Data;
 using DbBackupManager.Application.BackupPlans;
 using DbBackupManager.Application.Identity;
 using DbBackupManager.Application.Notifications;
@@ -128,6 +129,36 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
             factory, graph.DatabaseId, CancellationToken.None, knownGaps: gaps);
         Assert.Equal(1, await CountNoticesAsync(graph.DatabaseId));
         Assert.Equal(1, await CountOpenAsync(graph.DatabaseId));
+    }
+
+    [Fact]
+    public async Task MarkingWhileClearingCommitsFactsKeepsTheUnprojectedTargetAndSendsOnce()
+    {
+        var graph = await SeedAsync(secondTarget: true);
+        using var provider = database.CreateServiceProvider();
+        var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var kept = graph.SecondTargetId!.Value;
+        await using (var db = database.CreateContext())
+        {
+            await RemoteGapNotices.MarkPendingAsync(
+                db,
+                new RemoteGapNotices.Observation(graph.DatabaseId, graph.TaskId, graph.Stage, Opened, [graph.TargetId]),
+                CancellationToken.None);
+        }
+
+        const int writers = 8;
+        var facts = Enumerable.Range(0, writers).Select(index => CommitFactAsync(factory, graph, kept, Opened.AddSeconds(index)));
+        var clears = Enumerable.Range(0, writers).Select(index => ProjectAsync(
+            factory,
+            graph,
+            Opened.AddMinutes(1).AddSeconds(index),
+            Gaps(graph.TargetId, PlanLocationRecovery.RemoteBaseUnconfirmed)));
+        await Task.WhenAll(facts.Concat(clears));
+
+        Assert.Equal(writers, await CountFactsAsync(graph.TaskId));
+        Assert.Equal(1, await CountNoticesAsync(graph.DatabaseId));
+        Assert.Equal(1, await CountOpenAsync(graph.DatabaseId));
+        Assert.Contains(kept, await PendingTargetsAsync(graph.DatabaseId));
     }
 
     [Fact]
@@ -286,6 +317,50 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
         {
             await temporary.DisposeAsync();
         }
+    }
+
+    private static async Task CommitFactAsync(
+        IDbContextFactory<PlatformDbContext> factory,
+        Graph graph,
+        Guid keptTarget,
+        DateTimeOffset occurredAt)
+    {
+        await using var strategyContext = await factory.CreateDbContextAsync();
+        var strategy = strategyContext.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var db = await factory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+            db.AuditRecords.Add(new AuditRecord(
+                null,
+                "plan.remote_gap.fact",
+                "BackupTask",
+                graph.TaskId.ToString("N"),
+                "succeeded",
+                "synthetic"));
+            await db.SaveChangesAsync();
+            await RemoteGapNotices.MarkPendingAsync(
+                db,
+                new RemoteGapNotices.Observation(graph.DatabaseId, graph.TaskId, graph.Stage, occurredAt, [keptTarget]),
+                CancellationToken.None);
+            await transaction.CommitAsync();
+        });
+    }
+
+    private async Task<int> CountFactsAsync(Guid taskId)
+    {
+        await using var db = database.CreateContext();
+        var target = taskId.ToString("N");
+        return await db.AuditRecords.CountAsync(item => item.Action == "plan.remote_gap.fact" && item.TargetId == target);
+    }
+
+    private async Task<Guid[]> PendingTargetsAsync(Guid databaseId)
+    {
+        await using var db = database.CreateContext();
+        var pending = await db.RemoteGapProjectionPendings
+            .Include(item => item.Targets)
+            .SingleOrDefaultAsync(item => item.DatabaseId == databaseId);
+        return pending is null ? [] : pending.TargetIds().ToArray();
     }
 
     private static Task<bool> ProjectAsync(

@@ -559,6 +559,7 @@ internal sealed class PlanLocationRetentionStore(
         }
         catch (Exception exception) when (IsDeadlock(exception))
         {
+            // 执行策略已经把 1205 的整段事务重试过。这里只接住耗尽后的失败，事务已回滚。
             return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.DatabaseBlocked);
         }
         catch (DbUpdateException)

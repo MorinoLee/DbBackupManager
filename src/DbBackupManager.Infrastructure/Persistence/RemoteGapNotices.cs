@@ -1,7 +1,9 @@
 using System.Data;
+using System.Text;
 using DbBackupManager.Application.BackupPlans;
 using DbBackupManager.Application.Notifications;
 using DbBackupManager.Domain.BackupTasks;
+using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Domain.Notifications;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -11,7 +13,9 @@ namespace DbBackupManager.Infrastructure.Persistence;
 
 /// <summary>
 /// 远端缺口通知在运行事实提交之后单独投影。需要投影时，待补发标记与事实写在同一事务。
-/// 投影成功后清除标记；失败或拿不到保留锁时标记留下。之后只由写入口补做：
+/// 标记用单条 upsert 写入，不先读、也不按 RowVersion 冲突失败。1205 死锁不在这里吞掉，
+/// 由事实事务外层的执行策略把整段事务重试。投影成功后只清除这次已经投影的目标；
+/// 失败、拿不到保留锁或尚未投影的目标都留下标记。之后只由写入口补做：
 /// 阶段提交、Cleanup、远端副本删除和计划保留删除。读取恢复摘要不写库、不拿锁、不入队。不启动后台循环。
 /// 同一数据库、远端目标和缺口在恢复前只保留一封；恢复后再次出现可以再发。
 /// 位置未知或这次没有该目标的投影时，不新开也不关闭已打开缺口。
@@ -46,30 +50,64 @@ internal static class RemoteGapNotices
             return;
         }
 
-        var pending = await context.RemoteGapProjectionPendings.AsTracking()
-            .Include(item => item.Targets)
-            .SingleOrDefaultAsync(item => item.DatabaseId == observation.DatabaseId, cancellationToken);
-        if (pending is null)
+        if (observation.Stage is BackupTaskStage stage && !Enum.IsDefined(stage))
         {
-            pending = new RemoteGapProjectionPending(
-                Guid.NewGuid(),
-                observation.DatabaseId,
-                observation.TaskId,
-                observation.Stage,
-                observation.OccurredAtUtc);
-            context.RemoteGapProjectionPendings.Add(pending);
-        }
-        else
-        {
-            pending.Note(observation.TaskId, observation.Stage, observation.OccurredAtUtc);
+            throw new ArgumentOutOfRangeException(nameof(observation), observation.Stage, "枚举值无效。");
         }
 
-        foreach (var target in targets)
+        _ = ConfigurationValues.RequireUtc(observation.OccurredAtUtc, nameof(observation));
+        var parameters = new List<SqlParameter>
         {
-            pending.IncludeTarget(target);
+            new("@databaseId", SqlDbType.UniqueIdentifier) { Value = observation.DatabaseId },
+            new("@taskId", SqlDbType.UniqueIdentifier) { Value = observation.TaskId },
+            new("@stage", SqlDbType.NVarChar, 30) { Value = (object?)observation.Stage?.ToString() ?? DBNull.Value },
+            new("@requestedAt", SqlDbType.DateTimeOffset) { Value = observation.OccurredAtUtc },
+        };
+        var values = new StringBuilder();
+        for (var index = 0; index < targets.Length; index++)
+        {
+            var name = "@target" + index;
+            parameters.Add(new SqlParameter(name, SqlDbType.UniqueIdentifier) { Value = targets[index] });
+            if (index > 0)
+            {
+                values.Append(", ");
+            }
+
+            values.Append('(').Append(name).Append(')');
         }
 
-        await context.SaveChangesAsync(cancellationToken);
+        // 与投影方抢同一行时可能 1205。异常交给外层执行策略，连同本事务里的事实一起重试。
+        // values 只含本方法生成的参数名。
+        var sql = """
+            MERGE [RemoteGapProjectionPendings] WITH (HOLDLOCK) AS target
+            USING (SELECT @databaseId AS [DatabaseId]) AS source
+            ON target.[DatabaseId] = source.[DatabaseId]
+            WHEN MATCHED THEN
+                UPDATE SET
+                    [TaskId] = @taskId,
+                    [Stage] = @stage,
+                    [RequestedAtUtc] = @requestedAt,
+                    [UpdatedAtUtc] = SYSDATETIMEOFFSET()
+            WHEN NOT MATCHED THEN
+                INSERT ([Id], [DatabaseId], [TaskId], [Stage], [RequestedAtUtc], [CreatedAtUtc], [UpdatedAtUtc])
+                VALUES (NEWID(), @databaseId, @taskId, @stage, @requestedAt, SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET());
+
+            MERGE [RemoteGapProjectionPendingTargets] WITH (HOLDLOCK) AS target
+            USING (
+                SELECT pending.[Id] AS [PendingId], incoming.[StorageTargetId]
+                FROM [RemoteGapProjectionPendings] AS pending
+                INNER JOIN (VALUES
+            """ + values + """
+            ) AS incoming([StorageTargetId])
+                    ON pending.[DatabaseId] = @databaseId
+            ) AS source
+            ON target.[PendingId] = source.[PendingId]
+               AND target.[StorageTargetId] = source.[StorageTargetId]
+            WHEN NOT MATCHED THEN
+                INSERT ([PendingId], [StorageTargetId])
+                VALUES (source.[PendingId], source.[StorageTargetId]);
+            """;
+        await context.Database.ExecuteSqlRawAsync(sql, parameters.Cast<object>(), cancellationToken);
     }
 
     internal static async Task TryDrainPendingAsync(
@@ -195,15 +233,59 @@ internal static class RemoteGapNotices
                 return false;
             }
 
-            if (pending is not null)
-            {
-                context.RemoteGapProjectionPendings.Remove(pending);
-                await context.SaveChangesAsync(cancellationToken);
-            }
-
+            await ClearProjectedTargetsAsync(context, observation.DatabaseId, gaps.Keys, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return true;
         });
+    }
+
+    private static async Task ClearProjectedTargetsAsync(
+        PlatformDbContext context,
+        Guid databaseId,
+        IEnumerable<Guid> projectedTargets,
+        CancellationToken cancellationToken)
+    {
+        var targets = DistinctTargets(projectedTargets);
+        if (targets.Length == 0)
+        {
+            return;
+        }
+
+        var parameters = new List<SqlParameter>
+        {
+            new("@databaseId", SqlDbType.UniqueIdentifier) { Value = databaseId },
+        };
+        var list = new StringBuilder();
+        for (var index = 0; index < targets.Length; index++)
+        {
+            var name = "@clear" + index;
+            parameters.Add(new SqlParameter(name, SqlDbType.UniqueIdentifier) { Value = targets[index] });
+            if (index > 0)
+            {
+                list.Append(", ");
+            }
+
+            list.Append(name);
+        }
+
+        var sql = """
+            DELETE targetRow
+            FROM [RemoteGapProjectionPendingTargets] AS targetRow
+            INNER JOIN [RemoteGapProjectionPendings] AS pending ON pending.[Id] = targetRow.[PendingId]
+            WHERE pending.[DatabaseId] = @databaseId
+              AND targetRow.[StorageTargetId] IN (
+            """ + list + """
+            );
+
+            DELETE pending
+            FROM [RemoteGapProjectionPendings] AS pending
+            WHERE pending.[DatabaseId] = @databaseId
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM [RemoteGapProjectionPendingTargets] AS targetRow
+                  WHERE targetRow.[PendingId] = pending.[Id]);
+            """;
+        await context.Database.ExecuteSqlRawAsync(sql, parameters.Cast<object>(), cancellationToken);
     }
 
     private static Guid[] DistinctTargets(IEnumerable<Guid> targetIds) =>
