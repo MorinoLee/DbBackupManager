@@ -19,7 +19,7 @@
     <Authorized Context="authState">
         <MudStack Spacing="3">
             <PageHeader Title="数据库清单"
-                        Description="查看发现的数据库并选择纳管。新发现的数据库默认不纳管；纳管后可在“备份配置”中创建手动备份。">
+                        Description="查看发现的数据库并选择纳管。新发现的数据库默认不纳管；已纳管的非系统库在“备份计划”中只有一个当前计划入口。">
                 <Actions>
                     @if (!_login)
                     {
@@ -84,7 +84,7 @@
                 </MudPaper>
                 <MudTable T="DatabaseItem" Items="VisibleDatabases" Loading="_busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1">
                     <HeaderContent>
-                        <MudTh>数据库</MudTh><MudTh>服务器 · 实例</MudTh><MudTh>状态</MudTh><MudTh>恢复模式</MudTh><MudTh>最近发现</MudTh><MudTh>纳管</MudTh>
+                        <MudTh>数据库</MudTh><MudTh>服务器 · 实例</MudTh><MudTh>状态</MudTh><MudTh>恢复模式</MudTh><MudTh>最近发现</MudTh><MudTh>纳管</MudTh><MudTh>计划</MudTh>
                     </HeaderContent>
                     <RowTemplate Context="database">
                         <MudTd DataLabel="数据库">@database.Name @(database.IsSystemDatabase ? "（系统库）" : "")</MudTd>
@@ -105,6 +105,16 @@
                                     @(database.IsManaged ? "取消纳管" : "纳管")
                                 </MudButton>
                             </MudStack>
+                        </MudTd>
+                        <MudTd DataLabel="计划">
+                            @if (database.IsManaged && !database.IsSystemDatabase)
+                            {
+                                <MudButton Size="Size.Small" Href="@($"/backup-plans?database={database.Id}")" data-testid="open-plan">当前计划</MudButton>
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.body2">—</MudText>
+                            }
                         </MudTd>
                     </RowTemplate>
                     <NoRecordsContent>

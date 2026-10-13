@@ -36,8 +36,9 @@ public sealed class NavMenuTests : MudBlazorComponentTest
         Assert.Equal("/file-credentials", component.Find("[data-testid='nav-link-file-credentials']").GetAttribute("href"));
         Assert.Equal("/notifications", component.Find("[data-testid='nav-link-notifications']").GetAttribute("href"));
         Assert.Equal("/storage-targets", component.Find("[data-testid='nav-link-storage-targets']").GetAttribute("href"));
-        Assert.Equal("/backup-policies", component.Find("[data-testid='nav-link-backup-policies']").GetAttribute("href"));
-        Assert.Equal("/scheduled-backup-policies", component.Find("[data-testid='nav-link-scheduled-backup-policies']").GetAttribute("href"));
+        Assert.Equal("/backup-plans", component.Find("[data-testid='nav-link-backup-plans']").GetAttribute("href"));
+        Assert.Empty(component.FindAll("[data-testid='nav-link-backup-policies']"));
+        Assert.Empty(component.FindAll("[data-testid='nav-link-scheduled-backup-policies']"));
         Assert.Throws<Bunit.ElementNotFoundException>(
             () => component.Find("[data-testid='nav-link-login-menu']"));
         Assert.Empty(component.FindAll("[data-testid='nav-pending-note']"));
@@ -47,6 +48,8 @@ public sealed class NavMenuTests : MudBlazorComponentTest
     [InlineData("/servers", true, false, false)]
     [InlineData("/databases", true, false, false)]
     [InlineData("/backup-tasks", false, true, false)]
+    [InlineData("/backup-plans", false, true, false)]
+    [InlineData("/backup-policies", false, true, false)]
     [InlineData("/scheduled-backup-policies", false, true, false)]
     [InlineData("/backup-tasks/9f2b1c6d-0000-4000-8000-000000000000", false, true, false)]
     [InlineData("/storage-targets", false, true, false)]

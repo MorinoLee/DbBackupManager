@@ -1,0 +1,450 @@
+@*
+    统一备份计划：每个已纳管的非系统数据库只有一个当前计划。
+    本页只保存完整备份，或完整备份加差异备份；保存不启动自动调度，也不开始定时删除。
+*@
+@page "/backup-plans"
+@attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
+@implements IDisposable
+@using DbBackupManager.Application.BackupPlans
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Application.Identity
+@using DbBackupManager.Application.Servers
+@using DbBackupManager.Application.StorageTargets
+@using DbBackupManager.Domain.BackupPlans
+@using DbBackupManager.Domain.BackupTasks
+@using DbBackupManager.Domain.Configuration
+@using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.BackupPlans
+@using DbBackupManager.Web.Servers
+@using DbBackupManager.Web.SqlCredentials
+@using Microsoft.AspNetCore.Authorization
+@inject IBackupPlanCatalogService Plans
+@inject IServerManagementService Servers
+@inject IStorageTargetManagementService StorageTargets
+@inject AuthenticationStateProvider Authentication
+@inject IDialogService Dialogs
+
+<PageTitle>备份计划 · DbBackupManager</PageTitle>
+<AuthorizeView Policy="@AdminAuthenticationDefaults.AuthorizationPolicy">
+    <Authorized>
+        <MudStack Spacing="3">
+            <PageHeader Title="备份计划"
+                        Description="每个已纳管的非系统数据库只有一个当前计划，暂停后仍占用该位置。本阶段保存完整备份，或完整备份加差异备份。保存不会启动自动调度，也不会开始定时删除。">
+                <Actions>
+                    @if (!_login)
+                    {
+                        <MudButton OnClick="RefreshAsync"
+                                   Disabled="_busy"
+                                   Variant="Variant.Outlined"
+                                   StartIcon="@Icons.Material.Outlined.Refresh"
+                                   data-testid="refresh-plans">
+                            刷新
+                        </MudButton>
+                    }
+                </Actions>
+            </PageHeader>
+            @if (_error is not null) { <MudAlert Severity="Severity.Error" role="alert">@_error</MudAlert> }
+            @if (_message is not null) { <MudAlert Severity="Severity.Success" role="status">@_message</MudAlert> }
+            @if (_login) { <MudButton Href="/login?returnUrl=/backup-plans" Color="Color.Primary">重新登录</MudButton> }
+            else if (_rows.Count == 0 && !_busy)
+            {
+                <EmptyState Title="还没有可配置的数据库"
+                            Icon="@Icons.Material.Outlined.Backup"
+                            Description="先在数据库清单中纳管非系统数据库，再回来创建当前备份计划。">
+                    <Actions>
+                        <MudButton Href="/databases" Variant="Variant.Filled" Color="Color.Primary" data-testid="go-databases">
+                            前往数据库清单
+                        </MudButton>
+                    </Actions>
+                </EmptyState>
+            }
+            else
+            {
+                <MudTable T="PlanRow" Items="_rows" Loading="_busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1" data-testid="plan-list">
+                    <HeaderContent>
+                        <MudTh>数据库</MudTh><MudTh>当前计划</MudTh><MudTh>模式</MudTh><MudTh>存储</MudTh><MudTh>CHECKSUM</MudTh><MudTh>状态</MudTh><MudTh>操作</MudTh>
+                    </HeaderContent>
+                    <RowTemplate Context="row">
+                        <MudTd DataLabel="数据库">@row.Label</MudTd>
+                        <MudTd DataLabel="当前计划">@(row.Plan?.Name ?? "还没有当前备份计划")</MudTd>
+                        <MudTd DataLabel="模式">@(row.Plan is null ? "—" : BackupPlanPresentation.Mode(row.Plan.Mode))</MudTd>
+                        <MudTd DataLabel="存储">@(row.Plan is null ? "—" : BackupPlanPresentation.StorageMode(row.Plan.StorageMode))</MudTd>
+                        <MudTd DataLabel="CHECKSUM">@(row.Plan is null ? "—" : row.Plan.UseChecksum ? "已勾选" : "未勾选")</MudTd>
+                        <MudTd DataLabel="状态">
+                            @if (row.Plan is null)
+                            {
+                                <MudText Typo="Typo.body2">—</MudText>
+                            }
+                            else
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                                         Color="@(row.Plan.IsPaused ? Color.Default : Color.Success)">
+                                    @(row.Plan.IsPaused ? "已暂停（仍是当前计划）" : $"使用中 · v{row.Plan.VersionNumber}")
+                                </MudChip>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="操作">
+                            <MudButton Size="Size.Small" OnClick="@(() => ShowRecoveryAsync(row.Database.Id))" Disabled="_busy" data-testid="view-plan">可恢复摘要</MudButton>
+                            @if (row.Plan is null)
+                            {
+                                <MudButton Size="Size.Small" OnClick="@(() => OpenEditorAsync(row.Database.Id, false))" Disabled="_busy" Color="Color.Primary" data-testid="new-backup-plan">创建计划</MudButton>
+                            }
+                            else
+                            {
+                                <MudButton Size="Size.Small" OnClick="@(() => OpenEditorAsync(row.Database.Id, true))" Disabled="_busy" data-testid="edit-plan">编辑</MudButton>
+                            }
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+                @if (_selectedId is not null)
+                {
+                    <MudPaper Outlined="true" Class="pa-4" data-testid="recovery-panel">
+                        <MudText Typo="Typo.h6" HtmlTag="h2">@SelectedLabel() 的恢复情况</MudText>
+                        @if (_recovery is null)
+                        {
+                            <LoadingState />
+                        }
+                        else if (!_recovery.HasCurrentPlan)
+                        {
+                            <div data-testid="plan-empty">
+                                <EmptyState Title="还没有当前备份计划"
+                                            Icon="@Icons.Material.Outlined.EventBusy"
+                                            Description="没有当前计划时不显示恢复窗口，也不会根据旧配置给出恢复结论。" />
+                            </div>
+                        }
+                        else if (_recovery.Locations.Count == 0)
+                        {
+                            <MudText Typo="Typo.body2">当前计划还没有可展示的存储位置。</MudText>
+                        }
+                        else
+                        {
+                            @foreach (var location in _recovery.Locations)
+                            {
+                                <MudStack Spacing="1" Class="mt-3">
+                                    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Wrap="Wrap.Wrap">
+                                        <MudText Typo="Typo.subtitle2">@LocationName(location.Location)</MudText>
+                                        <MudChip T="string" Size="Size.Small" data-testid="recovery-health"
+                                                 Color="@HealthColor(location)" Variant="Variant.Filled">
+                                            @Health(location)
+                                        </MudChip>
+                                        @if (location.RemoteUnrecoverable)
+                                        {
+                                            <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined" data-testid="recovery-remote-gap">
+                                                远端暂时无法恢复
+                                            </MudChip>
+                                        }
+                                    </MudStack>
+                                    <MudText Typo="Typo.body2">
+                                        恢复窗口：@(location.WindowDays is int days ? $"{days} 天" : "—")
+                                        · 基线：@BackupPlanPresentation.Baseline(location.Baseline)
+                                    </MudText>
+                                    @foreach (var reason in location.GapReasonCodes.Concat(location.UnknownReasonCodes).Distinct())
+                                    {
+                                        <MudText Typo="Typo.caption">@BackupPlanPresentation.RetentionReason(reason)</MudText>
+                                    }
+                                </MudStack>
+                            }
+                        }
+                    </MudPaper>
+                }
+            }
+        </MudStack>
+    </Authorized>
+    <NotAuthorized><MudAlert Severity="Severity.Info">请先登录管理员账号。</MudAlert></NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private static readonly DialogOptions EditorOptions = new() { MaxWidth = MaxWidth.Small, FullWidth = true };
+
+    private readonly CancellationTokenSource _lifetime = new();
+    private ServerInventory _inventory = new([], [], []);
+    private IReadOnlyList<BackupPlanListItem> _plans = [];
+    private IReadOnlyList<StorageTargetItem> _targets = [];
+    private IReadOnlyList<PlanRow> _rows = [];
+    private BackupRecoverySummary? _recovery;
+    private Guid? _selectedId;
+    private bool _busy, _disposed, _login;
+    private string? _error, _message;
+
+    [SupplyParameterFromQuery(Name = "database")]
+    public Guid? Database { get; set; }
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    private async Task RunAsync(Func<AdminSession, Task> action)
+    {
+        if (_busy || _disposed) return;
+        _busy = true;
+        _error = null;
+        _message = null;
+        try
+        {
+            var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+            if (actor is null)
+            {
+                Failure(BackupPlanCatalogCode.AuthenticationRequired);
+                return;
+            }
+
+            await action(actor);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception) { Failure(BackupPlanCatalogCode.Unavailable); }
+        finally { _busy = false; }
+    }
+
+    private Task RefreshAsync() => RunAsync(LoadAsync);
+
+    private async Task LoadAsync(AdminSession actor)
+    {
+        var inventory = await Servers.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (inventory.Code == ManagementCode.AuthenticationRequired)
+        {
+            Failure(BackupPlanCatalogCode.AuthenticationRequired);
+            return;
+        }
+
+        if (inventory.Code != ManagementCode.Succeeded)
+        {
+            _inventory = new([], [], []);
+            _rows = [];
+            _error = ServerManagementPresentation.Error(inventory.Code).Message;
+            return;
+        }
+
+        var plans = await Plans.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (plans.Code != BackupPlanCatalogCode.Succeeded)
+        {
+            Failure(plans.Code);
+            return;
+        }
+
+        var targets = await StorageTargets.ListAsync(actor, _lifetime.Token);
+        if (_disposed) return;
+        if (targets.Code == ManagementCode.AuthenticationRequired)
+        {
+            Failure(BackupPlanCatalogCode.AuthenticationRequired);
+            return;
+        }
+
+        _inventory = inventory.Value!;
+        _plans = plans.Value ?? [];
+        _targets = targets.Value ?? [];
+        _rows = BuildRows();
+        if (targets.Code != ManagementCode.Succeeded)
+        {
+            _error = "存储目标暂不可用，远程目标列表可能不完整。";
+        }
+
+        if (Database is Guid requested && _rows.Any(row => row.Database.Id == requested))
+        {
+            await LoadRecoveryAsync(actor, requested);
+        }
+        else if (_selectedId is Guid selected && _rows.Any(row => row.Database.Id == selected))
+        {
+            await LoadRecoveryAsync(actor, selected);
+        }
+        else
+        {
+            _selectedId = null;
+            _recovery = null;
+        }
+    }
+
+    private List<PlanRow> BuildRows()
+    {
+        var plans = _plans.ToDictionary(plan => plan.DatabaseId);
+        return _inventory.Databases
+            .Where(database => database.IsManaged && !database.IsSystemDatabase)
+            .Select(database => new PlanRow(database, DatabaseLabel(database), plans.GetValueOrDefault(database.Id)))
+            .ToList();
+    }
+
+    private string DatabaseLabel(DatabaseItem database)
+    {
+        var instance = _inventory.Instances.FirstOrDefault(item => item.Id == database.InstanceId);
+        return instance is null ? database.Name : $"{database.Name} · {instance.Settings.Name}";
+    }
+
+    private string SelectedLabel() =>
+        _rows.FirstOrDefault(row => row.Database.Id == _selectedId)?.Label ?? "该数据库";
+
+    private IReadOnlyList<BackupDatabaseChoice> Choices() =>
+        _rows.Select(row => new BackupDatabaseChoice(row.Database.Id, row.Label)).ToArray();
+
+    private Task ShowRecoveryAsync(Guid databaseId) => RunAsync(actor => LoadRecoveryAsync(actor, databaseId));
+
+    private async Task LoadRecoveryAsync(AdminSession actor, Guid databaseId)
+    {
+        var result = await Plans.RecoveryAsync(actor, databaseId, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code != BackupPlanCatalogCode.Succeeded)
+        {
+            Failure(result.Code);
+            return;
+        }
+
+        _selectedId = databaseId;
+        _recovery = result.Value;
+    }
+
+    private async Task OpenEditorAsync(Guid databaseId, bool edit)
+    {
+        if (_busy || _disposed) return;
+        var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+        if (actor is null)
+        {
+            Failure(BackupPlanCatalogCode.AuthenticationRequired);
+            return;
+        }
+
+        BackupPlanFormModel model;
+        Guid? planId = null;
+        string? version = null;
+        if (edit)
+        {
+            var current = await Plans.GetByDatabaseAsync(actor, databaseId, _lifetime.Token);
+            if (_disposed) return;
+            if (current.Code != BackupPlanCatalogCode.Succeeded || current.Value is null)
+            {
+                Failure(current.Code);
+                return;
+            }
+
+            model = BackupPlanFormModel.FromView(current.Value);
+            planId = current.Value.Id;
+            version = current.Value.Version;
+        }
+        else
+        {
+            model = new BackupPlanFormModel { DatabaseId = databaseId };
+        }
+
+        var parameters = new DialogParameters<BackupPlanEditDialog>
+        {
+            { dialog => dialog.Title, edit ? "编辑备份计划" : "创建备份计划" },
+            { dialog => dialog.Model, model },
+            { dialog => dialog.Databases, Choices() },
+            { dialog => dialog.Targets, _targets },
+            { dialog => dialog.IsEdit, edit },
+            { dialog => dialog.LockDatabase, true },
+            { dialog => dialog.OnSave, input => SaveAsync(planId, version, input) },
+        };
+        var dialog = await Dialogs.ShowAsync<BackupPlanEditDialog>(edit ? "编辑备份计划" : "创建备份计划", parameters, EditorOptions);
+        await dialog.Result;
+    }
+
+    private async Task<string?> SaveAsync(Guid? planId, string? version, BackupPlanFormModel input)
+    {
+        _error = null;
+        _message = null;
+        var actor = SqlCredentialPresentation.GetActor((await Authentication.GetAuthenticationStateAsync()).User);
+        if (actor is null)
+        {
+            Failure(BackupPlanCatalogCode.AuthenticationRequired);
+            return null;
+        }
+
+        BackupPlanInput request;
+        try
+        {
+            request = input.ToInput();
+        }
+        catch (InvalidOperationException)
+        {
+            return "请检查计划时间后再保存。";
+        }
+
+        var result = planId is null
+            ? await Plans.CreateAsync(actor, request, _lifetime.Token)
+            : await Plans.UpdateAsync(actor, planId.Value, version, request, _lifetime.Token);
+        if (_disposed) return null;
+        if (result.Code == BackupPlanCatalogCode.AuthenticationRequired)
+        {
+            Failure(result.Code);
+            return null;
+        }
+
+        if (result.Code != BackupPlanCatalogCode.Succeeded)
+        {
+            return BackupPlanPresentation.Error(result.Code).Message;
+        }
+
+        _message = "备份计划已保存。自动调度和定时删除尚未启用。";
+        await LoadAsync(actor);
+        return null;
+    }
+
+    private static string Health(BackupLocationRecovery location)
+    {
+        if (location.Unknown)
+        {
+            return "不健康";
+        }
+
+        return location.Conclusion switch
+        {
+            LocationRecoveryConclusion.RestorableWindowSatisfied => "可恢复",
+            LocationRecoveryConclusion.RestorableWindowIncomplete => "窗口不完整",
+            _ => "不可恢复",
+        };
+    }
+
+    private static Color HealthColor(BackupLocationRecovery location)
+    {
+        if (!location.Unknown
+            && !location.RemoteUnrecoverable
+            && location.Conclusion == LocationRecoveryConclusion.RestorableWindowSatisfied)
+        {
+            return Color.Success;
+        }
+
+        if (!location.Unknown && location.Conclusion == LocationRecoveryConclusion.RestorableWindowIncomplete)
+        {
+            return Color.Warning;
+        }
+
+        if (!location.Unknown
+            && location.RemoteUnrecoverable
+            && location.Conclusion == LocationRecoveryConclusion.RestorableWindowSatisfied)
+        {
+            return Color.Warning;
+        }
+
+        return Color.Error;
+    }
+
+    private static string LocationName(BackupFileLocation location) => location switch
+    {
+        BackupFileLocation.Remote => "远端",
+        BackupFileLocation.Local => "本地",
+        _ => "未知位置",
+    };
+
+    private void Failure(BackupPlanCatalogCode code)
+    {
+        if (_disposed) return;
+        _error = BackupPlanPresentation.Error(code).Message;
+        if (code == BackupPlanCatalogCode.AuthenticationRequired)
+        {
+            _login = true;
+            _inventory = new([], [], []);
+            _plans = [];
+            _targets = [];
+            _rows = [];
+            _recovery = null;
+            _selectedId = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        _disposed = true;
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+
+    private sealed record PlanRow(DatabaseItem Database, string Label, BackupPlanListItem? Plan);
+}

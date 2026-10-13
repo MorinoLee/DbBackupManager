@@ -4,6 +4,7 @@
 @using DbBackupManager.Application.BackupTasks
 @using DbBackupManager.Application.Identity
 @using DbBackupManager.Web.Authentication
+@using DbBackupManager.Web.BackupPlans
 @using DbBackupManager.Web.BackupTasks
 @using Microsoft.AspNetCore.Authorization
 
@@ -14,7 +15,7 @@
             <PageHeader Title="备份文件" Description="查看全部已登记的本地与远程备份副本，日期按验证时间筛选。">
                 <Actions><MudButton OnClick="RefreshAsync" Disabled="Busy" Variant="Variant.Outlined" data-testid="refresh-files">刷新</MudButton></Actions>
             </PageHeader>
-            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">这里展示验证时登记的副本记录，不会重新检查文件是否存在；保留天数仅为配置记录，自动清理将在后续阶段启用。本页不提供文件删除操作。</MudAlert>
+            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">这里展示验证时登记的副本记录，不会重新检查文件是否存在；保留天数仅为配置记录，自动清理将在后续阶段启用。保留原因只采用本页能够证明的依赖，证明不了时继续显示为未知并受保护。本页不提供文件删除操作。</MudAlert>
             @if (Error is not null) { <MudAlert Severity="Severity.Error" role="alert">@Error</MudAlert> }
             @if (RequiresLogin) { <MudButton Href="/login?returnUrl=/backup-files">重新登录</MudButton> }
             else
@@ -33,7 +34,7 @@
     </MudStack>
 </MudPaper>
                 <MudTable T="BackupFileSummary" Items="_data.Items" Loading="Busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1" data-testid="file-list">
-                    <HeaderContent><MudTh>数据库 / 实例</MudTh><MudTh>备份配置</MudTh><MudTh>位置</MudTh><MudTh>状态</MudTh><MudTh>验证时间</MudTh><MudTh>大小</MudTh><MudTh>文件路径</MudTh><MudTh>保留天数</MudTh><MudTh>任务</MudTh></HeaderContent>
+                    <HeaderContent><MudTh>数据库 / 实例</MudTh><MudTh>备份配置</MudTh><MudTh>位置</MudTh><MudTh>备份集</MudTh><MudTh>差异基线</MudTh><MudTh>保留原因</MudTh><MudTh>状态</MudTh><MudTh>验证时间</MudTh><MudTh>大小</MudTh><MudTh>文件路径</MudTh><MudTh>保留天数</MudTh><MudTh>任务</MudTh></HeaderContent>
                     <RowTemplate>
                         <MudTd DataLabel="数据库 / 实例">@context.DatabaseName / @context.InstanceName</MudTd>
                         <MudTd DataLabel="备份配置">@context.PolicyName</MudTd>
@@ -47,6 +48,9 @@
                                 <MudText Typo="Typo.caption" Class="mud-text-secondary">@BackupFilePresentation.Protocol(context.Protocol) · @(context.TargetDisplayName ?? "原存储目标")</MudText>
                             }
                         </MudTd>
+                        <MudTd DataLabel="备份集">@(context.BackupSetId?.ToString("N") ?? "—")</MudTd>
+                        <MudTd DataLabel="差异基线">@(context.DifferentialBaseBackupSetId?.ToString("N") ?? "—")</MudTd>
+                        <MudTd DataLabel="保留原因" data-testid="file-retention-reason">@BackupPlanPresentation.RetentionReason(context.RetentionReason)</MudTd>
                         <MudTd DataLabel="状态">
                             <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="@StatusColor(context.Status)">
                                 @BackupFilePresentation.Status(context.Status)

@@ -13,10 +13,18 @@ internal sealed class FakeMonitoring : IBackupMonitoringService
         [new(Guid.NewGuid(), "测试备份", "合成库", "Succeeded", "VerifyLocal", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, false, 4096)], [], []);
     public BackupPage<BackupFileSummary> Files { get; set; } = new([
         new(Guid.NewGuid(), Guid.NewGuid(), "合成库", "测试实例", "测试配置", @"D:\Synthetic\backup.bak", 4096, DateTimeOffset.UtcNow, 7,
-            Guid.NewGuid(), "Local", "Smb", null, "Available", null, null, @"\\synthetic\share\backup.bak"),
+            Guid.NewGuid(), "Local", "Smb", null, "Available", null, null, @"\\synthetic\share\backup.bak")
+        {
+            BackupSetId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            DifferentialBaseBackupSetId = Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            RetentionReason = "outside_window_unneeded",
+        },
         new(Guid.NewGuid(), Guid.NewGuid(), "合成库", "测试实例", "测试配置", "", 4096, DateTimeOffset.UtcNow, 14,
             Guid.NewGuid(), "Remote", "Sftp", "演示目标", "DeleteFailed", DateTimeOffset.UtcNow, "HostKeyMismatch",
-            "/synthetic/backup.bak")], 0, 21);
+            "/synthetic/backup.bak")
+        {
+            RetentionReason = "remote_base_unconfirmed",
+        }], 0, 21);
     public TaskCompletionSource<BackupManagementResult<BackupPage<BackupFileSummary>>>? PendingFiles { get; set; }
     public Task<BackupManagementResult<BackupOverview>> OverviewAsync(AdminSession actor, CancellationToken token = default)
     { Calls++; return Task.FromResult(new BackupManagementResult<BackupOverview>(Code, Overview)); }

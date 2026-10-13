@@ -15,6 +15,30 @@ namespace DbBackupManager.Infrastructure.BackupManagement;
 internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbContext> factory, TimeProvider clock)
     : IBackupPlanCatalogService
 {
+    public Task<BackupPlanCatalogResult<IReadOnlyList<BackupPlanListItem>>> ListAsync(
+        AdminSession actor, CancellationToken cancellationToken = default) =>
+        Guard(async () =>
+        {
+            await using var db = await factory.CreateDbContextAsync(cancellationToken);
+            await Authorize(db, actor, clock.GetUtcNow(), cancellationToken);
+            var plans = await Plans(db).ToListAsync(cancellationToken);
+            IReadOnlyList<BackupPlanListItem> items = plans.Select(plan =>
+            {
+                var version = plan.CurrentVersion;
+                return new BackupPlanListItem(
+                    plan.Id,
+                    plan.DatabaseId,
+                    plan.Name,
+                    plan.IsPaused,
+                    Convert.ToBase64String(plan.RowVersion),
+                    version.Number,
+                    (int)version.Mode,
+                    (int)version.StorageMode,
+                    version.UseChecksum);
+            }).ToArray();
+            return new BackupPlanCatalogResult<IReadOnlyList<BackupPlanListItem>>(BackupPlanCatalogCode.Succeeded, items);
+        });
+
     public Task<BackupPlanCatalogResult<BackupPlanView>> GetByDatabaseAsync(
         AdminSession actor, Guid databaseId, CancellationToken cancellationToken = default) =>
         Guard(async () =>

@@ -1,3 +1,4 @@
+using System.Data.Common;
 using DbBackupManager.Application.BackupSets;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
@@ -8,6 +9,7 @@ using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Infrastructure.FileStorage;
 using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DbBackupManager.Infrastructure.Tests;
@@ -51,6 +53,123 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         var claimed = await store.ClaimNextAsync(chain.DatabaseId, Claim(now));
         Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
         Assert.Equal(chain.LocalFileId(40), claimed.Value!.FileId);
+    }
+
+    [Fact]
+    public async Task PageFileWithHistoryKeepsTheFullSurfaceReason()
+    {
+        var chain = await SeedChainAsync();
+        var now = DateTimeOffset.UtcNow;
+        await using var db = database.CreateContext();
+        var surface = await PlanLocationRetentionWork.LoadAsync(db, chain.DatabaseId, now, CancellationToken.None);
+        var local = surface.Single(item => item.Location == BackupFileLocation.Local);
+        var fileId = chain.LocalFileId(40);
+        var expected = Reason(local, fileId);
+        Assert.Equal(RecoveryProtectionReason.OutsideWindowUnneeded, expected);
+
+        var page = await PlanLocationRetentionWork.ReasonsForFilesAsync(db, [fileId], now, CancellationToken.None);
+        Assert.Equal(expected, Assert.Contains(fileId, page));
+        Assert.DoesNotContain(chain.LocalFileId(10), page.Keys);
+        Assert.DoesNotContain(chain.LocalFileId(1), page.Keys);
+    }
+
+    [Fact]
+    public async Task PageStagingFileWithHistoryKeepsTheFullSurfaceReason()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly);
+        var now = DateTimeOffset.UtcNow;
+        await using var db = database.CreateContext();
+        var surface = await PlanLocationRetentionWork.LoadAsync(db, chain.DatabaseId, now, CancellationToken.None);
+        var local = surface.Single(item => item.Location == BackupFileLocation.Local);
+        var fileId = chain.LocalFileId(40);
+        var expected = Reason(local, fileId);
+        Assert.Equal(PlanLocationRecovery.RemoteStagingReleasable, expected);
+
+        var page = await PlanLocationRetentionWork.ReasonsForFilesAsync(db, [fileId], now, CancellationToken.None);
+        Assert.Equal(expected, Assert.Contains(fileId, page));
+        Assert.Single(page);
+    }
+
+    [Fact]
+    public async Task AncientHistoryStaysOutsideTheWindowWithoutReadingEveryCopy()
+    {
+        var chain = await SeedChainAsync(ages: [400, 40, 10, 1]);
+        var now = DateTimeOffset.UtcNow;
+        await using var surfaceDb = database.CreateContext();
+        var local = (await PlanLocationRetentionWork.LoadAsync(surfaceDb, chain.DatabaseId, now, CancellationToken.None))
+            .Single(item => item.Location == BackupFileLocation.Local);
+        var fileId = chain.LocalFileId(40);
+        var expected = Reason(local, fileId);
+        Assert.Equal(RecoveryProtectionReason.OutsideWindowUnneeded, expected);
+
+        var collector = new SqlCommandCollector();
+        await using var db = database.CreateContext(collector);
+        var page = await PlanLocationRetentionWork.ReasonsForFilesAsync(db, [fileId], now, CancellationToken.None);
+        Assert.Equal(expected, Assert.Contains(fileId, page));
+        Assert.DoesNotContain(collector.Commands, UnfilteredLocationDump);
+    }
+
+    [Fact]
+    public async Task ClosureRoundLimitMarksThePageReasonUnknown()
+    {
+        var chain = await SeedChainAsync();
+        var ids = new List<Guid>();
+        for (var depth = 0; depth < 7; depth++)
+        {
+            var diff = await SeedRunningDifferentialAsync(chain, 40);
+            await FinishAsync(diff.TaskId, diff.LeaseToken, BackupStorageMode.LocalAndRemote);
+            ids.Add(diff.Command.BackupSetId);
+        }
+
+        await using (var db = database.CreateContext())
+        {
+            for (var index = 1; index < ids.Count; index++)
+            {
+                var child = ids[index];
+                var parent = ids[index - 1];
+                await db.Database.ExecuteSqlInterpolatedAsync(
+                    $"UPDATE [BackupSets] SET [BaseBackupSetId] = {parent} WHERE [Id] = {child}");
+            }
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        await using var read = database.CreateContext();
+        var local = (await PlanLocationRetentionWork.LoadAsync(read, chain.DatabaseId, now, CancellationToken.None))
+            .Single(item => item.Location == BackupFileLocation.Local);
+        Assert.Equal(RecoveryProtectionReason.DifferentialBase, Reason(local, chain.LocalFileId(40)));
+        var page = await PlanLocationRetentionWork.ReasonsForFilesAsync(read, [chain.LocalFileId(40)], now, CancellationToken.None);
+        var reason = Assert.Contains(chain.LocalFileId(40), page);
+        Assert.Equal(RecoveryProtectionReason.WindowUnknown, reason);
+        Assert.NotEqual(RecoveryProtectionReason.OutsideWindowUnneeded, reason);
+        Assert.NotEqual(PlanLocationRecovery.RemoteStagingReleasable, reason);
+    }
+
+    private static bool UnfilteredLocationDump(string text)
+    {
+        if (!text.Contains("[BackupFiles]", StringComparison.Ordinal)
+            || !text.Contains("[DatabaseId]", StringComparison.Ordinal)
+            || text.Contains("GROUP BY", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return !text.Contains("[CompletedAtUtc]", StringComparison.Ordinal)
+            && !text.Contains("[BackupSetId]", StringComparison.Ordinal);
+    }
+
+    private sealed class SqlCommandCollector : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = [];
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
     }
 
     [Fact]
