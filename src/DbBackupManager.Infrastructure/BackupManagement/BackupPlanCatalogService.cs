@@ -145,7 +145,7 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
                     }
                     else
                     {
-                        plan = await db.BackupPlans.Include(item => item.Versions)
+                        plan = await db.BackupPlans.AsTracking().Include(item => item.Versions)
                                 .SingleOrDefaultAsync(item => item.Id == planId, cancellationToken)
                             ?? throw new Rejected(BackupPlanCatalogCode.NotFound);
                         if (string.IsNullOrWhiteSpace(version))
