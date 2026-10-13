@@ -199,6 +199,7 @@ public sealed class NotificationOutbox : ConcurrentEntity
         {
             case NotificationType.TaskFailed:
             case NotificationType.TaskIndeterminate:
+            case NotificationType.RemoteUnrecoverable:
                 if (sourceKind != NotificationSourceKind.BackupTask)
                 {
                     throw new ArgumentException("任务通知的来源必须是备份任务。", nameof(sourceKind));

@@ -222,10 +222,20 @@ internal sealed partial class BackupPlanExecutionStore
             operation.MarkApplied();
             db.AddRange(CreateStateChange(operation.Id, task, before, stage, reason, null, now),
                 CreateAudit(null, task.Id, "plan.stage.apply", successful ? "succeeded" : "unknown", facts.ReasonCode));
-            var addedCopy = db.ChangeTracker.Entries<BackupFile>().Any(entry => entry.State == EntityState.Added);
+            var addedEntries = db.ChangeTracker.Entries<BackupFile>().Where(entry => entry.State == EntityState.Added).ToArray();
+            var remoteTargets = addedEntries
+                .Where(entry => entry.Entity.Location == BackupFileLocation.Remote && entry.Entity.StorageTargetId is Guid)
+                .Select(entry => entry.Entity.StorageTargetId!.Value)
+                .Distinct()
+                .ToArray();
+            NotificationOutboxWriter.EnqueuePlanOutcome(
+                db, operation.Id, task.Id, stage, task.Status, now, task.ErrorCode ?? facts.ReasonCode);
             await db.SaveChangesAsync(cancellationToken);
-            if (addedCopy)
+            if (addedEntries.Length > 0)
                 await PlanLocationRetentionWork.ReleaseSupersededAsync(db, snapshot.DatabaseId, now, cancellationToken);
+            if (remoteTargets.Length > 0 && stage is BackupTaskStage remoteStage)
+                await NotificationOutboxWriter.EnqueueRemoteProjectionAsync(
+                    db, operation.Id, task.Id, remoteStage, now, snapshot.DatabaseId, remoteTargets, cancellationToken);
             await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);

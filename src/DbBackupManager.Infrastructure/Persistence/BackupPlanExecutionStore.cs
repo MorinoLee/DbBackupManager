@@ -2,6 +2,7 @@ using System.Data;
 using DbBackupManager.Application.BackupSets;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
+using DbBackupManager.Application.Notifications;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
@@ -154,12 +155,14 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
             if (ValidateLease(task, lease, clock.GetUtcNow()) is not null) return BackupExecutionContractCode.LeaseLost;
             var snapshot = await db.BackupTaskSnapshots.SingleAsync(x => x.TaskId == task.Id, cancellationToken);
             var before = task.Status;
+            var now = clock.GetUtcNow();
             if (lease.Purpose == BackupLeasePurpose.Execution)
-                task.RecordIndeterminateResult(snapshot.StorageMode, lease.LeaseToken, clock.GetUtcNow(), reason, "原 Attempt 与文件保持不变，等待显式只读核对。");
-            else task.CompleteReconciliation(snapshot.StorageMode, lease.LeaseToken, clock.GetUtcNow(), BackupReconciliationOutcome.Inconclusive,
+                task.RecordIndeterminateResult(snapshot.StorageMode, lease.LeaseToken, now, reason, "原 Attempt 与文件保持不变，等待显式只读核对。");
+            else task.CompleteReconciliation(snapshot.StorageMode, lease.LeaseToken, now, BackupReconciliationOutcome.Inconclusive,
                 reason, "证据尚未完整，保留原事实。");
-            db.AddRange(CreateStateChange(mutationId, task, before, lease.Stage, reason, null, clock.GetUtcNow()),
+            db.AddRange(CreateStateChange(mutationId, task, before, lease.Stage, reason, null, now),
                 CreateAudit(null, task.Id, "plan.execution.suspend", "unknown", reason));
+            NotificationOutboxWriter.EnqueuePlanOutcome(db, mutationId, task.Id, lease.Stage, task.Status, now, task.ErrorCode ?? reason);
             await db.SaveChangesAsync(cancellationToken);
             await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;
@@ -185,6 +188,8 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
                 && x.Location == BackupFileLocation.Local && x.Status != BackupFileStatus.Deleted, cancellationToken);
             var now = clock.GetUtcNow();
             var before = task.Status;
+            Guid? remoteNotificationId = null;
+            string? remoteCode = null;
             if (retained)
             {
                 if (local is null || attempt.LocalCleanupCompletedAtUtc is not null)
@@ -192,8 +197,15 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
                 var reason = string.IsNullOrWhiteSpace(outcomeReason) || outcomeReason.Length > 100
                     ? PlanLocationRetentionWork.StagingRetainedReason
                     : outcomeReason;
+                var mutationId = Guid.NewGuid();
+                if (PlanNotificationRules.IsRemoteGapReason(reason))
+                {
+                    remoteNotificationId = mutationId;
+                    remoteCode = reason;
+                }
+
                 task.CompleteRunningStage(snapshot.StorageMode, lease.LeaseToken, now);
-                db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, reason, null, now),
+                db.AddRange(CreateStateChange(mutationId, task, before, BackupTaskStage.Cleanup, reason, null, now),
                     CreateAudit(null, task.Id, "plan.staging.retain", "succeeded", reason));
             }
             else
@@ -204,6 +216,10 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
                 db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, "plan.staging.cleaned", null, now),
                     CreateAudit(null, task.Id, "plan.staging.clean", "succeeded", null));
             }
+
+            if (remoteNotificationId is Guid notificationId && remoteCode is not null)
+                NotificationOutboxWriter.EnqueueRemoteUnrecoverable(
+                    db, notificationId, task.Id, BackupTaskStage.Cleanup, now, remoteCode);
             await db.SaveChangesAsync(cancellationToken);
             await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;

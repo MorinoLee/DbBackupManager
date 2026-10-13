@@ -14,6 +14,8 @@ public sealed class NotificationDeliveryContractTests
         var subject = NotificationMessageFormatter.Subject(work);
 
         Assert.Equal("备份失败通知", subject);
+        Assert.DoesNotContain("建议开启", subject + body, StringComparison.Ordinal);
+        Assert.DoesNotContain("enable_log", subject + body, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(work.TaskId!.Value.ToString("N")[..8], body, StringComparison.Ordinal);
         Assert.Contains("VerifyLocal", body, StringComparison.Ordinal);
         Assert.Contains("stage.confirmed_failed", body, StringComparison.Ordinal);
@@ -52,6 +54,7 @@ public sealed class NotificationDeliveryContractTests
     [InlineData(NotificationType.RetentionDeleteFailed, null, NotificationSourceKind.BackupFile, "file.delete_failed")]
     [InlineData(NotificationType.RetentionMissing, null, NotificationSourceKind.BackupFile, "file.health_missing")]
     [InlineData(NotificationType.AdminTest, null, NotificationSourceKind.AdminRequest, "smtp.test")]
+    [InlineData(NotificationType.RemoteUnrecoverable, BackupTaskStage.ValidateCopy, NotificationSourceKind.BackupTask, "remote_base_unconfirmed")]
     public void MessageBodiesStayRedactedForEveryNotificationType(
         NotificationType type,
         BackupTaskStage? stage,
@@ -62,7 +65,9 @@ public sealed class NotificationDeliveryContractTests
         var body = NotificationMessageFormatter.Body(work);
         var subject = NotificationMessageFormatter.Subject(work);
 
-        Assert.Equal(type == NotificationType.AdminTest ? "备份通知测试" : "备份失败通知", subject);
+        Assert.Equal(ExpectedSubject(type), subject);
+        Assert.DoesNotContain("建议开启", subject + body, StringComparison.Ordinal);
+        Assert.DoesNotContain("enable_log", subject + body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain('@', body);
         Assert.DoesNotContain('\\', body);
         Assert.DoesNotContain('/', body);
@@ -109,6 +114,14 @@ public sealed class NotificationDeliveryContractTests
         await runner.ProcessClaimedAsync(work);
         Assert.Equal("sent", store.LastAction);
     }
+
+    private static string ExpectedSubject(NotificationType type) => type switch
+    {
+        NotificationType.AdminTest => "备份通知测试",
+        NotificationType.TaskIndeterminate => "备份结果未知",
+        NotificationType.RemoteUnrecoverable => "远端暂时无法恢复",
+        _ => "备份失败通知",
+    };
 
     private static NotificationSendWorkItem CreateWork(
         NotificationType type,

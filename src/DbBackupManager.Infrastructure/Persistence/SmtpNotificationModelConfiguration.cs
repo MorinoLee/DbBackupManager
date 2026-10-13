@@ -75,7 +75,7 @@ internal sealed class NotificationOutboxConfiguration : IEntityTypeConfiguration
         {
             table.HasCheckConstraint(
                 "CK_NotificationOutbox_Type",
-                "[Type] IN ('TaskFailed', 'TaskIndeterminate', 'RetentionDeleteFailed', 'RetentionMissing', 'AdminTest')");
+                "[Type] IN ('TaskFailed', 'TaskIndeterminate', 'RetentionDeleteFailed', 'RetentionMissing', 'AdminTest', 'RemoteUnrecoverable')");
             table.HasCheckConstraint(
                 "CK_NotificationOutbox_SourceKind",
                 "[SourceKind] IN ('BackupTask', 'BackupFile', 'AdminRequest')");
@@ -90,7 +90,7 @@ internal sealed class NotificationOutboxConfiguration : IEntityTypeConfiguration
                 "[SendAttemptCount] >= 0");
             table.HasCheckConstraint(
                 "CK_NotificationOutbox_Identity",
-                "([Type] IN ('TaskFailed', 'TaskIndeterminate') AND [SourceKind] = 'BackupTask' "
+                "([Type] IN ('TaskFailed', 'TaskIndeterminate', 'RemoteUnrecoverable') AND [SourceKind] = 'BackupTask' "
                 + "AND [TaskId] = [SourceId] AND [Stage] IN ('Backup', 'VerifyLocal', 'Transfer', 'ValidateCopy', 'Cleanup')) OR "
                 + "([Type] IN ('RetentionDeleteFailed', 'RetentionMissing') AND [SourceKind] = 'BackupFile' "
                 + "AND [TaskId] IS NOT NULL AND [Stage] IS NULL) OR "

@@ -8,8 +8,10 @@ using DbBackupManager.Domain.Notifications;
 using DbBackupManager.Infrastructure.Notifications;
 using DbBackupManager.Infrastructure.Persistence;
 using DbBackupManager.Infrastructure.TargetSql;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -589,6 +591,49 @@ public sealed class SmtpNotificationSqlServerTests(PlatformDatabaseSqlServerFixt
         Assert.Equal(claimed.LeaseToken, current.SendLeaseToken);
         Assert.Equal(claimed.RowVersion, current.RowVersion);
         Assert.Equal(1, current.SendAttemptCount);
+    }
+
+    [Fact]
+    public async Task RemoteUnrecoverableMigrationDownRejectsExistingRowsAndKeepsHistory()
+    {
+        var temporary = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await temporary.InitializeAsync();
+            await using var db = temporary.CreateContext();
+            var migrations = db.Database.GetMigrations().ToArray();
+            var previous = migrations.Single(name => name.EndsWith("_AddBackupExecutionContracts", StringComparison.Ordinal));
+            var current = migrations.Single(name => name.EndsWith("_AddRemoteUnrecoverableNotification", StringComparison.Ordinal));
+            var migrator = db.GetService<IMigrator>();
+            await migrator.MigrateAsync(previous);
+            await migrator.MigrateAsync(current);
+            var taskId = Guid.NewGuid();
+            var occurred = DateTimeOffset.UtcNow;
+            db.NotificationOutbox.Add(new NotificationOutbox(
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                NotificationType.RemoteUnrecoverable,
+                NotificationSourceKind.BackupTask,
+                taskId,
+                taskId,
+                BackupTaskStage.ValidateCopy,
+                occurred,
+                "remote_base_unconfirmed"));
+            await db.SaveChangesAsync();
+            var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
+            var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
+            Assert.Equal(51005, error.Number);
+            Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
+            Assert.Equal(NotificationType.RemoteUnrecoverable, (await db.NotificationOutbox.SingleAsync()).Type);
+            await db.NotificationOutbox.ExecuteDeleteAsync();
+            await migrator.MigrateAsync(previous);
+            await migrator.MigrateAsync();
+            Assert.Equal(0, await db.NotificationOutbox.CountAsync());
+        }
+        finally
+        {
+            await temporary.DisposeAsync();
+        }
     }
 
     private static Task<NotificationSendWorkItem?> ClaimAsync(

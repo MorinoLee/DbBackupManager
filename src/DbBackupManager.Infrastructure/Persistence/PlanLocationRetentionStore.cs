@@ -383,7 +383,23 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
 
             context.BackupFileStateChanges.Add(Change(command.MutationId, file, from, file.Status, Reason(command.Outcome), occurredAt));
             context.AuditRecords.Add(Audit(file.Id, "backup.file.plan_retention.commit", Reason(command.Outcome)));
+            NotificationOutboxWriter.EnqueueRetention(
+                context, command.MutationId, file.Id, file.TaskId, command.Outcome, occurredAt, command.ErrorCode);
+            var remoteTarget = file.Location == BackupFileLocation.Remote ? file.StorageTargetId : null;
             await context.SaveChangesAsync(token);
+            if (remoteTarget is Guid target
+                && command.Outcome is BackupFileRetentionOutcome.Deleted or BackupFileRetentionOutcome.Missing)
+            {
+                var taskStage = await context.BackupTasks.AsNoTracking()
+                    .Where(item => item.Id == file.TaskId)
+                    .Select(item => item.CurrentStage)
+                    .SingleOrDefaultAsync(token);
+                if (taskStage is BackupTaskStage stage)
+                {
+                    await NotificationOutboxWriter.EnqueueRemoteProjectionAsync(
+                        context, command.MutationId, file.TaskId, stage, occurredAt, file.DatabaseId, [target], token);
+                }
+            }
             var endpoint = await BackupFileRetentionStore.TryCreateEndpointAsync(context, file, false, token);
             // 已删除、缺失和失败都会清掉文件上的租约。返回项沿用领取时的租约标识，避免提交成功后回滚。
             return endpoint is null

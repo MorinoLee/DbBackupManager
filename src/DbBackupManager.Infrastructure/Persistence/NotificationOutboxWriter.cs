@@ -1,4 +1,6 @@
+using DbBackupManager.Application.BackupPlans;
 using DbBackupManager.Application.BackupTasks;
+using DbBackupManager.Application.Notifications;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Notifications;
 
@@ -120,6 +122,102 @@ internal static class NotificationOutboxWriter
             string.IsNullOrWhiteSpace(errorCode) ? Reason(type.Value) : errorCode);
     }
 
+    public static void EnqueuePlanOutcome(
+        PlatformDbContext context,
+        Guid mutationId,
+        Guid taskId,
+        BackupTaskStage? stage,
+        BackupTaskStatus status,
+        DateTimeOffset occurredAtUtc,
+        string? errorCode)
+    {
+        if (PlanNotificationRules.ForCommittedTask(status) is not { } type || stage is null)
+        {
+            return;
+        }
+
+        TryAdd(
+            context,
+            mutationId,
+            type,
+            NotificationSourceKind.BackupTask,
+            taskId,
+            taskId,
+            stage,
+            occurredAtUtc,
+            string.IsNullOrWhiteSpace(errorCode) ? PlanNotificationRules.Fallback(type) : errorCode);
+    }
+
+    public static bool EnqueueRemoteUnrecoverable(
+        PlatformDbContext context,
+        Guid mutationId,
+        Guid taskId,
+        BackupTaskStage stage,
+        DateTimeOffset occurredAtUtc,
+        string errorCode) =>
+        TryAdd(
+            context,
+            mutationId,
+            NotificationType.RemoteUnrecoverable,
+            NotificationSourceKind.BackupTask,
+            taskId,
+            taskId,
+            stage,
+            occurredAtUtc,
+            string.IsNullOrWhiteSpace(errorCode) ? PlanNotificationRules.LocationNotRestorable : errorCode);
+
+    public static async Task EnqueueRemoteProjectionAsync(
+        PlatformDbContext context,
+        Guid mutationId,
+        Guid taskId,
+        BackupTaskStage stage,
+        DateTimeOffset occurredAtUtc,
+        Guid databaseId,
+        IReadOnlyCollection<Guid> storageTargetIds,
+        CancellationToken cancellationToken)
+    {
+        var targets = storageTargetIds.Where(id => id != Guid.Empty).ToHashSet();
+        if (targets.Count == 0)
+        {
+            return;
+        }
+
+        var surface = await PlanLocationRetentionWork.LoadSurfaceAsync(
+            context, databaseId, occurredAtUtc, cancellationToken);
+        string? code = null;
+        foreach (var item in surface.Assessments)
+        {
+            if (item.Location != BackupFileLocation.Remote
+                || item.StorageTargetId is not Guid target
+                || !targets.Contains(target))
+            {
+                continue;
+            }
+
+            var projected = BackupRecoverySurface.Project(
+                item.Location,
+                item.StorageTargetId,
+                item.WindowDays,
+                item.Conclusion,
+                surface.Baseline,
+                item.Copies.Select(copy => copy.Reason).ToArray());
+            if (PlanNotificationRules.RemoteErrorCode(projected) is { } candidate)
+            {
+                code = PlanNotificationRules.PreferRemoteCode(code, candidate);
+            }
+        }
+
+        if (code is null)
+        {
+            return;
+        }
+
+        if (EnqueueRemoteUnrecoverable(context, mutationId, taskId, stage, occurredAtUtc, code))
+        {
+            await context.SaveChangesAsync(cancellationToken);
+        }
+    }
+
     public static void EnqueueExternalMissing(
         PlatformDbContext context,
         Guid mutationId,
@@ -166,13 +264,5 @@ internal static class NotificationOutboxWriter
         return true;
     }
 
-    private static string Reason(NotificationType type) => type switch
-    {
-        NotificationType.TaskFailed => "stage.confirmed_failed",
-        NotificationType.TaskIndeterminate => "stage.indeterminate",
-        NotificationType.RetentionDeleteFailed => "file.delete_failed",
-        NotificationType.RetentionMissing => "file.missing",
-        NotificationType.AdminTest => "smtp.test",
-        _ => "notification.unknown",
-    };
+    private static string Reason(NotificationType type) => PlanNotificationRules.Fallback(type);
 }

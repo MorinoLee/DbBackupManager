@@ -13,7 +13,8 @@ public enum NotificationType
     TaskIndeterminate = 2,
     RetentionDeleteFailed = 3,
     RetentionMissing = 4,
-    AdminTest = 5
+    AdminTest = 5,
+    RemoteUnrecoverable = 6
 }
 
 public enum NotificationSourceKind

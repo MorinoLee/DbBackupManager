@@ -1,0 +1,94 @@
+using DbBackupManager.Application.BackupPlans;
+using DbBackupManager.Application.Notifications;
+using DbBackupManager.Domain.BackupPlans;
+using DbBackupManager.Domain.BackupTasks;
+using DbBackupManager.Domain.Notifications;
+
+namespace DbBackupManager.Application.Tests;
+
+public sealed class PlanNotificationRulesTests
+{
+    [Theory]
+    [InlineData(BackupTaskStatus.Failed, NotificationType.TaskFailed)]
+    [InlineData(BackupTaskStatus.NeedsAttention, NotificationType.TaskIndeterminate)]
+    public void CommittedFailureAndUnknownMapToDistinctNotices(BackupTaskStatus status, NotificationType type)
+    {
+        Assert.Equal(type, PlanNotificationRules.ForCommittedTask(status));
+    }
+
+    [Theory]
+    [InlineData(BackupTaskStatus.Pending)]
+    [InlineData(BackupTaskStatus.Running)]
+    [InlineData(BackupTaskStatus.Succeeded)]
+    [InlineData(BackupTaskStatus.Cancelled)]
+    public void SuccessfulOrIdleTasksDoNotNotify(BackupTaskStatus status)
+    {
+        Assert.Null(PlanNotificationRules.ForCommittedTask(status));
+    }
+
+    [Fact]
+    public void UnresolvedBaselineStaysUnknownAndDoesNotAdviseLogBackup()
+    {
+        var location = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: true,
+            remoteUnrecoverable: false,
+            ["baseline_unresolved"],
+            []);
+
+        Assert.Null(PlanNotificationRules.RemoteErrorCode(location));
+        Assert.False(PlanNotificationRules.IsRemoteGapReason("baseline_unresolved"));
+        Assert.False(PlanNotificationRules.IsRemoteGapReason(RecoveryProtectionReason.BaselineUnresolved));
+        Assert.DoesNotContain(
+            "enable_log",
+            PlanNotificationRules.Fallback(NotificationType.TaskIndeterminate),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RemoteGapUsesTheProjectedReasonAndGenericCodeIsSecondary()
+    {
+        var gap = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: true,
+            remoteUnrecoverable: true,
+            [],
+            ["remote_base_unconfirmed"]);
+        var generic = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: false,
+            remoteUnrecoverable: true,
+            [],
+            []);
+        var local = Location(
+            BackupFileLocation.Local,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: false,
+            remoteUnrecoverable: true,
+            [],
+            ["remote_base_unconfirmed"]);
+
+        Assert.Equal("remote_base_unconfirmed", PlanNotificationRules.RemoteErrorCode(gap));
+        Assert.Equal(PlanNotificationRules.LocationNotRestorable, PlanNotificationRules.RemoteErrorCode(generic));
+        Assert.Null(PlanNotificationRules.RemoteErrorCode(local));
+        Assert.True(PlanNotificationRules.IsRemoteGapReason(PlanLocationRecovery.RemoteBaseUnconfirmed));
+        Assert.True(PlanNotificationRules.IsRemoteGapReason(PlanLocationRecovery.RemoteDependentUnconfirmed));
+        Assert.True(PlanNotificationRules.IsRemoteGapReason(RecoveryProtectionReason.BaseUnavailableAtLocation));
+        Assert.False(PlanNotificationRules.IsRemoteGapReason("remote.staging_retained"));
+        Assert.Equal(
+            "remote_base_unconfirmed",
+            PlanNotificationRules.PreferRemoteCode(PlanNotificationRules.LocationNotRestorable, "remote_base_unconfirmed"));
+    }
+
+    private static BackupLocationRecovery Location(
+        BackupFileLocation place,
+        LocationRecoveryConclusion conclusion,
+        bool unknown,
+        bool remoteUnrecoverable,
+        string[] unknownReasons,
+        string[] gapReasons) =>
+        new(place, Guid.NewGuid(), 7, conclusion, "Unknown", null, unknown, remoteUnrecoverable, gapReasons, unknownReasons);
+}
