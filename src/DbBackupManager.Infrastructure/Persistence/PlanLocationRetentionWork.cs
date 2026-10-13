@@ -7,8 +7,20 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
+internal sealed record PlanLocationSurface(
+    bool HasCurrentPlan,
+    ActiveBaseline Baseline,
+    IReadOnlyList<PlanLocationAssessment> Assessments);
+
 internal static class PlanLocationRetentionWork
 {
+    internal static async Task<IReadOnlyList<PlanLocationAssessment>> LoadAsync(
+        PlatformDbContext db,
+        Guid databaseId,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken) =>
+        (await LoadSurfaceAsync(db, databaseId, nowUtc, cancellationToken)).Assessments;
+
     internal const string ClaimedReason = "plan.retention.claimed";
     internal const string StagingClaimedReason = "plan.staging.claimed";
     internal const string ReleasedReason = "plan.retention.protected";
@@ -52,7 +64,7 @@ internal static class PlanLocationRetentionWork
             .ToHashSet();
     }
 
-    internal static async Task<IReadOnlyList<PlanLocationAssessment>> LoadAsync(
+    internal static async Task<PlanLocationSurface> LoadSurfaceAsync(
         PlatformDbContext db,
         Guid databaseId,
         DateTimeOffset nowUtc,
@@ -140,7 +152,7 @@ internal static class PlanLocationRetentionWork
         var unproven = sets.Any(set => set.Metadata.Type.State != BackupMetadataState.Known
             || set.Metadata.Type.Value == BackupType.Differential && !Proven(set));
         var baseline = ResolveBaseline(version?.Mode, evidence, sets);
-        return PlanLocationRecovery.Evaluate(
+        var assessments = PlanLocationRecovery.Evaluate(
                 nowUtc,
                 baseline,
                 unproven,
@@ -155,6 +167,7 @@ internal static class PlanLocationRetentionWork
                 result.Conclusion,
                 result.Copies))
             .ToArray();
+        return new PlanLocationSurface(version is not null, baseline, assessments);
     }
 
     internal static async Task ReleaseSupersededAsync(

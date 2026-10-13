@@ -10,7 +10,24 @@ public sealed record ManualBackupInput(
 public sealed record ManualBackupPolicy(Guid Id, ManualBackupInput Settings, string Version);
 public sealed record BackupDatabaseChoice(Guid Id, string Label);
 public sealed record BackupTaskSummary(Guid Id, string PolicyName, string DatabaseName, string Status, string? Stage,
-    DateTimeOffset CreatedAtUtc, DateTimeOffset? CompletedAtUtc, string? ErrorCode, bool CancellationRequested, long? FileLength);
+    DateTimeOffset CreatedAtUtc, DateTimeOffset? CompletedAtUtc, string? ErrorCode, bool CancellationRequested, long? FileLength)
+{
+    public string BackupType { get; init; } = "Full";
+
+    public Guid? PlanId { get; init; }
+
+    public Guid? PlanVersionId { get; init; }
+
+    public int? PlanVersionNumber { get; init; }
+
+    public string SqlStatus { get; init; } = "Unknown";
+
+    public string FileVerifyStatus { get; init; } = "Unknown";
+
+    public string TransferStatus { get; init; } = "Unknown";
+
+    public string DependencyStatus { get; init; } = "Unknown";
+}
 public sealed record BackupTaskHistory(DateTimeOffset AtUtc, string Status, string? Stage, string Reason);
 public sealed record BackupAttemptSummary(int Number, string InvocationStatus, long? Length, DateTimeOffset? VerifiedAtUtc);
 public sealed record BackupReconciliationSummary(int AttemptCount, DateTimeOffset? NextAtUtc, string? ReasonCode, bool CanRequest);

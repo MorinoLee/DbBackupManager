@@ -79,8 +79,23 @@ public sealed class BackupManagementController(IBackupManagementService service)
         x.Settings.IsEnabled, x.Settings.StorageMode, x.Settings.StorageTargetId, x.Settings.RemoteRetentionDays,
         x.Settings.TransferTimeoutMinutes), x.Version);
     private static BackupTaskSummaryResponse Map(BackupTaskSummary x) => new(x.Id, x.PolicyName, x.DatabaseName, x.Status, x.Stage,
-        x.CreatedAtUtc, x.CompletedAtUtc, x.ErrorCode, x.CancellationRequested, x.FileLength);
+        x.CreatedAtUtc, x.CompletedAtUtc, x.ErrorCode, x.CancellationRequested, x.FileLength)
+    {
+        BackupType = x.BackupType,
+        PlanId = x.PlanId,
+        PlanVersionId = x.PlanVersionId,
+        PlanVersionNumber = x.PlanVersionNumber,
+        SqlStatus = x.SqlStatus,
+        FileVerifyStatus = x.FileVerifyStatus,
+        TransferStatus = x.TransferStatus,
+        DependencyStatus = x.DependencyStatus,
+    };
     private static BackupFileSummaryResponse MapFile(BackupFileSummary x) => new(x.TaskId, x.DatabaseId, x.DatabaseName,
         x.InstanceName, x.PolicyName, x.SqlPath, x.LengthBytes, x.VerifiedAtUtc, x.RetentionDays, x.FileId, x.Location,
-        x.Protocol, x.TargetDisplayName, x.Status, x.DeletedAtUtc, x.ErrorCode, x.Path);
+        x.Protocol, x.TargetDisplayName, x.Status, x.DeletedAtUtc, x.ErrorCode, x.Path)
+    {
+        BackupSetId = x.BackupSetId,
+        DifferentialBaseBackupSetId = x.DifferentialBaseBackupSetId,
+        RetentionReason = x.RetentionReason,
+    };
 }

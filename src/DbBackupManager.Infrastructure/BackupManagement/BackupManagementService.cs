@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using DbBackupManager.Application.BackupPlans;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Identity;
 using DbBackupManager.Domain.BackupTasks;
@@ -18,6 +19,7 @@ public static class BackupManagementRegistration
         services.AddScoped<IBackupManagementService, BackupManagementService>();
         services.AddScoped<IScheduledBackupPolicyService, ScheduledBackupPolicyService>();
         services.AddScoped<IBackupMonitoringService, BackupMonitoringService>();
+        services.AddScoped<IBackupPlanCatalogService, BackupPlanCatalogService>();
         services.AddScoped<ITaskEventStore, TaskEventStore>();
         services.AddScoped<ITaskEventRetentionStore, TaskEventRetentionStore>();
         return services;
@@ -39,8 +41,9 @@ internal sealed class BackupManagementService(IDbContextFactory<PlatformDbContex
                              select new BackupDatabaseChoice(d.Id, s.Name + " / " + i.Name + " / " + d.DatabaseName)).ToListAsync(token);
         var policies = await db.BackupPolicies.AsNoTracking().Where(x => x.IsManualOnly).OrderBy(x => x.Name).ToListAsync(token);
         var rows = await Summaries(db, page: page).ToListAsync(token);
+        var pageRows = await BackupSurfaceReader.EnrichTasksAsync(db, rows.Take(50).ToArray(), token);
         return new BackupManagementResult<BackupDashboard>(BackupManagementCode.Succeeded,
-            new(choices, policies.Select(Map).ToArray(), rows.Take(50).ToArray(), rows.Count > 50));
+            new(choices, policies.Select(Map).ToArray(), pageRows, rows.Count > 50));
     });
     public Task<BackupManagementResult<ManualBackupPolicy>> SavePolicyAsync(AdminSession actor, Guid? id, string? version, ManualBackupInput input, CancellationToken token = default) => Guard(async () =>
     {
@@ -146,11 +149,12 @@ internal sealed class BackupManagementService(IDbContextFactory<PlatformDbContex
     {
         await using var db = await factory.CreateDbContextAsync(token); await Authorize(db, actor, token);
         var task = await Summaries(db, taskId).SingleOrDefaultAsync(token) ?? throw new Rejected(BackupManagementCode.NotFound);
+        task = (await BackupSurfaceReader.EnrichTasksAsync(db, [task], token))[0];
         var history = await db.BackupTaskStateChanges.Where(x => x.TaskId == taskId).OrderByDescending(x => x.Id).Take(200)
             .Select(x => new BackupTaskHistory(x.OccurredAtUtc, x.ToStatus.ToString(), x.ToStage == null ? null : x.ToStage.ToString(), x.ReasonCode)).ToListAsync(token);
         var attempts = await db.BackupAttempts.Where(x => x.TaskId == taskId).OrderByDescending(x => x.AttemptNumber).Take(100)
             .Select(x => new BackupAttemptSummary(x.AttemptNumber, x.BackupInvocationStatus.ToString(), x.SourceLengthBytes, x.LocalVerifiedAtUtc)).ToListAsync(token);
-        var files = await FileProjections(db, taskId).ToListAsync(token);
+        var files = await BackupSurfaceReader.EnrichFilesAsync(db, await FileProjections(db, taskId).ToListAsync(token), DateTimeOffset.UtcNow, token);
         var path = files.FirstOrDefault(x => x.Location == nameof(BackupFileLocation.Local))?.SqlPath;
         var now = DateTimeOffset.UtcNow;
         var reconciliation = await db.BackupTasks.Where(x => x.Id == taskId).Select(x => new BackupReconciliationSummary(
