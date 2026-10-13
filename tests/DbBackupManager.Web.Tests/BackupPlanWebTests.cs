@@ -21,14 +21,24 @@ public sealed class BackupPlanWebTests
         });
         var client = host.Client;
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/v1/backup-plans/" + Guid.NewGuid())).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/v1/databases/" + Guid.NewGuid() + "/backup-recovery")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/v1/backup-files")).StatusCode);
         var token = (await client.GetFromJsonAsync<CsrfTokenResponse>("/api/v1/auth/csrf"))!.Token;
         using var setup = await SendAsync(client, HttpMethod.Post, "/api/v1/auth/setup", new AdminSetupRequest("admin", "synthetic-password"), token);
         Assert.Equal(HttpStatusCode.OK, setup.StatusCode);
         token = (await client.GetFromJsonAsync<CsrfTokenResponse>("/api/v1/auth/csrf"))!.Token;
         var databaseId = await PrepareDatabaseAsync(client, token);
 
+        using var beforePlan = await client.GetAsync($"/api/v1/databases/{databaseId}/backup-recovery");
+        Assert.Equal(HttpStatusCode.OK, beforePlan.StatusCode);
+        var withoutPlan = (await beforePlan.Content.ReadFromJsonAsync<BackupRecoverySummaryResponse>())!;
+        Assert.False(withoutPlan.HasCurrentPlan);
+        Assert.Empty(withoutPlan.Locations);
+
         var full = Plan(databaseId, "合成完整计划", mode: 1, paused: false);
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/backup-plans", full)).StatusCode);
+        using var missingCsrf = await client.PostAsJsonAsync("/api/v1/backup-plans", full);
+        Assert.Equal(HttpStatusCode.BadRequest, missingCsrf.StatusCode);
+        Assert.Equal("invalid_csrf_token", await ReadCodeAsync(missingCsrf));
         using var created = await SendAsync(client, HttpMethod.Post, "/api/v1/backup-plans", full, token);
         var createdJson = await created.Content.ReadAsStringAsync();
         Assert.Equal(HttpStatusCode.OK, created.StatusCode);
@@ -44,7 +54,17 @@ public sealed class BackupPlanWebTests
         Assert.Equal(plan.Id, current.Id);
         Assert.Equal(plan.Version, current.Version);
 
+        var missingVersion = Plan(databaseId, "缺少版本", mode: 1, paused: true);
+        using var invalidVersion = await SendAsync(client, HttpMethod.Put, $"/api/v1/backup-plans/{plan.Id}", missingVersion, token);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidVersion.StatusCode);
+        Assert.Equal("backup_plan_invalid", await ReadCodeAsync(invalidVersion));
+        Assert.Equal(1, (await client.GetFromJsonAsync<BackupPlanResponse>($"/api/v1/backup-plans/{plan.Id}"))!.VersionNumber);
+
         var pauseRequest = Plan(databaseId, "暂停后仍占名额", mode: 1, paused: true, version: plan.Version);
+        using var putWithoutCsrf = await client.PutAsJsonAsync($"/api/v1/backup-plans/{plan.Id}", pauseRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, putWithoutCsrf.StatusCode);
+        Assert.Equal("invalid_csrf_token", await ReadCodeAsync(putWithoutCsrf));
+
         using var paused = await SendAsync(client, HttpMethod.Put, $"/api/v1/backup-plans/{plan.Id}", pauseRequest, token);
         Assert.Equal(HttpStatusCode.OK, paused.StatusCode);
         var pausedPlan = (await paused.Content.ReadFromJsonAsync<BackupPlanResponse>())!;
@@ -145,6 +165,12 @@ public sealed class BackupPlanWebTests
             TransferTimeoutMinutes = 45,
             IsPaused = paused,
         };
+
+    private static async Task<string?> ReadCodeAsync(HttpResponseMessage response)
+    {
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return json.RootElement.GetProperty("code").GetString();
+    }
 
     private static void AssertNoLogSuggestion(string json)
     {

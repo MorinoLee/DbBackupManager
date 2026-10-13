@@ -1,4 +1,3 @@
-using System.Reflection;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
@@ -22,7 +21,6 @@ internal sealed class BackupPlanStore(IDbContextFactory<PlatformDbContext> facto
     public async Task AddAsync(BackupPlan plan, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        var versionId = plan.CurrentVersionId;
         await using var strategyContext = await factory.CreateDbContextAsync(cancellationToken);
         var strategy = strategyContext.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
@@ -30,7 +28,7 @@ internal sealed class BackupPlanStore(IDbContextFactory<PlatformDbContext> facto
             await using var context = await factory.CreateDbContextAsync(cancellationToken);
             await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
             // 暂时清空当前版本指针，先插入计划和版本，再在同一事务内补齐循环外键。
-            CurrentVersionField.SetValue(plan, null);
+            var versionId = plan.DetachCurrentVersion();
             context.BackupPlans.Add(plan);
             await context.SaveChangesAsync(cancellationToken);
             context.Entry(plan).Property<Guid?>("_currentVersionId").CurrentValue = versionId;
@@ -38,10 +36,6 @@ internal sealed class BackupPlanStore(IDbContextFactory<PlatformDbContext> facto
             await transaction.CommitAsync(cancellationToken);
         });
     }
-
-    private static readonly FieldInfo CurrentVersionField = typeof(BackupPlan).GetField(
-        "_currentVersionId",
-        BindingFlags.Instance | BindingFlags.NonPublic)!;
 }
 
 internal sealed class BackupPlanConfiguration : IEntityTypeConfiguration<BackupPlan>

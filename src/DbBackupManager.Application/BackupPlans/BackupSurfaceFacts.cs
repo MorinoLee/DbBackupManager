@@ -195,21 +195,26 @@ public static class BackupRecoverySurface
 
     public const string BaselineUnknown = "Unknown";
 
-    private static readonly HashSet<string> UnknownReasons = new(StringComparer.Ordinal)
-    {
-        RecoveryProtectionReason.WindowUnknown,
-        RecoveryProtectionReason.Uncertain,
-        RecoveryProtectionReason.CompletionUnknown,
-        RecoveryProtectionReason.BaselineUnresolved,
-        PlanLocationRecovery.DependencyUnproven,
-        PlanLocationRecovery.OwnershipUnproven,
-    };
-
     private static readonly HashSet<string> GapReasons = new(StringComparer.Ordinal)
     {
         PlanLocationRecovery.RemoteBaseUnconfirmed,
         PlanLocationRecovery.RemoteDependentUnconfirmed,
         RecoveryProtectionReason.BaseUnavailableAtLocation,
+    };
+
+    /// <summary>
+    /// 这些原因只说明副本为何留在窗口里，不表示位置健康。未列入缺口或此处的原因一律视为未知。
+    /// </summary>
+    private static readonly HashSet<string> BenignRetentionReasons = new(StringComparer.Ordinal)
+    {
+        RecoveryProtectionReason.InsideWindow,
+        RecoveryProtectionReason.OutsideWindowUnneeded,
+        RecoveryProtectionReason.LatestAvailableFull,
+        RecoveryProtectionReason.LatestRestorePoint,
+        RecoveryProtectionReason.WindowStartAnchor,
+        RecoveryProtectionReason.DifferentialBase,
+        RecoveryProtectionReason.ActiveDifferentialBaseline,
+        PlanLocationRecovery.RemoteStagingReleasable,
     };
 
     public static BackupLocationRecovery Project(
@@ -232,8 +237,10 @@ public static class BackupRecoverySurface
         }
 
         var distinct = reasons.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-        var unknownReasons = distinct.Where(UnknownReasons.Contains).ToArray();
         var gapReasons = distinct.Where(GapReasons.Contains).ToArray();
+        var unknownReasons = distinct
+            .Where(reason => !GapReasons.Contains(reason) && !BenignRetentionReasons.Contains(reason))
+            .ToArray();
         var unknown = baseline.IsUnresolved || unknownReasons.Length > 0;
         var remoteUnrecoverable = location == BackupFileLocation.Remote
             && (gapReasons.Length > 0 || conclusion == LocationRecoveryConclusion.NotRestorable && !unknown);

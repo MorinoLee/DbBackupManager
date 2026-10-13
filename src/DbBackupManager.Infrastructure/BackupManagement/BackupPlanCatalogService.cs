@@ -1,6 +1,5 @@
 using System.Data;
 using System.Data.Common;
-using System.Reflection;
 using DbBackupManager.Application.BackupPlans;
 using DbBackupManager.Application.Identity;
 using DbBackupManager.Domain.BackupPlans;
@@ -16,10 +15,6 @@ namespace DbBackupManager.Infrastructure.BackupManagement;
 internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbContext> factory, TimeProvider clock)
     : IBackupPlanCatalogService
 {
-    private static readonly FieldInfo CurrentVersionField = typeof(BackupPlan).GetField(
-        "_currentVersionId",
-        BindingFlags.Instance | BindingFlags.NonPublic)!;
-
     public Task<BackupPlanCatalogResult<BackupPlanView>> GetByDatabaseAsync(
         AdminSession actor, Guid databaseId, CancellationToken cancellationToken = default) =>
         Guard(async () =>
@@ -30,7 +25,7 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
             }
 
             await using var db = await factory.CreateDbContextAsync(cancellationToken);
-            await Authorize(db, actor, cancellationToken);
+            await Authorize(db, actor, clock.GetUtcNow(), cancellationToken);
             var plan = await Plans(db).SingleOrDefaultAsync(item => item.DatabaseId == databaseId, cancellationToken)
                 ?? throw new Rejected(BackupPlanCatalogCode.NotFound);
             return Succeeded(plan);
@@ -46,7 +41,7 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
             }
 
             await using var db = await factory.CreateDbContextAsync(cancellationToken);
-            await Authorize(db, actor, cancellationToken);
+            await Authorize(db, actor, clock.GetUtcNow(), cancellationToken);
             var plan = await Plans(db).SingleOrDefaultAsync(item => item.Id == planId, cancellationToken)
                 ?? throw new Rejected(BackupPlanCatalogCode.NotFound);
             return Succeeded(plan);
@@ -70,11 +65,22 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
             }
 
             await using var db = await factory.CreateDbContextAsync(cancellationToken);
-            await Authorize(db, actor, cancellationToken);
+            await Authorize(db, actor, clock.GetUtcNow(), cancellationToken);
             if (!await db.ManagedDatabases.AsNoTracking().AnyAsync(
                     item => item.Id == databaseId && !item.IsSystemDatabase, cancellationToken))
             {
                 throw new Rejected(BackupPlanCatalogCode.NotFound);
+            }
+
+            // §6.2：没有当前计划时不合成恢复窗口，旧策略模型不获得新的计划恢复投影。
+            var hasCurrentPlan = await db.BackupPlans.AsNoTracking().AnyAsync(
+                plan => plan.DatabaseId == databaseId && EF.Property<Guid?>(plan, "_currentVersionId") != null,
+                cancellationToken);
+            if (!hasCurrentPlan)
+            {
+                return new BackupPlanCatalogResult<BackupRecoverySummary>(
+                    BackupPlanCatalogCode.Succeeded,
+                    new BackupRecoverySummary(databaseId, false, []));
             }
 
             var surface = await PlanLocationRetentionWork.LoadSurfaceAsync(
@@ -108,7 +114,7 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
                 await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
                 try
                 {
-                    await Authorize(db, actor, cancellationToken);
+                    await Authorize(db, actor, clock.GetUtcNow(), cancellationToken);
                     await RequireDatabaseAsync(db, input, cancellationToken);
                     await RequireTargetAsync(db, definition, input.IsPaused, cancellationToken);
                     BackupPlan plan;
@@ -131,8 +137,7 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
                             plan.Pause();
                         }
 
-                        var versionId = plan.CurrentVersionId;
-                        CurrentVersionField.SetValue(plan, null);
+                        var versionId = plan.DetachCurrentVersion();
                         db.BackupPlans.Add(plan);
                         db.AuditRecords.Add(Audit(actor, "backup.plan.create", plan.Id));
                         await db.SaveChangesAsync(cancellationToken);
@@ -143,6 +148,11 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
                         plan = await db.BackupPlans.Include(item => item.Versions)
                                 .SingleOrDefaultAsync(item => item.Id == planId, cancellationToken)
                             ?? throw new Rejected(BackupPlanCatalogCode.NotFound);
+                        if (string.IsNullOrWhiteSpace(version))
+                        {
+                            throw new Rejected(BackupPlanCatalogCode.Invalid);
+                        }
+
                         if (!string.Equals(version, Convert.ToBase64String(plan.RowVersion), StringComparison.Ordinal))
                         {
                             throw new Rejected(BackupPlanCatalogCode.VersionConflict);
@@ -334,11 +344,11 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
             []);
     }
 
-    private static async Task Authorize(PlatformDbContext db, AdminSession actor, CancellationToken token)
+    private static async Task Authorize(PlatformDbContext db, AdminSession actor, DateTimeOffset nowUtc, CancellationToken token)
     {
         var admin = await db.AdminUsers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == actor.AdminUserId, token);
         if (admin is not { IsEnabled: true }
-            || admin.IsLockedOut(DateTimeOffset.UtcNow)
+            || admin.IsLockedOut(nowUtc)
             || !string.Equals(admin.SecurityStamp, actor.SecurityStamp, StringComparison.Ordinal))
         {
             throw new Rejected(BackupPlanCatalogCode.AuthenticationRequired);

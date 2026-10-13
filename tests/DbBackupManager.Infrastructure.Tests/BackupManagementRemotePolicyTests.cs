@@ -19,7 +19,7 @@ public sealed class BackupManagementRemotePolicyTests(PlatformDatabaseSqlServerF
         using var provider = database.CreateServiceProvider();
         var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
         var store = new BackupTaskExecutionStore(factory);
-        var manager = new BackupManagementService(factory, store);
+        var manager = new BackupManagementService(factory, store, TimeProvider.System);
         var seed = await SeedAsync();
 
         Assert.Equal(BackupManagementCode.Invalid, (await manager.SavePolicyAsync(seed.Actor, null, null,

@@ -25,7 +25,44 @@ internal sealed class AuthenticationOpenApiTransformer :
             Name = AdminAuthenticationDefaults.CookieName,
             Description = "管理员登录后由同源 Web 主机签发的安全 Cookie。",
         };
+        DescribeRecovery(document);
         return Task.CompletedTask;
+    }
+
+    private static void DescribeRecovery(OpenApiDocument document)
+    {
+        if (document.Components?.Schemas is null)
+        {
+            return;
+        }
+
+        if (document.Components.Schemas.TryGetValue("BackupLocationRecoveryResponse", out var location)
+            && location is OpenApiSchema locationSchema)
+        {
+            Describe(locationSchema, "unknown",
+                "为真表示该位置必须按不健康显示。可以与 remoteUnrecoverable 同时为真；即使 remoteUnrecoverable 为假，或结论看起来可恢复，也不能显示为健康。");
+            Describe(locationSchema, "remoteUnrecoverable",
+                "远端存在已分类缺口，或在没有未知项时判定为不可恢复。为假不表示健康；unknown 为真时仍必须按不健康显示。");
+        }
+
+        if (document.Components.Schemas.TryGetValue("BackupRecoverySummaryResponse", out var summary)
+            && summary is OpenApiSchema summarySchema)
+        {
+            Describe(summarySchema, "hasCurrentPlan",
+                "为假时 locations 为空。没有当前计划的数据库仍由旧策略模型负责，不合成计划恢复窗口。");
+            Describe(summarySchema, "locations",
+                "仅当 hasCurrentPlan 为真时返回各存储位置的恢复投影。");
+        }
+    }
+
+    private static void Describe(OpenApiSchema schema, string name, string description)
+    {
+        if (schema.Properties is not null
+            && schema.Properties.TryGetValue(name, out var property)
+            && property is OpenApiSchema propertySchema)
+        {
+            propertySchema.Description = description;
+        }
     }
 
     public Task TransformAsync(

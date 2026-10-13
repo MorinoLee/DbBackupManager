@@ -8,7 +8,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DbBackupManager.Infrastructure.BackupManagement;
 
-internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContext> factory) : IBackupMonitoringService
+internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContext> factory, TimeProvider clock) : IBackupMonitoringService
 {
     public Task<BackupManagementResult<BackupOverview>> OverviewAsync(AdminSession actor, CancellationToken token = default) => Read(actor, async db =>
     {
@@ -69,7 +69,7 @@ internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContex
         var total = await rows.LongCountAsync(token);
         var ordered = search.OldestFirst ? rows.OrderBy(x => x.File.ValidatedAtUtc).ThenBy(x => x.File.TaskId)
             : rows.OrderByDescending(x => x.File.ValidatedAtUtc).ThenByDescending(x => x.File.TaskId);
-        var items = await BackupSurfaceReader.EnrichFilesAsync(db, await Files(ordered.Skip(search.Page * 20).Take(20)).ToListAsync(token), DateTimeOffset.UtcNow, token);
+        var items = await BackupSurfaceReader.EnrichFilesAsync(db, await Files(ordered.Skip(search.Page * 20).Take(20)).ToListAsync(token), clock.GetUtcNow(), token);
         return new BackupPage<BackupFileSummary>(items, search.Page, total);
     }, token);
 
@@ -115,7 +115,7 @@ internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContex
         {
             await using var db = await factory.CreateDbContextAsync(token);
             var admin = await db.AdminUsers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == actor.AdminUserId, token);
-            if (admin is not { IsEnabled: true } || admin.IsLockedOut(DateTimeOffset.UtcNow) || admin.SecurityStamp != actor.SecurityStamp)
+            if (admin is not { IsEnabled: true } || admin.IsLockedOut(clock.GetUtcNow()) || admin.SecurityStamp != actor.SecurityStamp)
                 return new(BackupManagementCode.AuthenticationRequired);
             db.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
             return new(BackupManagementCode.Succeeded, await query(db));

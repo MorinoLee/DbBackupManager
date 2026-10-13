@@ -25,13 +25,16 @@ public static class BackupManagementRegistration
         return services;
     }
 }
-internal sealed class BackupManagementService(IDbContextFactory<PlatformDbContext> factory, IBackupTaskExecutionStore store) : IBackupManagementService
+internal sealed class BackupManagementService(
+    IDbContextFactory<PlatformDbContext> factory,
+    IBackupTaskExecutionStore store,
+    TimeProvider clock) : IBackupManagementService
 {
     public Task<BackupManagementResult<BackupDashboard>> ListAsync(AdminSession actor, int page = 0, CancellationToken token = default) => Guard(async () =>
     {
         if (page is < 0 or > 10000) throw new Rejected(BackupManagementCode.Invalid);
         await using var db = await factory.CreateDbContextAsync(token);
-        await Authorize(db, actor, token);
+        await Authorize(db, actor, clock.GetUtcNow(), token);
         var choices = await (from d in db.ManagedDatabases
                              join i in db.DatabaseInstances on d.InstanceId equals i.Id
                              join s in db.DatabaseServers on i.ServerId equals s.Id
@@ -52,7 +55,7 @@ internal sealed class BackupManagementService(IDbContextFactory<PlatformDbContex
         {
             await using var db = await factory.CreateDbContextAsync(token);
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, token);
-            await Authorize(db, actor, token);
+            await Authorize(db, actor, clock.GetUtcNow(), token);
             if (string.IsNullOrWhiteSpace(input.Name) || input.Name.Any(char.IsControl)) throw new Rejected(BackupManagementCode.Invalid);
             var valid = await (from d in db.ManagedDatabases
                                join i in db.DatabaseInstances on d.InstanceId equals i.Id
@@ -105,7 +108,7 @@ internal sealed class BackupManagementService(IDbContextFactory<PlatformDbContex
         if (requestId == Guid.Empty) throw new Rejected(BackupManagementCode.Invalid);
         await using (var db = await factory.CreateDbContextAsync(token))
         {
-            await Authorize(db, actor, token);
+            await Authorize(db, actor, clock.GetUtcNow(), token);
             if (!await db.BackupPolicies.AnyAsync(x => x.Id == policyId && x.IsManualOnly && x.IsEnabled, token))
                 throw new Rejected(BackupManagementCode.NotFound);
         }
@@ -147,16 +150,16 @@ internal sealed class BackupManagementService(IDbContextFactory<PlatformDbContex
     });
     public Task<BackupManagementResult<BackupTaskDetail>> DetailAsync(AdminSession actor, Guid taskId, CancellationToken token = default) => Guard(async () =>
     {
-        await using var db = await factory.CreateDbContextAsync(token); await Authorize(db, actor, token);
+        await using var db = await factory.CreateDbContextAsync(token); await Authorize(db, actor, clock.GetUtcNow(), token);
         var task = await Summaries(db, taskId).SingleOrDefaultAsync(token) ?? throw new Rejected(BackupManagementCode.NotFound);
         task = (await BackupSurfaceReader.EnrichTasksAsync(db, [task], token))[0];
         var history = await db.BackupTaskStateChanges.Where(x => x.TaskId == taskId).OrderByDescending(x => x.Id).Take(200)
             .Select(x => new BackupTaskHistory(x.OccurredAtUtc, x.ToStatus.ToString(), x.ToStage == null ? null : x.ToStage.ToString(), x.ReasonCode)).ToListAsync(token);
         var attempts = await db.BackupAttempts.Where(x => x.TaskId == taskId).OrderByDescending(x => x.AttemptNumber).Take(100)
             .Select(x => new BackupAttemptSummary(x.AttemptNumber, x.BackupInvocationStatus.ToString(), x.SourceLengthBytes, x.LocalVerifiedAtUtc)).ToListAsync(token);
-        var files = await BackupSurfaceReader.EnrichFilesAsync(db, await FileProjections(db, taskId).ToListAsync(token), DateTimeOffset.UtcNow, token);
+        var now = clock.GetUtcNow();
+        var files = await BackupSurfaceReader.EnrichFilesAsync(db, await FileProjections(db, taskId).ToListAsync(token), now, token);
         var path = files.FirstOrDefault(x => x.Location == nameof(BackupFileLocation.Local))?.SqlPath;
-        var now = DateTimeOffset.UtcNow;
         var reconciliation = await db.BackupTasks.Where(x => x.Id == taskId).Select(x => new BackupReconciliationSummary(
             x.ReconciliationAttemptCount,
             x.NextReconciliationAtUtc,
@@ -207,10 +210,10 @@ internal sealed class BackupManagementService(IDbContextFactory<PlatformDbContex
         BackupTaskStoreResultCode.ConfigurationUnavailable => BackupManagementCode.Invalid,
         _ => BackupManagementCode.Conflict,
     };
-    private static async Task Authorize(PlatformDbContext db, AdminSession actor, CancellationToken token)
+    private static async Task Authorize(PlatformDbContext db, AdminSession actor, DateTimeOffset nowUtc, CancellationToken token)
     {
         var admin = await db.AdminUsers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == actor.AdminUserId, token);
-        if (admin is not { IsEnabled: true } || admin.IsLockedOut(DateTimeOffset.UtcNow)
+        if (admin is not { IsEnabled: true } || admin.IsLockedOut(nowUtc)
             || !string.Equals(admin.SecurityStamp, actor.SecurityStamp, StringComparison.Ordinal)) throw new Rejected(BackupManagementCode.AuthenticationRequired);
     }
     private static async Task<BackupManagementResult<T>> Guard<T>(Func<Task<BackupManagementResult<T>>> action)

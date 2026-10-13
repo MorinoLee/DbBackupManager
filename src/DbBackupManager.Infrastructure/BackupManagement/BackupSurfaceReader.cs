@@ -112,15 +112,7 @@ internal static class BackupSurfaceReader
             ? new List<BackupSet>()
             : await db.BackupSets.AsNoTracking().Where(set => setIds.Contains(set.Id)).ToListAsync(token);
         var setById = sets.ToDictionary(set => set.Id);
-        var reasons = new Dictionary<Guid, string>();
-        foreach (var databaseId in links.Where(link => link.BackupSetId != null).Select(link => link.DatabaseId).Distinct())
-        {
-            var surface = await PlanLocationRetentionWork.LoadSurfaceAsync(db, databaseId, nowUtc, token);
-            foreach (var copy in surface.Assessments.SelectMany(item => item.Copies))
-            {
-                reasons[copy.FileId] = copy.Reason;
-            }
-        }
+        var reasons = await PlanLocationRetentionWork.ReasonsForFilesAsync(db, fileIds, nowUtc, token);
 
         var linkById = links.ToDictionary(link => link.Id);
         return files.Select(file =>

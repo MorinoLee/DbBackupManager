@@ -1,4 +1,5 @@
 using DbBackupManager.Application.BackupPlans;
+using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
@@ -115,6 +116,43 @@ public sealed class BackupSurfaceFactsTests
         Assert.DoesNotContain("enable_log", string.Join(' ', unresolved.GapReasonCodes), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("remote.staging_missing")]
+    [InlineData("plan.retention.claimed")]
+    [InlineData("plan.retention.protected")]
+    [InlineData(PlanLocationRecovery.RemoteStagingDeferred)]
+    public void UnclassifiedReasonIsUnknownEvenWhenConclusionLooksRestorable(string reason)
+    {
+        var remote = BackupRecoverySurface.Project(
+            BackupFileLocation.Remote,
+            Guid.NewGuid(),
+            30,
+            LocationRecoveryConclusion.RestorableWindowSatisfied,
+            ActiveBaseline.Known(FullId),
+            [reason]);
+        Assert.True(remote.Unknown);
+        Assert.False(remote.RemoteUnrecoverable);
+        Assert.Equal(BackupRecoverySurface.BaselineKnown, remote.Baseline);
+        Assert.Equal([reason], remote.UnknownReasonCodes);
+        Assert.Empty(remote.GapReasonCodes);
+    }
+
+    [Fact]
+    public void UnclassifiedReasonStaysUnknownBesideARemoteGap()
+    {
+        var remote = BackupRecoverySurface.Project(
+            BackupFileLocation.Remote,
+            Guid.NewGuid(),
+            30,
+            LocationRecoveryConclusion.NotRestorable,
+            ActiveBaseline.Known(FullId),
+            [PlanLocationRecovery.RemoteBaseUnconfirmed, "remote.staging_missing"]);
+        Assert.True(remote.Unknown);
+        Assert.True(remote.RemoteUnrecoverable);
+        Assert.Equal([PlanLocationRecovery.RemoteBaseUnconfirmed], remote.GapReasonCodes);
+        Assert.Equal(["remote.staging_missing"], remote.UnknownReasonCodes);
+    }
+
     [Fact]
     public void DifferentialBaseIsHiddenWhenTypeIsUnknown()
     {
@@ -143,4 +181,42 @@ public sealed class BackupSurfaceFactsTests
             conclusion is null ? BackupMetadataState.NotApplicable : BackupMetadataState.Known,
             conclusion,
             false);
+}
+
+public sealed class BackupFileRetentionScopeTests
+{
+    [Fact]
+    public void IncompleteGraphDoesNotTreatWindowReasonsAsDeletable()
+    {
+        var pageFile = Guid.NewGuid();
+        var assessments = Assessments(
+            pageFile,
+            RecoveryWindowVerdict.Deletable,
+            RecoveryProtectionReason.OutsideWindowUnneeded);
+        var incomplete = BackupFileRetentionScope.Select([pageFile], assessments, locationGraphComplete: false);
+        Assert.Equal(RecoveryProtectionReason.WindowUnknown, incomplete[pageFile]);
+
+        var complete = BackupFileRetentionScope.Select([pageFile], assessments, locationGraphComplete: true);
+        Assert.Equal(RecoveryProtectionReason.OutsideWindowUnneeded, complete[pageFile]);
+    }
+
+    [Fact]
+    public void IncompleteGraphKeepsReasonsKnownFromThePageFile()
+    {
+        var pageFile = Guid.NewGuid();
+        var assessments = Assessments(pageFile, RecoveryWindowVerdict.Protected, PlanLocationRecovery.OwnershipUnproven);
+        var reasons = BackupFileRetentionScope.Select([pageFile], assessments, locationGraphComplete: false);
+        Assert.Equal(PlanLocationRecovery.OwnershipUnproven, reasons[pageFile]);
+        Assert.DoesNotContain(Guid.NewGuid(), reasons.Keys);
+    }
+
+    private static PlanLocationAssessment[] Assessments(Guid fileId, RecoveryWindowVerdict verdict, string reason) =>
+    [
+        new(
+            BackupFileLocation.Local,
+            null,
+            7,
+            LocationRecoveryConclusion.NotRestorable,
+            [new PlanCopyRetentionDecision(fileId, Guid.NewGuid(), verdict, reason)]),
+    ];
 }

@@ -6742,10 +6742,12 @@
             "format": "uuid"
           },
           "unknown": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "为真表示该位置必须按不健康显示。可以与 remoteUnrecoverable 同时为真；即使 remoteUnrecoverable 为假，或结论看起来可恢复，也不能显示为健康。"
           },
           "remoteUnrecoverable": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "远端存在已分类缺口，或在没有未知项时判定为不可恢复。为假不表示健康；unknown 为真时仍必须按不健康显示。"
           },
           "gapReasonCodes": {
             "type": "array",
@@ -7141,13 +7143,15 @@
             "format": "uuid"
           },
           "hasCurrentPlan": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "为假时 locations 为空。没有当前计划的数据库仍由旧策略模型负责，不合成计划恢复窗口。"
           },
           "locations": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/BackupLocationRecoveryResponse"
-            }
+            },
+            "description": "仅当 hasCurrentPlan 为真时返回各存储位置的恢复投影。"
           }
         }
       },
