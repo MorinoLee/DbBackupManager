@@ -4175,6 +4175,69 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapEpisode", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("GapCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<Guid>("NotificationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("OpenedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<DateTimeOffset?>("RecoveredAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("StorageTargetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NotificationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RemoteGapEpisodes_NotificationId");
+
+                    b.HasIndex("StorageTargetId");
+
+                    b.HasIndex("DatabaseId", "StorageTargetId", "GapCode")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RemoteGapEpisodes_Open")
+                        .HasFilter("[RecoveredAtUtc] IS NULL");
+
+                    b.ToTable("RemoteGapEpisodes", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RemoteGapEpisodes_GapCode_NotEmpty", "LEN([GapCode]) > 0");
+
+                            t.HasCheckConstraint("CK_RemoteGapEpisodes_RecoveredAt", "[RecoveredAtUtc] IS NULL OR [RecoveredAtUtc] >= [OpenedAtUtc]");
+                        });
+                });
+
             modelBuilder.Entity("DbBackupManager.Domain.Notifications.SmtpRecipient", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4646,6 +4709,27 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("ActorAdminUserId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapEpisode", b =>
+                {
+                    b.HasOne("DbBackupManager.Domain.Configuration.ManagedDatabase", null)
+                        .WithMany()
+                        .HasForeignKey("DatabaseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("DbBackupManager.Domain.Notifications.NotificationOutbox", null)
+                        .WithMany()
+                        .HasForeignKey("NotificationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("DbBackupManager.Domain.Configuration.StorageTarget", null)
+                        .WithMany()
+                        .HasForeignKey("StorageTargetId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("DbBackupManager.Domain.Notifications.SmtpRecipient", b =>

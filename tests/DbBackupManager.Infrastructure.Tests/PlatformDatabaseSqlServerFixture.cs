@@ -85,6 +85,7 @@ public sealed class PlatformDatabaseSqlServerFixture : IAsyncLifetime
         await using var context = CreateContext();
         await context.Database.ExecuteSqlRawAsync(
             """
+            DELETE FROM [RemoteGapEpisodes];
             DELETE FROM [NotificationOutbox];
             DELETE FROM [TaskEvents];
             DELETE FROM [BackupFileStateChanges];

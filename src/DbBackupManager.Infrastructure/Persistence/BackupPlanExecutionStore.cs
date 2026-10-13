@@ -2,7 +2,6 @@ using System.Data;
 using DbBackupManager.Application.BackupSets;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
-using DbBackupManager.Application.Notifications;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
@@ -168,9 +167,11 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
 
-    public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
-        string? outcomeReason = null, CancellationToken cancellationToken = default) =>
-        _persistence.ExecuteWithStrategyAsync(async db =>
+    public async Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
+        string? outcomeReason = null, CancellationToken cancellationToken = default)
+    {
+        RemoteGapNotices.Observation? remoteGap = null;
+        var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == lease.TaskId, cancellationToken);
@@ -188,8 +189,6 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
                 && x.Location == BackupFileLocation.Local && x.Status != BackupFileStatus.Deleted, cancellationToken);
             var now = clock.GetUtcNow();
             var before = task.Status;
-            Guid? remoteNotificationId = null;
-            string? remoteCode = null;
             if (retained)
             {
                 if (local is null || attempt.LocalCleanupCompletedAtUtc is not null)
@@ -197,15 +196,8 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
                 var reason = string.IsNullOrWhiteSpace(outcomeReason) || outcomeReason.Length > 100
                     ? PlanLocationRetentionWork.StagingRetainedReason
                     : outcomeReason;
-                var mutationId = Guid.NewGuid();
-                if (PlanNotificationRules.IsRemoteGapReason(reason))
-                {
-                    remoteNotificationId = mutationId;
-                    remoteCode = reason;
-                }
-
                 task.CompleteRunningStage(snapshot.StorageMode, lease.LeaseToken, now);
-                db.AddRange(CreateStateChange(mutationId, task, before, BackupTaskStage.Cleanup, reason, null, now),
+                db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, reason, null, now),
                     CreateAudit(null, task.Id, "plan.staging.retain", "succeeded", reason));
             }
             else
@@ -217,13 +209,17 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
                     CreateAudit(null, task.Id, "plan.staging.clean", "succeeded", null));
             }
 
-            if (remoteNotificationId is Guid notificationId && remoteCode is not null)
-                NotificationOutboxWriter.EnqueueRemoteUnrecoverable(
-                    db, notificationId, task.Id, BackupTaskStage.Cleanup, now, remoteCode);
             await db.SaveChangesAsync(cancellationToken);
             await tx.CommitAsync(cancellationToken);
+            if (snapshot.StorageTargetId is Guid target)
+                remoteGap = new RemoteGapNotices.Observation(
+                    snapshot.DatabaseId, task.Id, BackupTaskStage.Cleanup, now, [target]);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
+        if (code == BackupExecutionContractCode.Succeeded && remoteGap is { } observation)
+            await RemoteGapNotices.TryProjectAsync(factory, observation, cancellationToken);
+        return code;
+    }
 
     public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default) =>
         _persistence.ExecuteWithStrategyAsync(async db =>

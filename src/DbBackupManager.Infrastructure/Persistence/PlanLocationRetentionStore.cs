@@ -290,7 +290,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
         }, cancellationToken);
     }
 
-    public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> CommitAsync(
+    public async Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> CommitAsync(
         BackupFileRetentionWorkItem work,
         BackupFileRetentionCommitCommand command,
         CancellationToken cancellationToken = default)
@@ -313,7 +313,8 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             throw new ArgumentException("删除失败必须提供稳定错误码。", nameof(command));
         }
 
-        return ExecuteAsync(work.DatabaseId, async (context, token) =>
+        RemoteGapNotices.Observation? remoteGap = null;
+        var result = await ExecuteAsync(work.DatabaseId, async (context, token) =>
         {
             var replay = await context.BackupFileStateChanges.AsNoTracking()
                 .SingleOrDefaultAsync(change => change.MutationId == command.MutationId, token);
@@ -385,20 +386,13 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             context.AuditRecords.Add(Audit(file.Id, "backup.file.plan_retention.commit", Reason(command.Outcome)));
             NotificationOutboxWriter.EnqueueRetention(
                 context, command.MutationId, file.Id, file.TaskId, command.Outcome, occurredAt, command.ErrorCode);
-            var remoteTarget = file.Location == BackupFileLocation.Remote ? file.StorageTargetId : null;
             await context.SaveChangesAsync(token);
-            if (remoteTarget is Guid target
+            if (file.Location == BackupFileLocation.Remote
+                && file.StorageTargetId is Guid target
                 && command.Outcome is BackupFileRetentionOutcome.Deleted or BackupFileRetentionOutcome.Missing)
             {
-                var taskStage = await context.BackupTasks.AsNoTracking()
-                    .Where(item => item.Id == file.TaskId)
-                    .Select(item => item.CurrentStage)
-                    .SingleOrDefaultAsync(token);
-                if (taskStage is BackupTaskStage stage)
-                {
-                    await NotificationOutboxWriter.EnqueueRemoteProjectionAsync(
-                        context, command.MutationId, file.TaskId, stage, occurredAt, file.DatabaseId, [target], token);
-                }
+                remoteGap = new RemoteGapNotices.Observation(
+                    file.DatabaseId, file.TaskId, null, occurredAt, [target]);
             }
             var endpoint = await BackupFileRetentionStore.TryCreateEndpointAsync(context, file, false, token);
             // 已删除、缺失和失败都会清掉文件上的租约。返回项沿用领取时的租约标识，避免提交成功后回滚。
@@ -408,6 +402,9 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                     BackupTaskStoreResultCode.Succeeded,
                     WorkItem(file, endpoint, work.LeaseToken, work.LeaseExpiresAtUtc));
         }, cancellationToken);
+        if (result.Code == BackupTaskStoreResultCode.Succeeded && remoteGap is { } observation)
+            await RemoteGapNotices.TryProjectAsync(contextFactory, observation, cancellationToken);
+        return result;
     }
 
     public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ReadExpiredProtectedAsync(

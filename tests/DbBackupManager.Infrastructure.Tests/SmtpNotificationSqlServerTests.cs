@@ -11,6 +11,7 @@ using DbBackupManager.Infrastructure.TargetSql;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -604,7 +605,7 @@ public sealed class SmtpNotificationSqlServerTests(PlatformDatabaseSqlServerFixt
             var migrations = db.Database.GetMigrations().ToArray();
             var previous = migrations.Single(name => name.EndsWith("_AddBackupExecutionContracts", StringComparison.Ordinal));
             var current = migrations.Single(name => name.EndsWith("_AddRemoteUnrecoverableNotification", StringComparison.Ordinal));
-            var migrator = db.GetService<IMigrator>();
+            var migrator = db.Database.GetService<IMigrator>();
             await migrator.MigrateAsync(previous);
             await migrator.MigrateAsync(current);
             var taskId = Guid.NewGuid();
@@ -701,6 +702,7 @@ public sealed class SmtpNotificationSqlServerTests(PlatformDatabaseSqlServerFixt
         await using var context = database.CreateContext();
         await context.Database.ExecuteSqlRawAsync(
             """
+            DELETE FROM [RemoteGapEpisodes];
             DELETE FROM [NotificationOutbox];
             DELETE FROM [SmtpRecipients];
             UPDATE [SmtpSettings] SET [CredentialReferenceId] = NULL;

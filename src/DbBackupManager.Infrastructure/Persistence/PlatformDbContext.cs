@@ -61,6 +61,8 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
 
     public DbSet<NotificationOutbox> NotificationOutbox => Set<NotificationOutbox>();
 
+    public DbSet<RemoteGapEpisode> RemoteGapEpisodes => Set<RemoteGapEpisode>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(PlatformDbContext).Assembly);
@@ -128,7 +130,8 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
         foreach (var entry in ChangeTracker.Entries<ConcurrentEntity>())
         {
             if (entry.Entity is AdminUser or BackupTask or BackupAttempt or BackupFile or BackupSet
-                    or Domain.Notifications.NotificationOutbox or Domain.Notifications.SmtpSettings
+                    or Domain.Notifications.NotificationOutbox or Domain.Notifications.RemoteGapEpisode
+                    or Domain.Notifications.SmtpSettings
                 && entry.State == EntityState.Deleted)
             {
                 throw new InvalidOperationException("受保护的业务记录不能通过普通 EF 写路径直接删除。");

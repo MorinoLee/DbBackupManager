@@ -12,10 +12,12 @@ namespace DbBackupManager.Infrastructure.Persistence;
 
 internal sealed partial class BackupPlanExecutionStore
 {
-    public Task<BackupExecutionContractCode> ApplyAsync(LeaseHandle lease, ReserveBackupExecutionOperation identity,
+    public async Task<BackupExecutionContractCode> ApplyAsync(LeaseHandle lease, ReserveBackupExecutionOperation identity,
         IVerifiedBackupFileHandle? protectedFile = null, IVerifiedBackupFileHandle? protectedDependency = null,
-        CancellationToken cancellationToken = default) =>
-        _persistence.ExecuteWithStrategyAsync(async db =>
+        CancellationToken cancellationToken = default)
+    {
+        RemoteGapNotices.Observation? remoteGap = null;
+        var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == identity.TaskId, cancellationToken);
@@ -233,12 +235,16 @@ internal sealed partial class BackupPlanExecutionStore
             await db.SaveChangesAsync(cancellationToken);
             if (addedEntries.Length > 0)
                 await PlanLocationRetentionWork.ReleaseSupersededAsync(db, snapshot.DatabaseId, now, cancellationToken);
-            if (remoteTargets.Length > 0 && stage is BackupTaskStage remoteStage)
-                await NotificationOutboxWriter.EnqueueRemoteProjectionAsync(
-                    db, operation.Id, task.Id, remoteStage, now, snapshot.DatabaseId, remoteTargets, cancellationToken);
             await tx.CommitAsync(cancellationToken);
+            if (remoteTargets.Length > 0)
+                remoteGap = new RemoteGapNotices.Observation(
+                    snapshot.DatabaseId, task.Id, stage, now, remoteTargets);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
+        if (code == BackupExecutionContractCode.Succeeded && remoteGap is { } observation)
+            await RemoteGapNotices.TryProjectAsync(factory, observation, cancellationToken);
+        return code;
+    }
 
     private static void Advance(BackupTask task, BackupTaskSnapshot snapshot, LeaseHandle lease, DateTimeOffset now)
     {

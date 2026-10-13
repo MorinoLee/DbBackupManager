@@ -26,6 +26,56 @@ public sealed class PlanNotificationRulesTests
         Assert.Null(PlanNotificationRules.ForCommittedTask(status));
     }
 
+    [Theory]
+    [InlineData(BackupReconciliationOutcome.Succeeded)]
+    [InlineData(BackupReconciliationOutcome.SafeToRetry)]
+    [InlineData(BackupReconciliationOutcome.Cancelled)]
+    public void ConfirmedRecoveryDoesNotSendAnotherNotice(BackupReconciliationOutcome outcome)
+    {
+        Assert.Null(PlanNotificationRules.ForReconciliation(outcome));
+    }
+
+    [Fact]
+    public void FinishedTaskWithoutStageStillProducesARemoteNoticeStage()
+    {
+        Assert.Equal(BackupTaskStage.Cleanup, PlanNotificationRules.RemoteNoticeStage(null));
+        Assert.Equal(BackupTaskStage.ValidateCopy, PlanNotificationRules.RemoteNoticeStage(BackupTaskStage.ValidateCopy));
+    }
+
+    [Fact]
+    public void EachRemoteGapIsASeparateNoticeKey()
+    {
+        var target = Guid.NewGuid();
+        var gaps = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: true,
+            remoteUnrecoverable: true,
+            [],
+            ["remote_dependent_unconfirmed", "remote_base_unconfirmed"],
+            target);
+        var generic = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: false,
+            remoteUnrecoverable: true,
+            [],
+            [],
+            target);
+        var unresolved = Location(
+            BackupFileLocation.Remote,
+            LocationRecoveryConclusion.NotRestorable,
+            unknown: true,
+            remoteUnrecoverable: false,
+            ["baseline_unresolved"],
+            [],
+            target);
+
+        Assert.Equal(["remote_dependent_unconfirmed", "remote_base_unconfirmed"], PlanNotificationRules.RemoteGapCodes(gaps));
+        Assert.Equal([PlanNotificationRules.LocationNotRestorable], PlanNotificationRules.RemoteGapCodes(generic));
+        Assert.Empty(PlanNotificationRules.RemoteGapCodes(unresolved));
+    }
+
     [Fact]
     public void UnresolvedBaselineStaysUnknownAndDoesNotAdviseLogBackup()
     {
@@ -89,6 +139,7 @@ public sealed class PlanNotificationRulesTests
         bool unknown,
         bool remoteUnrecoverable,
         string[] unknownReasons,
-        string[] gapReasons) =>
-        new(place, Guid.NewGuid(), 7, conclusion, "Unknown", null, unknown, remoteUnrecoverable, gapReasons, unknownReasons);
+        string[] gapReasons,
+        Guid? storageTargetId = null) =>
+        new(place, storageTargetId ?? Guid.NewGuid(), 7, conclusion, "Unknown", null, unknown, remoteUnrecoverable, gapReasons, unknownReasons);
 }

@@ -19,6 +19,37 @@ public static class PlanNotificationRules
         _ => null,
     };
 
+    /// <summary>核对确认成功、可安全重试或取消都不补发邮件。</summary>
+    public static NotificationType? ForReconciliation(BackupReconciliationOutcome outcome) => outcome switch
+    {
+        BackupReconciliationOutcome.Failed => NotificationType.TaskFailed,
+        BackupReconciliationOutcome.Inconclusive => NotificationType.TaskIndeterminate,
+        _ => null,
+    };
+
+    /// <summary>任务已经结束、当前阶段为空时，远端缺口通知记在 Cleanup。</summary>
+    public static BackupTaskStage RemoteNoticeStage(BackupTaskStage? currentStage) =>
+        currentStage ?? BackupTaskStage.Cleanup;
+
+    /// <summary>
+    /// 一个远端位置上当前应当通知的缺口。每个错误码单独去重；没有具体原因时用通用不可恢复码。
+    /// </summary>
+    public static IReadOnlyList<string> RemoteGapCodes(BackupLocationRecovery location)
+    {
+        ArgumentNullException.ThrowIfNull(location);
+        if (location.Location != BackupFileLocation.Remote
+            || location.StorageTargetId is not Guid target
+            || target == Guid.Empty
+            || !location.RemoteUnrecoverable)
+        {
+            return [];
+        }
+
+        return location.GapReasonCodes.Count > 0
+            ? location.GapReasonCodes
+            : [LocationNotRestorable];
+    }
+
     public static bool IsRemoteGapReason(string? reason) =>
         reason is PlanLocationRecovery.RemoteBaseUnconfirmed
             or PlanLocationRecovery.RemoteDependentUnconfirmed

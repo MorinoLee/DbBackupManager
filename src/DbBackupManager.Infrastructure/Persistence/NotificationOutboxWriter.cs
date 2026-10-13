@@ -1,4 +1,3 @@
-using DbBackupManager.Application.BackupPlans;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Notifications;
 using DbBackupManager.Domain.BackupTasks;
@@ -49,12 +48,7 @@ internal static class NotificationOutboxWriter
         DateTimeOffset occurredAtUtc,
         string? errorCode)
     {
-        var type = outcome switch
-        {
-            BackupReconciliationOutcome.Failed => NotificationType.TaskFailed,
-            BackupReconciliationOutcome.Inconclusive => NotificationType.TaskIndeterminate,
-            _ => (NotificationType?)null,
-        };
+        var type = PlanNotificationRules.ForReconciliation(outcome);
         if (type is null)
         {
             return;
@@ -146,76 +140,6 @@ internal static class NotificationOutboxWriter
             stage,
             occurredAtUtc,
             string.IsNullOrWhiteSpace(errorCode) ? PlanNotificationRules.Fallback(type) : errorCode);
-    }
-
-    public static bool EnqueueRemoteUnrecoverable(
-        PlatformDbContext context,
-        Guid mutationId,
-        Guid taskId,
-        BackupTaskStage stage,
-        DateTimeOffset occurredAtUtc,
-        string errorCode) =>
-        TryAdd(
-            context,
-            mutationId,
-            NotificationType.RemoteUnrecoverable,
-            NotificationSourceKind.BackupTask,
-            taskId,
-            taskId,
-            stage,
-            occurredAtUtc,
-            string.IsNullOrWhiteSpace(errorCode) ? PlanNotificationRules.LocationNotRestorable : errorCode);
-
-    public static async Task EnqueueRemoteProjectionAsync(
-        PlatformDbContext context,
-        Guid mutationId,
-        Guid taskId,
-        BackupTaskStage stage,
-        DateTimeOffset occurredAtUtc,
-        Guid databaseId,
-        IReadOnlyCollection<Guid> storageTargetIds,
-        CancellationToken cancellationToken)
-    {
-        var targets = storageTargetIds.Where(id => id != Guid.Empty).ToHashSet();
-        if (targets.Count == 0)
-        {
-            return;
-        }
-
-        var surface = await PlanLocationRetentionWork.LoadSurfaceAsync(
-            context, databaseId, occurredAtUtc, cancellationToken);
-        string? code = null;
-        foreach (var item in surface.Assessments)
-        {
-            if (item.Location != BackupFileLocation.Remote
-                || item.StorageTargetId is not Guid target
-                || !targets.Contains(target))
-            {
-                continue;
-            }
-
-            var projected = BackupRecoverySurface.Project(
-                item.Location,
-                item.StorageTargetId,
-                item.WindowDays,
-                item.Conclusion,
-                surface.Baseline,
-                item.Copies.Select(copy => copy.Reason).ToArray());
-            if (PlanNotificationRules.RemoteErrorCode(projected) is { } candidate)
-            {
-                code = PlanNotificationRules.PreferRemoteCode(code, candidate);
-            }
-        }
-
-        if (code is null)
-        {
-            return;
-        }
-
-        if (EnqueueRemoteUnrecoverable(context, mutationId, taskId, stage, occurredAtUtc, code))
-        {
-            await context.SaveChangesAsync(cancellationToken);
-        }
     }
 
     public static void EnqueueExternalMissing(
