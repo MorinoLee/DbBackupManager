@@ -72,14 +72,14 @@ public sealed class BackupPlanWebTests
         Assert.Equal(1, pausedPlan.VersionNumber);
         Assert.NotEqual(plan.Version, pausedPlan.Version);
 
-        var second = Plan(databaseId, "第二个当前计划", mode: 2, paused: true);
+        var second = Plan(databaseId, "第二个当前计划", mode: 1, paused: true);
         using var rejected = await SendAsync(client, HttpMethod.Post, "/api/v1/backup-plans", second, token);
         Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
         using var rejectedJson = JsonDocument.Parse(await rejected.Content.ReadAsStringAsync());
         Assert.Equal("backup_plan_exists", rejectedJson.RootElement.GetProperty("code").GetString());
         Assert.Equal(plan.Id, rejectedJson.RootElement.GetProperty("planId").GetGuid());
 
-        var stale = Plan(databaseId, "过期版本", mode: 2, paused: true, version: plan.Version);
+        var stale = Plan(databaseId, "过期版本", mode: 1, paused: true, version: plan.Version);
         using var conflict = await SendAsync(client, HttpMethod.Put, $"/api/v1/backup-plans/{plan.Id}", stale, token);
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
         using var conflictJson = JsonDocument.Parse(await conflict.Content.ReadAsStringAsync());
