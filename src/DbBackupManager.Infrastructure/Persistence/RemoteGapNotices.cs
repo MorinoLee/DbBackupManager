@@ -10,7 +10,8 @@ using Microsoft.Extensions.Logging;
 namespace DbBackupManager.Infrastructure.Persistence;
 
 /// <summary>
-/// 远端缺口通知在运行事实提交之后单独投影。投影失败不回滚事实。
+/// 远端缺口通知在运行事实提交之后单独投影。需要投影时，待补发标记与事实写在同一事务。
+/// 投影成功后清除标记；失败或拿不到保留锁时标记留下，后续入口碰到该库再补做。不启动后台循环。
 /// 同一数据库、远端目标和缺口在恢复前只保留一封；恢复后再次出现可以再发。
 /// 位置未知或这次没有该目标的投影时，不新开也不关闭已打开缺口。
 /// </summary>
@@ -33,6 +34,91 @@ internal static class RemoteGapNotices
         DateTimeOffset OccurredAtUtc,
         IReadOnlyCollection<Guid> StorageTargetIds);
 
+    internal const int OpportunisticLockTimeoutMilliseconds = 0;
+
+    internal static async Task MarkPendingAsync(
+        PlatformDbContext context,
+        Observation observation,
+        CancellationToken cancellationToken)
+    {
+        var targets = DistinctTargets(observation.StorageTargetIds);
+        if (observation.DatabaseId == Guid.Empty || observation.TaskId == Guid.Empty || targets.Length == 0)
+        {
+            return;
+        }
+
+        var pending = await context.RemoteGapProjectionPendings.AsTracking()
+            .Include(item => item.Targets)
+            .SingleOrDefaultAsync(item => item.DatabaseId == observation.DatabaseId, cancellationToken);
+        if (pending is null)
+        {
+            pending = new RemoteGapProjectionPending(
+                Guid.NewGuid(),
+                observation.DatabaseId,
+                observation.TaskId,
+                observation.Stage,
+                observation.OccurredAtUtc);
+            context.RemoteGapProjectionPendings.Add(pending);
+        }
+        else
+        {
+            pending.Note(observation.TaskId, observation.Stage, observation.OccurredAtUtc);
+        }
+
+        foreach (var target in targets)
+        {
+            pending.IncludeTarget(target);
+        }
+
+        await context.SaveChangesAsync(cancellationToken);
+    }
+
+    internal static async Task TryDrainPendingAsync(
+        IDbContextFactory<PlatformDbContext> factory,
+        Guid databaseId,
+        CancellationToken cancellationToken,
+        ILogger? logger = null,
+        int? lockTimeoutMilliseconds = null,
+        IReadOnlyDictionary<Guid, RemoteGapProjection>? knownGaps = null)
+    {
+        if (databaseId == Guid.Empty)
+        {
+            return;
+        }
+
+        try
+        {
+            await using var context = await factory.CreateDbContextAsync(cancellationToken);
+            var pending = await context.RemoteGapProjectionPendings.AsNoTracking()
+                .Include(item => item.Targets)
+                .SingleOrDefaultAsync(item => item.DatabaseId == databaseId, cancellationToken);
+            if (pending is null)
+            {
+                return;
+            }
+
+            await ProjectAsync(
+                factory,
+                new Observation(
+                    pending.DatabaseId,
+                    pending.TaskId,
+                    pending.Stage,
+                    pending.RequestedAtUtc,
+                    pending.TargetIds()),
+                knownGaps,
+                cancellationToken,
+                logger,
+                lockTimeoutMilliseconds);
+        }
+        catch (Exception exception)
+        {
+            if (logger is not null)
+            {
+                ProjectionFailed(logger, exception.GetType().Name, null);
+            }
+        }
+    }
+
     internal static async Task TryProjectAsync(
         IDbContextFactory<PlatformDbContext> factory,
         Observation observation,
@@ -41,11 +127,11 @@ internal static class RemoteGapNotices
     {
         try
         {
-            await ProjectAsync(factory, observation, knownGaps: null, cancellationToken, logger);
+            await ProjectAsync(factory, observation, knownGaps: null, cancellationToken, logger, lockTimeoutMilliseconds: null);
         }
         catch (Exception exception)
         {
-            // 运行事实已经提交。这次投影失败只跳过远端通知。日志只保留异常类型。
+            // 运行事实和待补发标记已经提交。这次投影失败只留下标记。日志只保留异常类型。
             if (logger is not null)
             {
                 ProjectionFailed(logger, exception.GetType().Name, null);
@@ -58,10 +144,11 @@ internal static class RemoteGapNotices
         Observation observation,
         IReadOnlyDictionary<Guid, RemoteGapProjection>? knownGaps,
         CancellationToken cancellationToken,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        int? lockTimeoutMilliseconds = null)
     {
-        var targets = observation.StorageTargetIds.Where(id => id != Guid.Empty).Distinct().ToArray();
-        if (observation.DatabaseId == Guid.Empty || observation.TaskId == Guid.Empty || targets.Length == 0)
+        var requested = DistinctTargets(observation.StorageTargetIds);
+        if (observation.DatabaseId == Guid.Empty || observation.TaskId == Guid.Empty || requested.Length == 0)
         {
             return false;
         }
@@ -73,7 +160,8 @@ internal static class RemoteGapNotices
             await using var context = await factory.CreateDbContextAsync(cancellationToken);
             await using var transaction = await context.Database.BeginTransactionAsync(
                 IsolationLevel.Serializable, cancellationToken);
-            if (!await PlanRetentionLock.TryAcquireAsync(context, observation.DatabaseId, cancellationToken))
+            if (!await PlanRetentionLock.TryAcquireAsync(
+                context, observation.DatabaseId, cancellationToken, lockTimeoutMilliseconds))
             {
                 if (logger is not null)
                 {
@@ -83,19 +171,27 @@ internal static class RemoteGapNotices
                 return false;
             }
 
-            var gaps = knownGaps is null
-                ? await LoadGapsAsync(context, observation, targets, cancellationToken)
-                : CopyGaps(targets, knownGaps);
-            var stage = observation.Stage ?? await context.BackupTasks.AsNoTracking()
-                .Where(task => task.Id == observation.TaskId)
+            var pending = await context.RemoteGapProjectionPendings.AsTracking()
+                .Include(item => item.Targets)
+                .SingleOrDefaultAsync(item => item.DatabaseId == observation.DatabaseId, cancellationToken);
+            var targets = DistinctTargets(requested.Concat(pending?.TargetIds() ?? []));
+            var taskId = pending?.TaskId ?? observation.TaskId;
+            var occurredAt = pending?.RequestedAtUtc ?? observation.OccurredAtUtc;
+            var stage = pending is null ? observation.Stage : pending.Stage;
+            stage ??= await context.BackupTasks.AsNoTracking()
+                .Where(task => task.Id == taskId)
                 .Select(task => task.CurrentStage)
                 .SingleOrDefaultAsync(cancellationToken);
+            var scoped = observation with { TaskId = taskId, Stage = stage, OccurredAtUtc = occurredAt, StorageTargetIds = targets };
+            var gaps = knownGaps is null
+                ? await LoadGapsAsync(context, scoped, targets, cancellationToken)
+                : CopyGaps(targets, knownGaps);
             var saved = await SyncAsync(
                 context,
                 observation.DatabaseId,
-                observation.TaskId,
+                taskId,
                 PlanNotificationRules.RemoteNoticeStage(stage),
-                observation.OccurredAtUtc,
+                occurredAt,
                 gaps,
                 cancellationToken);
             if (!saved)
@@ -103,10 +199,19 @@ internal static class RemoteGapNotices
                 return false;
             }
 
+            if (pending is not null)
+            {
+                context.RemoteGapProjectionPendings.Remove(pending);
+                await context.SaveChangesAsync(cancellationToken);
+            }
+
             await transaction.CommitAsync(cancellationToken);
             return true;
         });
     }
+
+    private static Guid[] DistinctTargets(IEnumerable<Guid> targetIds) =>
+        targetIds.Where(id => id != Guid.Empty).Distinct().ToArray();
 
     internal static async Task<bool> SyncAsync(
         PlatformDbContext context,

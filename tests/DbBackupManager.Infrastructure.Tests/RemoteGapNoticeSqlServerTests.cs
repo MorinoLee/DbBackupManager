@@ -58,6 +58,38 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
     }
 
     [Fact]
+    public async Task FailedProjectionIsRetriedByTheNextEntryAndSendsOneNotice()
+    {
+        var graph = await SeedAsync();
+        using var provider = database.CreateServiceProvider();
+        var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var observation = new RemoteGapNotices.Observation(
+            graph.DatabaseId, graph.TaskId, graph.Stage, Opened, [graph.TargetId]);
+        var gaps = Gaps(graph.TargetId, PlanLocationRecovery.RemoteBaseUnconfirmed);
+        await using (var db = database.CreateContext())
+        {
+            await RemoteGapNotices.MarkPendingAsync(db, observation, CancellationToken.None);
+            await RemoteGapNotices.MarkPendingAsync(db, observation, CancellationToken.None);
+        }
+
+        Assert.Equal(1, await CountPendingAsync(graph.DatabaseId));
+        await RemoteGapNotices.TryProjectAsync(new ThrowingFactory(), observation, CancellationToken.None);
+        Assert.Equal(0, await CountNoticesAsync(graph.DatabaseId));
+        Assert.Equal(1, await CountPendingAsync(graph.DatabaseId));
+
+        await RemoteGapNotices.TryDrainPendingAsync(
+            factory, graph.DatabaseId, CancellationToken.None, knownGaps: gaps);
+        Assert.Equal(1, await CountNoticesAsync(graph.DatabaseId));
+        Assert.Equal(0, await CountPendingAsync(graph.DatabaseId));
+        Assert.Equal(1, await CountOpenAsync(graph.DatabaseId));
+
+        await RemoteGapNotices.TryDrainPendingAsync(
+            factory, graph.DatabaseId, CancellationToken.None, knownGaps: gaps);
+        Assert.Equal(1, await CountNoticesAsync(graph.DatabaseId));
+        Assert.Equal(1, await CountOpenAsync(graph.DatabaseId));
+    }
+
+    [Fact]
     public async Task DifferentTargetOrGapSendsItsOwnNotice()
     {
         var graph = await SeedAsync(secondTarget: true);
@@ -142,6 +174,45 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
     }
 
     [Fact]
+    public async Task RemoteGapPendingMigrationDownRejectsExistingRowsAndKeepsHistory()
+    {
+        var temporary = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await temporary.InitializeAsync();
+            await using var db = temporary.CreateContext();
+            var migrations = db.Database.GetMigrations().ToArray();
+            var previous = migrations.Single(name => name.EndsWith("_AddRemoteGapEpisodes", StringComparison.Ordinal));
+            var graph = await SeedAsync(temporary);
+            await using (var write = temporary.CreateContext())
+            {
+                await RemoteGapNotices.MarkPendingAsync(
+                    write,
+                    new RemoteGapNotices.Observation(graph.DatabaseId, graph.TaskId, graph.Stage, Opened, [graph.TargetId]),
+                    CancellationToken.None);
+            }
+
+            var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
+            var migrator = db.Database.GetService<IMigrator>();
+            var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
+            Assert.Equal(51007, error.Number);
+            Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                DELETE FROM [RemoteGapProjectionPendingTargets];
+                DELETE FROM [RemoteGapProjectionPendings];
+                """);
+            await migrator.MigrateAsync(previous);
+            await migrator.MigrateAsync();
+            Assert.Equal(0, await db.RemoteGapProjectionPendings.CountAsync());
+        }
+        finally
+        {
+            await temporary.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task RemoteGapMigrationDownRejectsExistingRowsAndKeepsHistory()
     {
         var temporary = new PlatformDatabaseSqlServerFixture();
@@ -194,6 +265,12 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
         return await db.NotificationOutbox.CountAsync(item => notificationIds.Contains(item.Id));
     }
 
+    private async Task<int> CountPendingAsync(Guid databaseId)
+    {
+        await using var db = database.CreateContext();
+        return await db.RemoteGapProjectionPendings.CountAsync(item => item.DatabaseId == databaseId);
+    }
+
     private async Task<int> CountOpenAsync(Guid databaseId)
     {
         await using var db = database.CreateContext();
@@ -234,6 +311,16 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
 
     private static Dictionary<Guid, RemoteGapProjection> Unknown(Guid targetId) =>
         new() { [targetId] = RemoteGapProjection.Hold };
+
+    private sealed class ThrowingFactory : IDbContextFactory<PlatformDbContext>
+    {
+        public PlatformDbContext CreateDbContext() =>
+            throw new InvalidOperationException("Password=synthetic-secret;Data Source=synthetic-host");
+
+        public Task<PlatformDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<PlatformDbContext>(
+                new InvalidOperationException("Password=synthetic-secret;Data Source=synthetic-host"));
+    }
 
     private sealed record Graph(
         Guid DatabaseId,

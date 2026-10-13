@@ -63,6 +63,8 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
 
     public DbSet<RemoteGapEpisode> RemoteGapEpisodes => Set<RemoteGapEpisode>();
 
+    public DbSet<RemoteGapProjectionPending> RemoteGapProjectionPendings => Set<RemoteGapProjectionPending>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(PlatformDbContext).Assembly);

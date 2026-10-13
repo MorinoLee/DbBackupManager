@@ -174,7 +174,7 @@ internal sealed partial class BackupPlanExecutionStore(
     public async Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
         string? outcomeReason = null, CancellationToken cancellationToken = default)
     {
-        RemoteGapNotices.Observation? remoteGap = null;
+        Guid? remoteGap = null;
         var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
@@ -214,19 +214,22 @@ internal sealed partial class BackupPlanExecutionStore(
             }
 
             await db.SaveChangesAsync(cancellationToken);
-            await tx.CommitAsync(cancellationToken);
             if (snapshot.StorageTargetId is Guid target)
-                remoteGap = new RemoteGapNotices.Observation(
-                    snapshot.DatabaseId, task.Id, BackupTaskStage.Cleanup, now, [target]);
+                await RemoteGapNotices.MarkPendingAsync(db, new RemoteGapNotices.Observation(
+                    snapshot.DatabaseId, task.Id, BackupTaskStage.Cleanup, now, [target]), cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+            remoteGap = snapshot.DatabaseId;
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
-        if (code == BackupExecutionContractCode.Succeeded && remoteGap is { } observation)
-            await RemoteGapNotices.TryProjectAsync(factory, observation, cancellationToken, logger);
+        if (code == BackupExecutionContractCode.Succeeded && remoteGap is Guid databaseId)
+            await RemoteGapNotices.TryDrainPendingAsync(factory, databaseId, cancellationToken, logger);
         return code;
     }
 
-    public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default) =>
-        _persistence.ExecuteWithStrategyAsync(async db =>
+    public async Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default)
+    {
+        Guid? drainedDatabase = null;
+        var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == taskId, cancellationToken);
@@ -255,8 +258,13 @@ internal sealed partial class BackupPlanExecutionStore(
                 CreateAudit(null, task.Id, "plan.staging.clean", "succeeded", null));
             await db.SaveChangesAsync(cancellationToken);
             await tx.CommitAsync(cancellationToken);
+            drainedDatabase = snapshot.DatabaseId;
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
+        if (code == BackupExecutionContractCode.Succeeded && drainedDatabase is Guid databaseId)
+            await RemoteGapNotices.TryDrainPendingAsync(factory, databaseId, cancellationToken, logger);
+        return code;
+    }
 
     public async Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId, CancellationToken cancellationToken = default)
     {

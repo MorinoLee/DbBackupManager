@@ -23,7 +23,14 @@ internal sealed class PlanLocationRetentionStore(
         RequireDatabase(databaseId);
         RequireUtc(nowUtc, nameof(nowUtc));
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
-        return await PlanLocationRetentionWork.LoadAsync(context, databaseId, nowUtc, cancellationToken);
+        var assessments = await PlanLocationRetentionWork.LoadAsync(context, databaseId, nowUtc, cancellationToken);
+        await RemoteGapNotices.TryDrainPendingAsync(
+            contextFactory,
+            databaseId,
+            cancellationToken,
+            logger,
+            RemoteGapNotices.OpportunisticLockTimeoutMilliseconds);
+        return assessments;
     }
 
     public async Task<PlanStagingRelease> ReadOwnStagingAsync(
@@ -316,7 +323,6 @@ internal sealed class PlanLocationRetentionStore(
             throw new ArgumentException("删除失败必须提供稳定错误码。", nameof(command));
         }
 
-        RemoteGapNotices.Observation? remoteGap = null;
         var result = await ExecuteAsync(work.DatabaseId, async (context, token) =>
         {
             var replay = await context.BackupFileStateChanges.AsNoTracking()
@@ -394,8 +400,10 @@ internal sealed class PlanLocationRetentionStore(
                 && file.StorageTargetId is Guid target
                 && command.Outcome is BackupFileRetentionOutcome.Deleted or BackupFileRetentionOutcome.Missing)
             {
-                remoteGap = new RemoteGapNotices.Observation(
-                    file.DatabaseId, file.TaskId, null, occurredAt, [target]);
+                await RemoteGapNotices.MarkPendingAsync(
+                    context,
+                    new RemoteGapNotices.Observation(file.DatabaseId, file.TaskId, null, occurredAt, [target]),
+                    token);
             }
             var endpoint = await BackupFileRetentionStore.TryCreateEndpointAsync(context, file, false, token);
             // 已删除、缺失和失败都会清掉文件上的租约。返回项沿用领取时的租约标识，避免提交成功后回滚。
@@ -405,8 +413,8 @@ internal sealed class PlanLocationRetentionStore(
                     BackupTaskStoreResultCode.Succeeded,
                     WorkItem(file, endpoint, work.LeaseToken, work.LeaseExpiresAtUtc));
         }, cancellationToken);
-        if (result.Code == BackupTaskStoreResultCode.Succeeded && remoteGap is { } observation)
-            await RemoteGapNotices.TryProjectAsync(contextFactory, observation, cancellationToken, logger);
+        if (result.Code == BackupTaskStoreResultCode.Succeeded)
+            await RemoteGapNotices.TryDrainPendingAsync(contextFactory, work.DatabaseId, cancellationToken, logger);
         return result;
     }
 

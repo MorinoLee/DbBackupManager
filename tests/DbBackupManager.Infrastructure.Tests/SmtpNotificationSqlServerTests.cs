@@ -702,6 +702,8 @@ public sealed class SmtpNotificationSqlServerTests(PlatformDatabaseSqlServerFixt
         await using var context = database.CreateContext();
         await context.Database.ExecuteSqlRawAsync(
             """
+            DELETE FROM [RemoteGapProjectionPendingTargets];
+            DELETE FROM [RemoteGapProjectionPendings];
             DELETE FROM [RemoteGapEpisodes];
             DELETE FROM [NotificationOutbox];
             DELETE FROM [SmtpRecipients];

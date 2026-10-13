@@ -16,7 +16,7 @@ internal sealed partial class BackupPlanExecutionStore
         IVerifiedBackupFileHandle? protectedFile = null, IVerifiedBackupFileHandle? protectedDependency = null,
         CancellationToken cancellationToken = default)
     {
-        RemoteGapNotices.Observation? remoteGap = null;
+        Guid? remoteGap = null;
         var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
@@ -235,14 +235,15 @@ internal sealed partial class BackupPlanExecutionStore
             await db.SaveChangesAsync(cancellationToken);
             if (addedEntries.Length > 0)
                 await PlanLocationRetentionWork.ReleaseSupersededAsync(db, snapshot.DatabaseId, now, cancellationToken);
-            await tx.CommitAsync(cancellationToken);
             if (remoteTargets.Length > 0)
-                remoteGap = new RemoteGapNotices.Observation(
-                    snapshot.DatabaseId, task.Id, stage, now, remoteTargets);
+                await RemoteGapNotices.MarkPendingAsync(db, new RemoteGapNotices.Observation(
+                    snapshot.DatabaseId, task.Id, stage, now, remoteTargets), cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+            remoteGap = snapshot.DatabaseId;
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
-        if (code == BackupExecutionContractCode.Succeeded && remoteGap is { } observation)
-            await RemoteGapNotices.TryProjectAsync(factory, observation, cancellationToken, logger);
+        if (code == BackupExecutionContractCode.Succeeded && remoteGap is Guid databaseId)
+            await RemoteGapNotices.TryDrainPendingAsync(factory, databaseId, cancellationToken, logger);
         return code;
     }
 
