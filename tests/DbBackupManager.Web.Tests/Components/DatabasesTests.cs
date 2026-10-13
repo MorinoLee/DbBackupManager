@@ -78,6 +78,22 @@ public sealed class DatabasesTests : MudBlazorComponentTest
         page.WaitForAssertion(() => Assert.Contains("纳管设置已保存", page.Markup, StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void ManagedUserDatabaseLinksToItsSingleCurrentPlan()
+    {
+        Authenticate();
+        var managedId = _service.Inventory.Databases.Single(database => database.Name == "synthetic-db").Id;
+        _service.Inventory = new ServerInventory(
+            _service.Inventory.Servers,
+            _service.Inventory.Instances,
+            _service.Inventory.Databases.Select(database => database.Id == managedId ? database with { IsManaged = true } : database).ToArray());
+        var page = Render<DatabasesPage>();
+
+        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='open-plan']")));
+        Assert.Equal($"/backup-plans?database={managedId}", page.Find("[data-testid='open-plan']").GetAttribute("href"));
+        Assert.Single(page.FindAll("[data-testid='open-plan']"));
+    }
+
     private void Authenticate()
     {
         SignIn("管理员");

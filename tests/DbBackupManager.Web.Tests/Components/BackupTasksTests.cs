@@ -42,6 +42,10 @@ public sealed class BackupTasksTests : MudBlazorComponentTest
         page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='task-detail']")));
         Assert.Equal(1, _service.LastPage);
         Assert.Contains("待核对", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("完整", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("旧策略任务", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("SQL 未知", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("/backup-plans", page.Markup, StringComparison.Ordinal);
         Assert.Equal($"/backup-tasks/{FakeManagement.TaskId}?page=1&back=%2Fbackup-tasks%3Fpage%3D1",
             page.Find("[data-testid='task-detail']").GetAttribute("href"));
     }

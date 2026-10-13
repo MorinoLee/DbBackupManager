@@ -40,6 +40,13 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
 
         page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='task-summary']")));
         Assert.Contains("外部执行结果尚未确定", page.Markup, StringComparison.Ordinal);
+        var facts = page.Find("[data-testid='task-facts']");
+        Assert.Contains("SQL 执行：未知", facts.TextContent, StringComparison.Ordinal);
+        Assert.Contains("文件校验：未知", facts.TextContent, StringComparison.Ordinal);
+        Assert.Contains("传输：未知", facts.TextContent, StringComparison.Ordinal);
+        Assert.Contains("恢复依赖：未知", facts.TextContent, StringComparison.Ordinal);
+        Assert.Contains("旧策略任务", facts.TextContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("成功", facts.TextContent, StringComparison.Ordinal);
         Assert.Contains("已验证本地副本", page.Markup, StringComparison.Ordinal);
         Assert.Contains("第一次调用", page.Find("[data-testid='task-attempts']").TextContent, StringComparison.Ordinal);
         Assert.Contains("等待 Worker 领取", page.Find("[data-testid='task-history']").TextContent, StringComparison.Ordinal);
@@ -48,6 +55,10 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
         Assert.Contains("远程", files.TextContent, StringComparison.Ordinal);
         Assert.Contains("删除失败", files.TextContent, StringComparison.Ordinal);
         Assert.Contains("主机密钥指纹不匹配", files.TextContent, StringComparison.Ordinal);
+        Assert.Contains("已超出恢复窗口，且不再被恢复依赖需要", files.TextContent, StringComparison.Ordinal);
+        Assert.Contains("远端还没有确认基准完整备份，暂时不能恢复", files.TextContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("outside_window_unneeded", files.TextContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("remote_base_unconfirmed", files.TextContent, StringComparison.Ordinal);
         Assert.DoesNotContain("HostKeyMismatch", files.TextContent, StringComparison.Ordinal);
         Assert.Empty(page.FindAll("[data-testid='delete-file']"));
         var panel = page.Find("[data-testid='reconciliation-panel']");
@@ -556,10 +567,18 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
             [
                 new BackupFileSummary(TaskId, Guid.NewGuid(), "合成库", "测试实例", "测试备份", @"D:\Synthetic\backup.bak",
                     2048, DateTimeOffset.UtcNow, 7, Guid.NewGuid(), "Local", "Smb", null, "Available", null, null,
-                    @"\\synthetic\share\backup.bak"),
+                    @"\\synthetic\share\backup.bak")
+                {
+                    BackupSetId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+                    RetentionReason = "outside_window_unneeded",
+                },
                 new BackupFileSummary(TaskId, Guid.NewGuid(), "合成库", "测试实例", "测试备份", "", 2048, DateTimeOffset.UtcNow,
                     14, Guid.NewGuid(), "Remote", "Sftp", "演示目标", "DeleteFailed", DateTimeOffset.UtcNow,
-                    "HostKeyMismatch", "/synthetic/backup.bak"),
+                    "HostKeyMismatch", "/synthetic/backup.bak")
+                {
+                    DifferentialBaseBackupSetId = Guid.Parse("11111111-2222-3333-4444-555555555555"),
+                    RetentionReason = "remote_base_unconfirmed",
+                },
             ]);
 
         public int DetailCalls;

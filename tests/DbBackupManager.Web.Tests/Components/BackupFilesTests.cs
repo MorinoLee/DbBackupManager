@@ -43,6 +43,10 @@ public sealed class BackupFilesTests : MudBlazorComponentTest
         Assert.Contains("主机密钥指纹不匹配", page.Markup, StringComparison.Ordinal);
         Assert.DoesNotContain("HostKeyMismatch", page.Markup, StringComparison.Ordinal);
         Assert.Contains("本页不提供文件删除操作", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("已超出恢复窗口，且不再被恢复依赖需要", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("远端还没有确认基准完整备份，暂时不能恢复", page.Markup, StringComparison.Ordinal);
+        Assert.DoesNotContain("outside_window_unneeded", page.Markup, StringComparison.Ordinal);
+        Assert.DoesNotContain("remote_base_unconfirmed", page.Markup, StringComparison.Ordinal);
         Assert.Empty(page.FindAll("[data-testid='delete-file']"));
         page.Find("[data-testid='next-page']").Click();
         Assert.Contains("page=1", navigation.Uri, StringComparison.Ordinal);

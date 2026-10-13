@@ -38,17 +38,11 @@
                              Icon="@Icons.Material.Outlined.Backup"
                              @bind-Expanded="_backupGroupExpanded"
                              data-testid="nav-group-backup">
-                    <MudNavLink Href="/backup-policies"
+                    <MudNavLink Href="/backup-plans"
                                 Match="NavLinkMatch.Prefix"
-                                Icon="@Icons.Material.Outlined.Tune"
-                                data-testid="nav-link-backup-policies">
-                        备份配置
-                    </MudNavLink>
-                    <MudNavLink Href="/scheduled-backup-policies"
-                                Match="NavLinkMatch.Prefix"
-                                Icon="@Icons.Material.Outlined.Schedule"
-                                data-testid="nav-link-scheduled-backup-policies">
-                        计划备份
+                                Icon="@Icons.Material.Outlined.EventAvailable"
+                                data-testid="nav-link-backup-plans">
+                        备份计划
                     </MudNavLink>
                     <MudNavLink Href="/storage-targets"
                                 Match="NavLinkMatch.Prefix"

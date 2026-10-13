@@ -46,7 +46,7 @@
                         <MudText>从未登记验证副本：@model.NeverVerified</MudText>
                         <MudLink Href="/backup-policies">未启用备份配置：@model.WithoutEnabledPolicy</MudLink>
                     </MudStack>
-                    <MudText Typo="Typo.caption">按当前纳管数据库统计；“未启用配置”可与另外两项重叠。已登记副本不代表文件现在仍存在或已完成恢复演练。</MudText>
+                    <MudText Typo="Typo.caption">按当前纳管数据库统计；“未启用配置”仍按旧备份配置计数，可与另外两项重叠，不代表统一计划覆盖。已登记副本不代表文件现在仍存在或已完成恢复演练。</MudText>
                     @if (model.ManagedDatabases == 0) { <MudButton Href="/servers" Color="Color.Primary" data-testid="dashboard-add-server">添加服务器并纳管数据库</MudButton> }
                 </MudPaper>
                 <MudGrid Spacing="3">
@@ -67,13 +67,14 @@
                     <MudTable T="BackupFileSummary" Items="model.RecentFiles" Dense="true" Breakpoint="Breakpoint.Sm" Elevation="0">
                         <HeaderContent><MudTh>数据库 / 实例</MudTh><MudTh>验证时间</MudTh><MudTh>大小</MudTh><MudTh>任务</MudTh></HeaderContent>
                         <RowTemplate><MudTd DataLabel="数据库 / 实例">@context.DatabaseName / @context.InstanceName</MudTd><MudTd DataLabel="验证时间">@Formatters.LocalDateTime(context.VerifiedAtUtc)</MudTd><MudTd DataLabel="大小">@Formatters.Bytes(context.LengthBytes)</MudTd><MudTd DataLabel="任务"><MudLink Href="@($"/backup-tasks/{context.TaskId}")">查看</MudLink></MudTd></RowTemplate>
-                        <NoRecordsContent><MudText Class="pa-4">尚无已验证副本。请从备份配置发起手动备份。</MudText></NoRecordsContent>
+                        <NoRecordsContent><MudText Class="pa-4">尚无已验证副本。备份计划保存后不会自动开始执行。</MudText></NoRecordsContent>
                     </MudTable>
                     <MudLink Href="/backup-files">查看全部备份文件</MudLink>
                 </MudPaper>
                 <MudStack Row="true" Wrap="Wrap.Wrap" data-testid="dashboard-shortcuts">
                     <MudButton Href="/servers" Variant="Variant.Outlined">服务器与实例</MudButton>
                     <MudButton Href="/storage-targets" Variant="Variant.Outlined">存储目标</MudButton>
+                    <MudButton Href="/backup-plans" Variant="Variant.Outlined">备份计划</MudButton>
                     <MudButton Href="/backup-policies" Variant="Variant.Outlined">备份配置</MudButton>
                     <MudButton Href="/backup-tasks" Variant="Variant.Outlined">任务记录</MudButton>
                     <MudButton Href="/backup-files" Variant="Variant.Outlined">备份文件</MudButton>

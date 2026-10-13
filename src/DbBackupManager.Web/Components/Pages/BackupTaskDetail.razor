@@ -10,6 +10,7 @@
 @using DbBackupManager.Application.Identity
 @using DbBackupManager.Web.Authentication
 @using DbBackupManager.Web.SqlCredentials
+@using DbBackupManager.Web.BackupPlans
 @using DbBackupManager.Web.BackupTasks
 @using Microsoft.AspNetCore.Authorization
 @inject IBackupManagementService Management
@@ -74,6 +75,14 @@
                             <MudText Typo="Typo.h6" HtmlTag="h2">@_detail.Task.DatabaseName / @_detail.Task.PolicyName</MudText>
                         </MudStack>
                         <MudText Typo="Typo.body2">当前阶段：@BackupPresentation.Stage(_detail.Task.Stage)</MudText>
+                        <section data-testid="task-facts">
+                            <MudText Typo="Typo.body2">备份类型：@BackupPlanPresentation.BackupType(_detail.Task.BackupType)</MudText>
+                            <MudText Typo="Typo.body2">计划版本：@(_detail.Task.PlanVersionNumber is int version ? $"v{version}" : "旧策略任务")</MudText>
+                            <MudText Typo="Typo.body2">SQL 执行：@BackupPlanPresentation.Fact(_detail.Task.SqlStatus)</MudText>
+                            <MudText Typo="Typo.body2">文件校验：@BackupPlanPresentation.Fact(_detail.Task.FileVerifyStatus)</MudText>
+                            <MudText Typo="Typo.body2">传输：@BackupPlanPresentation.Fact(_detail.Task.TransferStatus)</MudText>
+                            <MudText Typo="Typo.body2">恢复依赖：@BackupPlanPresentation.Fact(_detail.Task.DependencyStatus)</MudText>
+                        </section>
                         <MudText Typo="Typo.body2">创建时间：@Formatters.LocalDateTime(_detail.Task.CreatedAtUtc) · 完成时间：@Formatters.LocalDateTime(_detail.Task.CompletedAtUtc) · 副本大小：@Formatters.Bytes(_detail.Task.FileLength)</MudText>
                         @if (_detail.Task.CancellationRequested && _detail.Task.Status is "Pending" or "Running")
                         {
@@ -157,13 +166,16 @@
                 <section data-testid="task-files">
                     <MudText Typo="Typo.h6" HtmlTag="h2" Class="mb-2">登记副本</MudText>
                     <MudTable T="BackupFileSummary" Items="_detail.Files" Dense="true" Breakpoint="Breakpoint.Sm" Elevation="1">
-                        <HeaderContent><MudTh>位置</MudTh><MudTh>协议 / 目标</MudTh><MudTh>状态</MudTh><MudTh>大小</MudTh><MudTh>验证时间</MudTh><MudTh>保留天数</MudTh></HeaderContent>
+                        <HeaderContent><MudTh>位置</MudTh><MudTh>协议 / 目标</MudTh><MudTh>备份集</MudTh><MudTh>差异基线</MudTh><MudTh>保留原因</MudTh><MudTh>状态</MudTh><MudTh>大小</MudTh><MudTh>验证时间</MudTh><MudTh>保留天数</MudTh></HeaderContent>
                         <RowTemplate Context="file">
                             <MudTd DataLabel="位置">@BackupFilePresentation.Location(file.Location)</MudTd>
                             <MudTd DataLabel="协议 / 目标">
                                 @BackupFilePresentation.Protocol(file.Protocol) · @(file.TargetDisplayName ?? "—")
                                 <MudText Typo="Typo.caption" Class="mud-text-secondary">@file.Path</MudText>
                             </MudTd>
+                            <MudTd DataLabel="备份集">@(file.BackupSetId?.ToString("N") ?? "—")</MudTd>
+                            <MudTd DataLabel="差异基线">@(file.DifferentialBaseBackupSetId?.ToString("N") ?? "—")</MudTd>
+                            <MudTd DataLabel="保留原因" data-testid="task-file-retention">@BackupPlanPresentation.RetentionReason(file.RetentionReason)</MudTd>
                             <MudTd DataLabel="状态">
                                 @BackupFilePresentation.Status(file.Status)
                                 @if (BackupFilePresentation.StatusNote(file.Status, file.ErrorCode) is { } note)

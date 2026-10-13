@@ -1,0 +1,183 @@
+@*
+    统一备份计划编辑弹窗。不提供日志模式；保存失败时保持打开并保留输入。
+*@
+@using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Application.StorageTargets
+
+<EditForm Model="Model" OnValidSubmit="SubmitAsync">
+    <DataAnnotationsValidator />
+    <MudDialog>
+        <TitleContent>
+            <MudText Typo="Typo.h6">@Title</MudText>
+        </TitleContent>
+        <DialogContent>
+            <MudStack Spacing="2">
+                @if (_error is not null)
+                {
+                    <MudAlert Severity="Severity.Error" role="alert" data-testid="dialog-error">@_error</MudAlert>
+                }
+                <MudTextField T="string" Label="计划名称" @bind-Value="Model.Name" For="@(() => Model.Name)" InputId="backup-plan-name" data-testid="plan-name" Disabled="_saving" />
+                <MudSelect T="Guid" Label="数据库" @bind-Value="Model.DatabaseId" Disabled="@(_saving || IsEdit || LockDatabase)" data-testid="plan-database">
+                    <MudSelectItem Value="Guid.Empty" Disabled="true">请选择数据库</MudSelectItem>
+                    @foreach (var database in Databases)
+                    {
+                        <MudSelectItem Value="database.Id">@database.Label</MudSelectItem>
+                    }
+                    @if (IsEdit && !Databases.Any(item => item.Id == Model.DatabaseId))
+                    {
+                        <MudSelectItem Value="Model.DatabaseId">原数据库（当前不可用）</MudSelectItem>
+                    }
+                </MudSelect>
+                <MudSelect T="int" Label="备份模式" @bind-Value="Model.Mode" Disabled="_saving" data-testid="plan-mode">
+                    <MudSelectItem Value="1">仅完整备份</MudSelectItem>
+                    <MudSelectItem Value="2">完整备份 + 差异备份</MudSelectItem>
+                </MudSelect>
+                <MudText Typo="Typo.subtitle2">完整备份时间</MudText>
+                <MudSelect T="int" Label="完整备份频率" @bind-Value="Model.FullScheduleType" Disabled="_saving" data-testid="full-schedule-type">
+                    <MudSelectItem Value="1">每天</MudSelectItem>
+                    <MudSelectItem Value="2">每周</MudSelectItem>
+                </MudSelect>
+                <MudTimePicker Label="完整备份本地时间" @bind-Time="Model.FullLocalTime" Disabled="_saving" Editable="true" />
+                @if (Model.FullScheduleType == 2)
+                {
+                    <MudStack Row="true" Wrap="Wrap.Wrap">
+                        <MudCheckBox T="bool" @bind-Value="Model.FullMonday" Label="一" Disabled="_saving" data-testid="full-weekday-mon" />
+                        <MudCheckBox T="bool" @bind-Value="Model.FullTuesday" Label="二" Disabled="_saving" />
+                        <MudCheckBox T="bool" @bind-Value="Model.FullWednesday" Label="三" Disabled="_saving" />
+                        <MudCheckBox T="bool" @bind-Value="Model.FullThursday" Label="四" Disabled="_saving" />
+                        <MudCheckBox T="bool" @bind-Value="Model.FullFriday" Label="五" Disabled="_saving" />
+                        <MudCheckBox T="bool" @bind-Value="Model.FullSaturday" Label="六" Disabled="_saving" />
+                        <MudCheckBox T="bool" @bind-Value="Model.FullSunday" Label="日" Disabled="_saving" />
+                    </MudStack>
+                }
+                @if (Model.Mode == 2)
+                {
+                    <MudText Typo="Typo.subtitle2">差异备份时间</MudText>
+                    <MudSelect T="int" Label="差异备份频率" @bind-Value="Model.DifferentialScheduleType" Disabled="_saving" data-testid="diff-schedule-type">
+                        <MudSelectItem Value="1">每天</MudSelectItem>
+                        <MudSelectItem Value="2">每周</MudSelectItem>
+                    </MudSelect>
+                    <MudTimePicker Label="差异备份本地时间" @bind-Time="Model.DifferentialLocalTime" Disabled="_saving" Editable="true" />
+                    @if (Model.DifferentialScheduleType == 2)
+                    {
+                        <MudStack Row="true" Wrap="Wrap.Wrap">
+                            <MudCheckBox T="bool" @bind-Value="Model.DifferentialMonday" Label="一" Disabled="_saving" data-testid="diff-weekday-mon" />
+                            <MudCheckBox T="bool" @bind-Value="Model.DifferentialTuesday" Label="二" Disabled="_saving" />
+                            <MudCheckBox T="bool" @bind-Value="Model.DifferentialWednesday" Label="三" Disabled="_saving" />
+                            <MudCheckBox T="bool" @bind-Value="Model.DifferentialThursday" Label="四" Disabled="_saving" />
+                            <MudCheckBox T="bool" @bind-Value="Model.DifferentialFriday" Label="五" Disabled="_saving" />
+                            <MudCheckBox T="bool" @bind-Value="Model.DifferentialSaturday" Label="六" Disabled="_saving" />
+                            <MudCheckBox T="bool" @bind-Value="Model.DifferentialSunday" Label="日" Disabled="_saving" />
+                        </MudStack>
+                    }
+                }
+                <MudSelect T="string" Label="时区" @bind-Value="Model.TimeZoneId" Disabled="_saving" data-testid="plan-time-zone">
+                    @foreach (var zone in TimeZones)
+                    {
+                        <MudSelectItem Value="@zone.Id">@zone.DisplayName</MudSelectItem>
+                    }
+                    @if (TimeZones.All(zone => zone.Id != Model.TimeZoneId))
+                    {
+                        <MudSelectItem Value="@Model.TimeZoneId">@Model.TimeZoneId</MudSelectItem>
+                    }
+                </MudSelect>
+                <MudSelect T="int" Label="存储模式" @bind-Value="Model.StorageMode" Disabled="_saving" data-testid="plan-storage-mode">
+                    <MudSelectItem Value="1">仅本地</MudSelectItem>
+                    <MudSelectItem Value="2">本地加远程</MudSelectItem>
+                    <MudSelectItem Value="3">仅远程</MudSelectItem>
+                </MudSelect>
+                @if (Model.StorageMode != 1)
+                {
+                    <MudSelect T="Guid" Label="远程存储目标" @bind-Value="Model.StorageTargetId" Disabled="_saving">
+                        <MudSelectItem Value="Guid.Empty" Disabled="true">请选择存储目标</MudSelectItem>
+                        @foreach (var target in Targets)
+                        {
+                            <MudSelectItem Value="target.Id">@target.Settings.Name @(target.Settings.IsEnabled ? "" : "（已停用）")</MudSelectItem>
+                        }
+                    </MudSelect>
+                    @if (Targets.Count == 0)
+                    {
+                        <MudAlert Severity="Severity.Info" data-testid="no-storage-targets">
+                            请先在<MudLink Href="/storage-targets">“存储目标”</MudLink>添加 SMB 或 SFTP 目标。
+                        </MudAlert>
+                    }
+                    <MudNumericField T="int" Label="远端恢复窗口（天）" @bind-Value="Model.RemoteRecoveryWindowDays" Min="1" Max="36500" Disabled="_saving" />
+                    <MudNumericField T="int" Label="传输超时（分钟）" @bind-Value="Model.TransferMinutes" Min="1" Max="1440" Disabled="_saving" />
+                }
+                @if (Model.StorageMode != 3)
+                {
+                    <MudNumericField T="int" Label="本地恢复窗口（天）" @bind-Value="Model.LocalRecoveryWindowDays" Min="1" Max="36500" Disabled="_saving" />
+                }
+                <MudNumericField T="int" Label="备份超时（分钟）" @bind-Value="Model.BackupMinutes" Min="1" Max="1440" Disabled="_saving" />
+                <MudNumericField T="int" Label="校验超时（分钟）" @bind-Value="Model.VerifyMinutes" Min="1" Max="1440" Disabled="_saving" />
+                <MudCheckBox T="bool" Label="备份时计算 CHECKSUM" @bind-Value="Model.UseChecksum" Disabled="_saving" data-testid="plan-checksum" />
+                <MudCheckBox T="bool" Label="启用备份压缩（目标实例需要支持）" @bind-Value="Model.UseCompression" Disabled="_saving" />
+                <MudCheckBox T="bool" Label="暂停此计划（暂停后仍是该库的当前计划）" @bind-Value="Model.IsPaused" Disabled="_saving" data-testid="plan-paused" />
+            </MudStack>
+        </DialogContent>
+        <DialogActions>
+            <MudButton OnClick="Cancel" Disabled="_saving">取消</MudButton>
+            <MudButton ButtonType="ButtonType.Submit"
+                       Variant="Variant.Filled"
+                       Color="Color.Primary"
+                       Disabled="_saving"
+                       data-testid="dialog-save">
+                @(_saving ? "保存中…" : "保存")
+            </MudButton>
+        </DialogActions>
+    </MudDialog>
+</EditForm>
+
+@code {
+    private bool _saving;
+    private string? _error;
+    private static readonly IReadOnlyList<TimeZoneInfo> TimeZones = TimeZoneInfo.GetSystemTimeZones();
+
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired]
+    public BackupPlanFormModel Model { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public IReadOnlyList<BackupDatabaseChoice> Databases { get; set; } = [];
+
+    [Parameter]
+    public IReadOnlyList<StorageTargetItem> Targets { get; set; } = [];
+
+    [Parameter]
+    public bool IsEdit { get; set; }
+
+    [Parameter]
+    public bool LockDatabase { get; set; }
+
+    [Parameter, EditorRequired]
+    public Func<BackupPlanFormModel, Task<string?>> OnSave { get; set; } = default!;
+
+    private async Task SubmitAsync()
+    {
+        if (_saving) return;
+        _saving = true;
+        _error = null;
+        try
+        {
+            var error = await OnSave(Model);
+            if (error is null)
+            {
+                MudDialog.Close(DialogResult.Ok(true));
+                return;
+            }
+
+            _error = error;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void Cancel() => MudDialog.Cancel();
+}

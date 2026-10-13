@@ -84,8 +84,23 @@ public sealed record BackupRecoverySummary(
     bool HasCurrentPlan,
     IReadOnlyList<BackupLocationRecovery> Locations);
 
+public sealed record BackupPlanListItem(
+    Guid Id,
+    Guid DatabaseId,
+    string Name,
+    bool IsPaused,
+    string Version,
+    int VersionNumber,
+    int Mode,
+    int StorageMode,
+    bool UseChecksum);
+
 public interface IBackupPlanCatalogService
 {
+    Task<BackupPlanCatalogResult<IReadOnlyList<BackupPlanListItem>>> ListAsync(
+        AdminSession actor,
+        CancellationToken cancellationToken = default);
+
     Task<BackupPlanCatalogResult<BackupPlanView>> GetByDatabaseAsync(
         AdminSession actor,
         Guid databaseId,

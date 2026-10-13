@@ -54,6 +54,41 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
     }
 
     [Fact]
+    public async Task PageFileWithHistoryKeepsTheFullSurfaceReason()
+    {
+        var chain = await SeedChainAsync();
+        var now = DateTimeOffset.UtcNow;
+        await using var db = database.CreateContext();
+        var surface = await PlanLocationRetentionWork.LoadAsync(db, chain.DatabaseId, now, CancellationToken.None);
+        var local = surface.Single(item => item.Location == BackupFileLocation.Local);
+        var fileId = chain.LocalFileId(40);
+        var expected = Reason(local, fileId);
+        Assert.Equal(RecoveryProtectionReason.OutsideWindowUnneeded, expected);
+
+        var page = await PlanLocationRetentionWork.ReasonsForFilesAsync(db, [fileId], now, CancellationToken.None);
+        Assert.Equal(expected, Assert.Contains(fileId, page));
+        Assert.DoesNotContain(chain.LocalFileId(10), page.Keys);
+        Assert.DoesNotContain(chain.LocalFileId(1), page.Keys);
+    }
+
+    [Fact]
+    public async Task PageStagingFileWithHistoryKeepsTheFullSurfaceReason()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly);
+        var now = DateTimeOffset.UtcNow;
+        await using var db = database.CreateContext();
+        var surface = await PlanLocationRetentionWork.LoadAsync(db, chain.DatabaseId, now, CancellationToken.None);
+        var local = surface.Single(item => item.Location == BackupFileLocation.Local);
+        var fileId = chain.LocalFileId(40);
+        var expected = Reason(local, fileId);
+        Assert.Equal(PlanLocationRecovery.RemoteStagingReleasable, expected);
+
+        var page = await PlanLocationRetentionWork.ReasonsForFilesAsync(db, [fileId], now, CancellationToken.None);
+        Assert.Equal(expected, Assert.Contains(fileId, page));
+        Assert.Single(page);
+    }
+
+    [Fact]
     public async Task StaleLeaseCannotCommitDelete()
     {
         var chain = await SeedChainAsync();

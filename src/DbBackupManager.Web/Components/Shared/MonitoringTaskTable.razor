@@ -1,9 +1,11 @@
 @using DbBackupManager.Application.BackupTasks
+@using DbBackupManager.Web.BackupPlans
 @using DbBackupManager.Web.BackupTasks
 <MudTable T="BackupTaskSummary" Items="Items" Dense="true" Hover="true" Breakpoint="Breakpoint.Sm" Elevation="0">
-    <HeaderContent><MudTh>数据库 / 配置</MudTh><MudTh>状态 / 阶段</MudTh><MudTh>创建时间</MudTh><MudTh>详情</MudTh></HeaderContent>
+    <HeaderContent><MudTh>数据库 / 配置</MudTh><MudTh>类型</MudTh><MudTh>状态 / 阶段</MudTh><MudTh>创建时间</MudTh><MudTh>详情</MudTh></HeaderContent>
     <RowTemplate>
         <MudTd DataLabel="数据库 / 配置"><span class="monitoring-name" title="@context.DatabaseName">@context.DatabaseName</span><span class="monitoring-name" title="@context.PolicyName">@context.PolicyName</span></MudTd>
+        <MudTd DataLabel="类型">@BackupPlanPresentation.BackupType(context.BackupType)</MudTd>
         <MudTd DataLabel="状态 / 阶段"><div><TaskStatusChip Status="@context.Status" /><div>@BackupPresentation.Stage(context.Stage)</div>
             @if (context.ErrorCode is not null) { <MudText Typo="Typo.caption">@BackupPresentation.FailureSummary(context.ErrorCode)</MudText> }
         </div></MudTd>

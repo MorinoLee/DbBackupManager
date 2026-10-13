@@ -210,6 +210,33 @@ public sealed class BackupFileRetentionScopeTests
         Assert.DoesNotContain(Guid.NewGuid(), reasons.Keys);
     }
 
+    [Fact]
+    public void OnlyFilesWithProvenLocationGraphKeepWindowReasons()
+    {
+        var proven = Guid.NewGuid();
+        var unproven = Guid.NewGuid();
+        var assessments = new[]
+        {
+            new PlanLocationAssessment(
+                BackupFileLocation.Local,
+                null,
+                7,
+                LocationRecoveryConclusion.RestorableWindowSatisfied,
+                [
+                    new PlanCopyRetentionDecision(proven, Guid.NewGuid(), RecoveryWindowVerdict.Deletable, RecoveryProtectionReason.OutsideWindowUnneeded),
+                    new PlanCopyRetentionDecision(unproven, Guid.NewGuid(), RecoveryWindowVerdict.Deletable, RecoveryProtectionReason.OutsideWindowUnneeded),
+                ]),
+        };
+        var reasons = BackupFileRetentionScope.Select(
+            [proven, unproven],
+            assessments,
+            new HashSet<Guid> { proven });
+        Assert.Equal(RecoveryProtectionReason.OutsideWindowUnneeded, reasons[proven]);
+        Assert.Equal(RecoveryProtectionReason.WindowUnknown, reasons[unproven]);
+        Assert.True(BackupFileRetentionScope.DependsOnLocationGraph(RecoveryProtectionReason.OutsideWindowUnneeded));
+        Assert.False(BackupFileRetentionScope.DependsOnLocationGraph(RecoveryProtectionReason.WindowUnknown));
+    }
+
     private static PlanLocationAssessment[] Assessments(Guid fileId, RecoveryWindowVerdict verdict, string reason) =>
     [
         new(
