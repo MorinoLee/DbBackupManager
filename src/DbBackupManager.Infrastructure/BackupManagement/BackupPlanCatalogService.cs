@@ -145,6 +145,7 @@ internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbConte
                     }
                     else
                     {
+                        // 平台上下文默认不跟踪。不显式跟踪时，暂停和改名只留在内存，行版本不会变化。
                         plan = await db.BackupPlans.AsTracking().Include(item => item.Versions)
                                 .SingleOrDefaultAsync(item => item.Id == planId, cancellationToken)
                             ?? throw new Rejected(BackupPlanCatalogCode.NotFound);
