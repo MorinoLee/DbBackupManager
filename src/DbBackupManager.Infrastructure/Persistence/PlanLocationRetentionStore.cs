@@ -6,10 +6,13 @@ using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Entities;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
-internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbContext> contextFactory)
+internal sealed class PlanLocationRetentionStore(
+    IDbContextFactory<PlatformDbContext> contextFactory,
+    ILogger<PlanLocationRetentionStore>? logger = null)
     : IPlanLocationRetentionStore
 {
     public async Task<IReadOnlyList<PlanLocationAssessment>> AssessAsync(
@@ -290,7 +293,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
         }, cancellationToken);
     }
 
-    public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> CommitAsync(
+    public async Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> CommitAsync(
         BackupFileRetentionWorkItem work,
         BackupFileRetentionCommitCommand command,
         CancellationToken cancellationToken = default)
@@ -313,7 +316,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
             throw new ArgumentException("删除失败必须提供稳定错误码。", nameof(command));
         }
 
-        return ExecuteAsync(work.DatabaseId, async (context, token) =>
+        var result = await ExecuteAsync(work.DatabaseId, async (context, token) =>
         {
             var replay = await context.BackupFileStateChanges.AsNoTracking()
                 .SingleOrDefaultAsync(change => change.MutationId == command.MutationId, token);
@@ -383,7 +386,18 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
 
             context.BackupFileStateChanges.Add(Change(command.MutationId, file, from, file.Status, Reason(command.Outcome), occurredAt));
             context.AuditRecords.Add(Audit(file.Id, "backup.file.plan_retention.commit", Reason(command.Outcome)));
+            NotificationOutboxWriter.EnqueueRetention(
+                context, command.MutationId, file.Id, file.TaskId, command.Outcome, occurredAt, command.ErrorCode);
             await context.SaveChangesAsync(token);
+            if (file.Location == BackupFileLocation.Remote
+                && file.StorageTargetId is Guid target
+                && command.Outcome is BackupFileRetentionOutcome.Deleted or BackupFileRetentionOutcome.Missing)
+            {
+                await RemoteGapNotices.MarkPendingAsync(
+                    context,
+                    new RemoteGapNotices.Observation(file.DatabaseId, file.TaskId, null, occurredAt, [target]),
+                    token);
+            }
             var endpoint = await BackupFileRetentionStore.TryCreateEndpointAsync(context, file, false, token);
             // 已删除、缺失和失败都会清掉文件上的租约。返回项沿用领取时的租约标识，避免提交成功后回滚。
             return endpoint is null
@@ -392,6 +406,9 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
                     BackupTaskStoreResultCode.Succeeded,
                     WorkItem(file, endpoint, work.LeaseToken, work.LeaseExpiresAtUtc));
         }, cancellationToken);
+        if (result.Code == BackupTaskStoreResultCode.Succeeded)
+            await RemoteGapNotices.TryDrainPendingAsync(contextFactory, work.DatabaseId, cancellationToken, logger);
+        return result;
     }
 
     public Task<BackupTaskStoreResult<BackupFileRetentionWorkItem>> ReadExpiredProtectedAsync(
@@ -542,6 +559,7 @@ internal sealed class PlanLocationRetentionStore(IDbContextFactory<PlatformDbCon
         }
         catch (Exception exception) when (IsDeadlock(exception))
         {
+            // 执行策略已经把 1205 的整段事务重试过。这里只接住耗尽后的失败，事务已回滚。
             return new BackupTaskStoreResult<BackupFileRetentionWorkItem>(BackupTaskStoreResultCode.DatabaseBlocked);
         }
         catch (DbUpdateException)

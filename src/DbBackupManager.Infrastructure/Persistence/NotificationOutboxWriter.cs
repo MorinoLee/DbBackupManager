@@ -1,4 +1,5 @@
 using DbBackupManager.Application.BackupTasks;
+using DbBackupManager.Application.Notifications;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Notifications;
 
@@ -47,12 +48,7 @@ internal static class NotificationOutboxWriter
         DateTimeOffset occurredAtUtc,
         string? errorCode)
     {
-        var type = outcome switch
-        {
-            BackupReconciliationOutcome.Failed => NotificationType.TaskFailed,
-            BackupReconciliationOutcome.Inconclusive => NotificationType.TaskIndeterminate,
-            _ => (NotificationType?)null,
-        };
+        var type = PlanNotificationRules.ForReconciliation(outcome);
         if (type is null)
         {
             return;
@@ -120,6 +116,32 @@ internal static class NotificationOutboxWriter
             string.IsNullOrWhiteSpace(errorCode) ? Reason(type.Value) : errorCode);
     }
 
+    public static void EnqueuePlanOutcome(
+        PlatformDbContext context,
+        Guid mutationId,
+        Guid taskId,
+        BackupTaskStage? stage,
+        BackupTaskStatus status,
+        DateTimeOffset occurredAtUtc,
+        string? errorCode)
+    {
+        if (PlanNotificationRules.ForCommittedTask(status) is not { } type || stage is null)
+        {
+            return;
+        }
+
+        TryAdd(
+            context,
+            mutationId,
+            type,
+            NotificationSourceKind.BackupTask,
+            taskId,
+            taskId,
+            stage,
+            occurredAtUtc,
+            string.IsNullOrWhiteSpace(errorCode) ? PlanNotificationRules.Fallback(type) : errorCode);
+    }
+
     public static void EnqueueExternalMissing(
         PlatformDbContext context,
         Guid mutationId,
@@ -166,13 +188,5 @@ internal static class NotificationOutboxWriter
         return true;
     }
 
-    private static string Reason(NotificationType type) => type switch
-    {
-        NotificationType.TaskFailed => "stage.confirmed_failed",
-        NotificationType.TaskIndeterminate => "stage.indeterminate",
-        NotificationType.RetentionDeleteFailed => "file.delete_failed",
-        NotificationType.RetentionMissing => "file.missing",
-        NotificationType.AdminTest => "smtp.test",
-        _ => "notification.unknown",
-    };
+    private static string Reason(NotificationType type) => PlanNotificationRules.Fallback(type);
 }

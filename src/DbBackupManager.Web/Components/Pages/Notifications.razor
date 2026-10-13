@@ -21,7 +21,7 @@
     <Authorized Context="authState">
         <MudStack Spacing="3">
             <PageHeader Title="通知设置"
-                        Description="配置全局 SMTP 主机、安全模式、可选凭据和收件人。测试通知只写入待发送队列，由独立 Worker 投递；本页不会直接发信。">
+                        Description="配置全局 SMTP 主机、安全模式、可选凭据和收件人。统一计划的明确失败、结果未知和远端暂时无法恢复会写入待发送队列，由独立 Worker 投递。结果未知保持待核对。本页不会直接发信。">
                 <Actions>
                     @if (!_requiresLogin)
                     {

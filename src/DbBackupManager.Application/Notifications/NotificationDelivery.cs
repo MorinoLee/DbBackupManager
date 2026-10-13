@@ -185,7 +185,13 @@ public static class NotificationMessageFormatter
     public static string Subject(NotificationSendWorkItem work)
     {
         ArgumentNullException.ThrowIfNull(work);
-        return work.Type == NotificationType.AdminTest ? "备份通知测试" : "备份失败通知";
+        return work.Type switch
+        {
+            NotificationType.AdminTest => "备份通知测试",
+            NotificationType.TaskIndeterminate => "备份结果未知",
+            NotificationType.RemoteUnrecoverable => "远端暂时无法恢复",
+            _ => "备份失败通知",
+        };
     }
 
     public static string Body(NotificationSendWorkItem work)

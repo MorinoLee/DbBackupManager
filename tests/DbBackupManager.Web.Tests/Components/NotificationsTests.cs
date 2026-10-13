@@ -34,6 +34,9 @@ public sealed class NotificationsTests : MudBlazorComponentTest
         Authenticate();
         var page = Render<NotificationsPage>();
         page.WaitForAssertion(() => Assert.Contains("尚未保存 SMTP 设置", page.Markup, StringComparison.Ordinal));
+        Assert.Contains("远端暂时无法恢复", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("结果未知", page.Markup, StringComparison.Ordinal);
+        Assert.DoesNotContain("建议开启", page.Markup, StringComparison.Ordinal);
         Assert.Contains("暂无收件人", page.Markup, StringComparison.Ordinal);
         Assert.Contains("未设置凭据", page.Markup, StringComparison.Ordinal);
         Assert.True(string.IsNullOrEmpty(page.Find("#smtp-host").GetAttribute("value")));

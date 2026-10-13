@@ -182,6 +182,27 @@ public sealed class SmtpNotificationTests
             OccurredAt,
             "smtp.test");
         Assert.Equal(NotificationSourceKind.AdminRequest, test.SourceKind);
+        var remote = new NotificationOutbox(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            NotificationType.RemoteUnrecoverable,
+            NotificationSourceKind.BackupTask,
+            taskId,
+            taskId,
+            BackupTaskStage.Cleanup,
+            OccurredAt,
+            "remote_base_unconfirmed");
+        Assert.Equal(NotificationType.RemoteUnrecoverable, remote.Type);
+        Assert.Throws<ArgumentException>(() => new NotificationOutbox(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            NotificationType.RemoteUnrecoverable,
+            NotificationSourceKind.BackupTask,
+            taskId,
+            taskId,
+            null,
+            OccurredAt,
+            "remote_base_unconfirmed"));
         Assert.Throws<ArgumentException>(() => new NotificationOutbox(
             Guid.NewGuid(),
             Guid.NewGuid(),

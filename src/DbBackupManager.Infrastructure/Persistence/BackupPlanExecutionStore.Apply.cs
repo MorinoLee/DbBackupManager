@@ -12,10 +12,12 @@ namespace DbBackupManager.Infrastructure.Persistence;
 
 internal sealed partial class BackupPlanExecutionStore
 {
-    public Task<BackupExecutionContractCode> ApplyAsync(LeaseHandle lease, ReserveBackupExecutionOperation identity,
+    public async Task<BackupExecutionContractCode> ApplyAsync(LeaseHandle lease, ReserveBackupExecutionOperation identity,
         IVerifiedBackupFileHandle? protectedFile = null, IVerifiedBackupFileHandle? protectedDependency = null,
-        CancellationToken cancellationToken = default) =>
-        _persistence.ExecuteWithStrategyAsync(async db =>
+        CancellationToken cancellationToken = default)
+    {
+        Guid? remoteGap = null;
+        var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == identity.TaskId, cancellationToken);
@@ -222,13 +224,28 @@ internal sealed partial class BackupPlanExecutionStore
             operation.MarkApplied();
             db.AddRange(CreateStateChange(operation.Id, task, before, stage, reason, null, now),
                 CreateAudit(null, task.Id, "plan.stage.apply", successful ? "succeeded" : "unknown", facts.ReasonCode));
-            var addedCopy = db.ChangeTracker.Entries<BackupFile>().Any(entry => entry.State == EntityState.Added);
+            var addedEntries = db.ChangeTracker.Entries<BackupFile>().Where(entry => entry.State == EntityState.Added).ToArray();
+            var remoteTargets = addedEntries
+                .Where(entry => entry.Entity.Location == BackupFileLocation.Remote && entry.Entity.StorageTargetId is Guid)
+                .Select(entry => entry.Entity.StorageTargetId!.Value)
+                .Distinct()
+                .ToArray();
+            NotificationOutboxWriter.EnqueuePlanOutcome(
+                db, operation.Id, task.Id, stage, task.Status, now, task.ErrorCode ?? facts.ReasonCode);
             await db.SaveChangesAsync(cancellationToken);
-            if (addedCopy)
+            if (addedEntries.Length > 0)
                 await PlanLocationRetentionWork.ReleaseSupersededAsync(db, snapshot.DatabaseId, now, cancellationToken);
+            if (remoteTargets.Length > 0)
+                await RemoteGapNotices.MarkPendingAsync(db, new RemoteGapNotices.Observation(
+                    snapshot.DatabaseId, task.Id, stage, now, remoteTargets), cancellationToken);
             await tx.CommitAsync(cancellationToken);
+            remoteGap = snapshot.DatabaseId;
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
+        if (code == BackupExecutionContractCode.Succeeded && remoteGap is Guid databaseId)
+            await RemoteGapNotices.TryDrainPendingAsync(factory, databaseId, cancellationToken, logger);
+        return code;
+    }
 
     private static void Advance(BackupTask task, BackupTaskSnapshot snapshot, LeaseHandle lease, DateTimeOffset now)
     {

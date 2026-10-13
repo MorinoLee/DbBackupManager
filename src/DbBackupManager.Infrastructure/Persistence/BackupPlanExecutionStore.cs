@@ -7,11 +7,15 @@ using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using static DbBackupManager.Infrastructure.Persistence.BackupTaskPersistence;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
-internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<PlatformDbContext> factory, TimeProvider clock)
+internal sealed partial class BackupPlanExecutionStore(
+    IDbContextFactory<PlatformDbContext> factory,
+    TimeProvider clock,
+    ILogger<BackupPlanExecutionStore>? logger = null)
     : IBackupPlanExecutionStore
 {
     private readonly BackupTaskPersistence _persistence = new(factory);
@@ -154,20 +158,24 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
             if (ValidateLease(task, lease, clock.GetUtcNow()) is not null) return BackupExecutionContractCode.LeaseLost;
             var snapshot = await db.BackupTaskSnapshots.SingleAsync(x => x.TaskId == task.Id, cancellationToken);
             var before = task.Status;
+            var now = clock.GetUtcNow();
             if (lease.Purpose == BackupLeasePurpose.Execution)
-                task.RecordIndeterminateResult(snapshot.StorageMode, lease.LeaseToken, clock.GetUtcNow(), reason, "原 Attempt 与文件保持不变，等待显式只读核对。");
-            else task.CompleteReconciliation(snapshot.StorageMode, lease.LeaseToken, clock.GetUtcNow(), BackupReconciliationOutcome.Inconclusive,
+                task.RecordIndeterminateResult(snapshot.StorageMode, lease.LeaseToken, now, reason, "原 Attempt 与文件保持不变，等待显式只读核对。");
+            else task.CompleteReconciliation(snapshot.StorageMode, lease.LeaseToken, now, BackupReconciliationOutcome.Inconclusive,
                 reason, "证据尚未完整，保留原事实。");
-            db.AddRange(CreateStateChange(mutationId, task, before, lease.Stage, reason, null, clock.GetUtcNow()),
+            db.AddRange(CreateStateChange(mutationId, task, before, lease.Stage, reason, null, now),
                 CreateAudit(null, task.Id, "plan.execution.suspend", "unknown", reason));
+            NotificationOutboxWriter.EnqueuePlanOutcome(db, mutationId, task.Id, lease.Stage, task.Status, now, task.ErrorCode ?? reason);
             await db.SaveChangesAsync(cancellationToken);
             await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
 
-    public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
-        string? outcomeReason = null, CancellationToken cancellationToken = default) =>
-        _persistence.ExecuteWithStrategyAsync(async db =>
+    public async Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
+        string? outcomeReason = null, CancellationToken cancellationToken = default)
+    {
+        Guid? remoteGap = null;
+        var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == lease.TaskId, cancellationToken);
@@ -204,13 +212,24 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
                 db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup, "plan.staging.cleaned", null, now),
                     CreateAudit(null, task.Id, "plan.staging.clean", "succeeded", null));
             }
+
             await db.SaveChangesAsync(cancellationToken);
+            if (snapshot.StorageTargetId is Guid target)
+                await RemoteGapNotices.MarkPendingAsync(db, new RemoteGapNotices.Observation(
+                    snapshot.DatabaseId, task.Id, BackupTaskStage.Cleanup, now, [target]), cancellationToken);
             await tx.CommitAsync(cancellationToken);
+            remoteGap = snapshot.DatabaseId;
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
+        if (code == BackupExecutionContractCode.Succeeded && remoteGap is Guid databaseId)
+            await RemoteGapNotices.TryDrainPendingAsync(factory, databaseId, cancellationToken, logger);
+        return code;
+    }
 
-    public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default) =>
-        _persistence.ExecuteWithStrategyAsync(async db =>
+    public async Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default)
+    {
+        Guid? drainedDatabase = null;
+        var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == taskId, cancellationToken);
@@ -239,8 +258,13 @@ internal sealed partial class BackupPlanExecutionStore(IDbContextFactory<Platfor
                 CreateAudit(null, task.Id, "plan.staging.clean", "succeeded", null));
             await db.SaveChangesAsync(cancellationToken);
             await tx.CommitAsync(cancellationToken);
+            drainedDatabase = snapshot.DatabaseId;
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
+        if (code == BackupExecutionContractCode.Succeeded && drainedDatabase is Guid databaseId)
+            await RemoteGapNotices.TryDrainPendingAsync(factory, databaseId, cancellationToken, logger);
+        return code;
+    }
 
     public async Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId, CancellationToken cancellationToken = default)
     {

@@ -325,11 +325,15 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
         {
             await temporary.InitializeAsync();
             await using var db = temporary.CreateContext();
-            var migrations = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
-            var previous = migrations[^2];
-            var migrator = db.GetService<IMigrator>();
+            var migrations = db.Database.GetMigrations().ToArray();
+            var contract = migrations.Single(name => name.EndsWith("_AddBackupExecutionContracts", StringComparison.Ordinal));
+            var previous = migrations[Array.IndexOf(migrations, contract) - 1];
+            var migrator = db.Database.GetService<IMigrator>();
+            // 通知迁移本身没有执行回执。先退到执行契约迁移，再检验它自己的 Down 守卫。
+            await migrator.MigrateAsync(contract);
             if (dataKind != "empty")
             {
+                var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
                 var work = await BackupSetTestData.WorkAsync(temporary);
                 var store = new BackupExecutionOperationStore(new Factory(temporary), TimeProvider.System);
                 if (dataKind == "receipt") await store.ReserveAsync(work.Lease, ExecutionContractTestData.Identity(work));
@@ -343,7 +347,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
                 }
                 var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
                 Assert.Equal(51004, error.Number);
-                Assert.Equal(migrations, await db.Database.GetAppliedMigrationsAsync());
+                Assert.Equal(history, await db.Database.GetAppliedMigrationsAsync());
                 Assert.Equal(3, await ContractTableCountAsync(db));
             }
             else

@@ -12,7 +12,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DbBackupManager.Infrastructure.BackupManagement;
 
-internal sealed class BackupPlanCatalogService(IDbContextFactory<PlatformDbContext> factory, TimeProvider clock)
+internal sealed class BackupPlanCatalogService(
+    IDbContextFactory<PlatformDbContext> factory,
+    TimeProvider clock)
     : IBackupPlanCatalogService
 {
     public Task<BackupPlanCatalogResult<IReadOnlyList<BackupPlanListItem>>> ListAsync(

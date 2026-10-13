@@ -4159,7 +4159,7 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         {
                             t.HasCheckConstraint("CK_NotificationOutbox_ErrorCode_NotEmpty", "LEN([ErrorCode]) > 0");
 
-                            t.HasCheckConstraint("CK_NotificationOutbox_Identity", "([Type] IN ('TaskFailed', 'TaskIndeterminate') AND [SourceKind] = 'BackupTask' AND [TaskId] = [SourceId] AND [Stage] IN ('Backup', 'VerifyLocal', 'Transfer', 'ValidateCopy', 'Cleanup')) OR ([Type] IN ('RetentionDeleteFailed', 'RetentionMissing') AND [SourceKind] = 'BackupFile' AND [TaskId] IS NOT NULL AND [Stage] IS NULL) OR ([Type] = 'AdminTest' AND [SourceKind] = 'AdminRequest' AND [TaskId] IS NULL AND [Stage] IS NULL)");
+                            t.HasCheckConstraint("CK_NotificationOutbox_Identity", "([Type] IN ('TaskFailed', 'TaskIndeterminate', 'RemoteUnrecoverable') AND [SourceKind] = 'BackupTask' AND [TaskId] = [SourceId] AND [Stage] IN ('Backup', 'VerifyLocal', 'Transfer', 'ValidateCopy', 'Cleanup')) OR ([Type] IN ('RetentionDeleteFailed', 'RetentionMissing') AND [SourceKind] = 'BackupFile' AND [TaskId] IS NOT NULL AND [Stage] IS NULL) OR ([Type] = 'AdminTest' AND [SourceKind] = 'AdminRequest' AND [TaskId] IS NULL AND [Stage] IS NULL)");
 
                             t.HasCheckConstraint("CK_NotificationOutbox_Outcome", "([Status] = 'Pending' AND [LastFailureCode] IS NULL AND [NextAttemptAtUtc] IS NULL AND [SentAtUtc] IS NULL) OR ([Status] = 'Sending' AND [LastFailureCode] IS NULL) OR ([Status] = 'SendFailed' AND LEN([LastFailureCode]) > 0 AND [NextAttemptAtUtc] IS NOT NULL AND [SentAtUtc] IS NULL AND [SendAttemptCount] >= 1) OR ([Status] = 'Sent' AND [LastFailureCode] IS NULL AND [NextAttemptAtUtc] IS NULL AND [SentAtUtc] >= [OccurredAtUtc] AND [SendAttemptCount] >= 1) OR ([Status] = 'Discarded' AND LEN([LastFailureCode]) > 0 AND [NextAttemptAtUtc] IS NULL AND [SentAtUtc] IS NULL)");
 
@@ -4171,8 +4171,132 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_NotificationOutbox_Status", "[Status] IN ('Pending', 'Sending', 'Sent', 'SendFailed', 'Discarded')");
 
-                            t.HasCheckConstraint("CK_NotificationOutbox_Type", "[Type] IN ('TaskFailed', 'TaskIndeterminate', 'RetentionDeleteFailed', 'RetentionMissing', 'AdminTest')");
+                            t.HasCheckConstraint("CK_NotificationOutbox_Type", "[Type] IN ('TaskFailed', 'TaskIndeterminate', 'RetentionDeleteFailed', 'RetentionMissing', 'AdminTest', 'RemoteUnrecoverable')");
                         });
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapEpisode", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("GapCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<Guid>("NotificationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("OpenedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<DateTimeOffset?>("RecoveredAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("StorageTargetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NotificationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RemoteGapEpisodes_NotificationId");
+
+                    b.HasIndex("StorageTargetId");
+
+                    b.HasIndex("DatabaseId", "StorageTargetId", "GapCode")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RemoteGapEpisodes_Open")
+                        .HasFilter("[RecoveredAtUtc] IS NULL");
+
+                    b.ToTable("RemoteGapEpisodes", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RemoteGapEpisodes_GapCode_NotEmpty", "LEN([GapCode]) > 0");
+
+                            t.HasCheckConstraint("CK_RemoteGapEpisodes_RecoveredAt", "[RecoveredAtUtc] IS NULL OR [RecoveredAtUtc] >= [OpenedAtUtc]");
+                        });
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapProjectionPending", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("RequestedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<string>("Stage")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DatabaseId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RemoteGapProjectionPendings_DatabaseId");
+
+                    b.ToTable("RemoteGapProjectionPendings", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RemoteGapProjectionPendings_Stage", "[Stage] IS NULL OR [Stage] IN ('Backup', 'VerifyLocal', 'Transfer', 'ValidateCopy', 'Cleanup')");
+                        });
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapProjectionPendingTarget", b =>
+                {
+                    b.Property<Guid>("PendingId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("StorageTargetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("PendingId", "StorageTargetId");
+
+                    b.HasIndex("StorageTargetId");
+
+                    b.ToTable("RemoteGapProjectionPendingTargets", (string)null);
                 });
 
             modelBuilder.Entity("DbBackupManager.Domain.Notifications.SmtpRecipient", b =>
@@ -4648,6 +4772,51 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Restrict);
                 });
 
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapEpisode", b =>
+                {
+                    b.HasOne("DbBackupManager.Domain.Configuration.ManagedDatabase", null)
+                        .WithMany()
+                        .HasForeignKey("DatabaseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("DbBackupManager.Domain.Notifications.NotificationOutbox", null)
+                        .WithMany()
+                        .HasForeignKey("NotificationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("DbBackupManager.Domain.Configuration.StorageTarget", null)
+                        .WithMany()
+                        .HasForeignKey("StorageTargetId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapProjectionPending", b =>
+                {
+                    b.HasOne("DbBackupManager.Domain.Configuration.ManagedDatabase", null)
+                        .WithMany()
+                        .HasForeignKey("DatabaseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapProjectionPendingTarget", b =>
+                {
+                    b.HasOne("DbBackupManager.Domain.Notifications.RemoteGapProjectionPending", null)
+                        .WithMany("Targets")
+                        .HasForeignKey("PendingId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("DbBackupManager.Domain.Configuration.StorageTarget", null)
+                        .WithMany()
+                        .HasForeignKey("StorageTargetId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("DbBackupManager.Domain.Notifications.SmtpRecipient", b =>
                 {
                     b.HasOne("DbBackupManager.Domain.Notifications.SmtpSettings", null)
@@ -4668,6 +4837,11 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("DbBackupManager.Domain.BackupPlans.BackupPlan", b =>
                 {
                     b.Navigation("Versions");
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.Notifications.RemoteGapProjectionPending", b =>
+                {
+                    b.Navigation("Targets");
                 });
 #pragma warning restore 612, 618
         }
