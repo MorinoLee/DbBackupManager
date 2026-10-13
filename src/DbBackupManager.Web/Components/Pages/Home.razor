@@ -44,9 +44,8 @@
                     <MudStack Row="true" Wrap="Wrap.Wrap" Class="my-2" Spacing="3">
                         <MudText>已有验证副本：@model.WithVerifiedFile</MudText>
                         <MudText>从未登记验证副本：@model.NeverVerified</MudText>
-                        <MudLink Href="/backup-policies">未启用备份配置：@model.WithoutEnabledPolicy</MudLink>
                     </MudStack>
-                    <MudText Typo="Typo.caption">按当前纳管数据库统计；“未启用配置”仍按旧备份配置计数，可与另外两项重叠，不代表统一计划覆盖。已登记副本不代表文件现在仍存在或已完成恢复演练。</MudText>
+                    <MudText Typo="Typo.caption">按当前纳管数据库统计已登记副本。已登记副本不代表文件现在仍存在或已完成恢复演练。保存备份计划不会自动开始执行。</MudText>
                     @if (model.ManagedDatabases == 0) { <MudButton Href="/servers" Color="Color.Primary" data-testid="dashboard-add-server">添加服务器并纳管数据库</MudButton> }
                 </MudPaper>
                 <MudGrid Spacing="3">
@@ -75,7 +74,6 @@
                     <MudButton Href="/servers" Variant="Variant.Outlined">服务器与实例</MudButton>
                     <MudButton Href="/storage-targets" Variant="Variant.Outlined">存储目标</MudButton>
                     <MudButton Href="/backup-plans" Variant="Variant.Outlined">备份计划</MudButton>
-                    <MudButton Href="/backup-policies" Variant="Variant.Outlined">备份配置</MudButton>
                     <MudButton Href="/backup-tasks" Variant="Variant.Outlined">任务记录</MudButton>
                     <MudButton Href="/backup-files" Variant="Variant.Outlined">备份文件</MudButton>
                     <MudButton Href="/notifications" Variant="Variant.Outlined">通知设置</MudButton>

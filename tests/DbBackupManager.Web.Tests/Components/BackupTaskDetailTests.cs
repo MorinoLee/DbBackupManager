@@ -45,7 +45,7 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
         Assert.Contains("文件校验：未知", facts.TextContent, StringComparison.Ordinal);
         Assert.Contains("传输：未知", facts.TextContent, StringComparison.Ordinal);
         Assert.Contains("恢复依赖：未知", facts.TextContent, StringComparison.Ordinal);
-        Assert.Contains("旧策略任务", facts.TextContent, StringComparison.Ordinal);
+        Assert.Contains("计划版本：未知", facts.TextContent, StringComparison.Ordinal);
         Assert.DoesNotContain("成功", facts.TextContent, StringComparison.Ordinal);
         Assert.Contains("已验证本地副本", page.Markup, StringComparison.Ordinal);
         Assert.Contains("第一次调用", page.Find("[data-testid='task-attempts']").TextContent, StringComparison.Ordinal);
@@ -614,8 +614,6 @@ public sealed class BackupTaskDetailTests : MudBlazorComponentTest
         }
 
         public Task<BackupManagementResult<BackupDashboard>> ListAsync(AdminSession actor, int page = 0, CancellationToken token = default) => throw new NotSupportedException();
-        public Task<BackupManagementResult<ManualBackupPolicy>> SavePolicyAsync(AdminSession actor, Guid? id, string? version, ManualBackupInput input, CancellationToken token = default) => throw new NotSupportedException();
-        public Task<BackupManagementResult<Guid>> StartAsync(AdminSession actor, Guid policyId, Guid requestId, CancellationToken token = default) => throw new NotSupportedException();
         public Task<BackupManagementResult<Guid>> CancelAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default)
         {
             CancelCalls.Add((taskId, requestId));

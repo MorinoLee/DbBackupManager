@@ -26,10 +26,8 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
     public async Task IndependentCoordinatorsGrantOnlyOneDatabaseCall(bool includePlan)
     {
         var first = await BackupSetTestData.WorkAsync(database);
-        await using var db = database.CreateContext();
-        var policy = (await db.BackupTasks.SingleAsync(x => x.Id == first.Task.TaskId)).PolicyId!.Value;
         var second = includePlan ? await ExecutionContractTestData.PlanAsync(database, first)
-            : await BackupSetTestData.WorkAsync(database, policy);
+            : await BackupSetTestData.WorkAsync(database, first.Snapshot.Identity.DatabaseId);
         using var provider = database.CreateServiceProvider();
         var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
         var left = new BackupInvocationAuthorizationStore(factory, TimeProvider.System);
@@ -39,6 +37,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
         var results = await Task.WhenAll(left.AuthorizeAsync(first.Lease, a), right.AuthorizeAsync(second.Lease, b));
         Assert.Single(results, x => x.Code == BackupExecutionContractCode.Succeeded);
         Assert.Single(results, x => x.Code == BackupExecutionContractCode.DatabaseBlocked);
+        await using var db = database.CreateContext();
         Assert.Equal(1, await db.BackupInvocationAuthorizations.CountAsync(x => x.TerminalObservedAtUtc == null));
         Assert.Equal(1, await db.BackupAttempts.CountAsync(x => x.BackupInvocationStatus == BackupInvocationStatus.Running));
     }
@@ -57,8 +56,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
         Assert.Equal(BackupExecutionContractCode.Conflict,
             (await restarted.AuthorizeAsync(work.Lease, command with { Binding = command.Binding with { CallerIncarnationId = Guid.NewGuid() } })).Code);
         await using var db = database.CreateContext();
-        var policy = (await db.BackupTasks.SingleAsync(x => x.Id == work.Task.TaskId)).PolicyId!.Value;
-        var next = await BackupSetTestData.WorkAsync(database, policy);
+        var next = await BackupSetTestData.WorkAsync(database, work.Snapshot.Identity.DatabaseId);
         Assert.Equal(BackupExecutionContractCode.DatabaseBlocked,
             (await restarted.AuthorizeAsync(next.Lease, await ExecutionContractTestData.AuthorizationAsync(database, next))).Code);
         Assert.Equal(1, await db.BackupInvocationAuthorizations.CountAsync());
@@ -124,8 +122,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
         await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE [BackupTasks] SET [LeaseAcquiredAtUtc]={DateTimeOffset.UtcNow.AddMinutes(-20)},[LeaseExpiresAtUtc]={DateTimeOffset.UtcNow.AddMinutes(-1)} WHERE [Id]={work.Task.TaskId}");
         // 旧调用已失去租约，任务即使明确终结也不能证明原 SQL 会话已终止。
         await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE [BackupTasks] SET [Status]='Failed',[CompletedAtUtc]={DateTimeOffset.UtcNow},[ErrorCode]='synthetic_failure',[ErrorMessage]=N'合成失败',[LeasePurpose]=NULL,[LeaseToken]=NULL,[LeaseOwner]=NULL,[LeaseAcquiredAtUtc]=NULL,[LeaseExpiresAtUtc]=NULL WHERE [Id]={work.Task.TaskId}");
-        var policy = (await db.BackupTasks.SingleAsync(x => x.Id == work.Task.TaskId)).PolicyId!.Value;
-        var next = await BackupSetTestData.WorkAsync(database, policy);
+        var next = await BackupSetTestData.WorkAsync(database, work.Snapshot.Identity.DatabaseId);
         Assert.Equal(BackupExecutionContractCode.DatabaseBlocked,
             (await coordinator.AuthorizeAsync(next.Lease, await ExecutionContractTestData.AuthorizationAsync(database, next))).Code);
     }
@@ -229,8 +226,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
         Assert.Equal(BackupExecutionContractCode.AlreadyApplied, (await coordinator.RecordTerminationAsync(grant.Value.Lease!, terminal)).Code);
         Assert.Equal(BackupExecutionContractCode.Conflict, (await coordinator.RecordTerminationAsync(grant.Value.Lease!, terminal with { MutationId = Guid.NewGuid() })).Code);
         await using var db = database.CreateContext();
-        var policy = (await db.BackupTasks.SingleAsync(x => x.Id == work.Task.TaskId)).PolicyId!.Value;
-        var next = await BackupSetTestData.WorkAsync(database, policy);
+        var next = await BackupSetTestData.WorkAsync(database, work.Snapshot.Identity.DatabaseId);
         Assert.Equal(BackupExecutionContractCode.Succeeded,
             (await coordinator.AuthorizeAsync(next.Lease, await ExecutionContractTestData.AuthorizationAsync(database, next))).Code);
     }
@@ -410,14 +406,14 @@ internal static class ExecutionContractTestData
         await using var db = database.CreateContext();
         var old = await db.BackupTaskSnapshots.SingleAsync(x => x.TaskId == legacy.Task.TaskId);
         var now = DateTimeOffset.UtcNow;
-        var definition = new BackupPlanDefinition(BackupPlanMode.FullAndDifferential,
-            new(BackupScheduleType.Daily, new(2, 0), BackupWeekdays.None),
-            new(BackupScheduleType.Daily, new(3, 0), BackupWeekdays.None), null, "UTC", BackupStorageMode.LocalOnly,
-            null, 14, null, true, false, 120, 60, 60);
-        var plan = BackupPlan.Create(Guid.NewGuid(), old.DatabaseId, "合成执行计划", Guid.NewGuid(), definition, now);
-        await new BackupPlanStore(new BackupExecutionContractSqlServerTests.Factory(database)).AddAsync(plan);
-        var task = BackupTask.ForPlan(Guid.NewGuid(), plan.Id, plan.CurrentVersionId, BackupRunPurpose.PlanFull, BackupTaskTriggerType.Manual, null);
-        var snapshot = BackupTaskSnapshot.ForPlan(task, plan.CurrentVersion, plan.Name, BackupRunPurpose.PlanFull,
+        var versionId = await db.BackupPlans.AsNoTracking()
+            .Where(plan => plan.DatabaseId == old.DatabaseId)
+            .Select(plan => EF.Property<Guid?>(plan, "_currentVersionId"))
+            .SingleAsync() ?? throw new InvalidOperationException("合成数据库没有当前计划。");
+        var version = await db.BackupPlanVersions.SingleAsync(item => item.Id == versionId);
+        var planName = await db.BackupPlans.Where(plan => plan.Id == version.PlanId).Select(plan => plan.Name).SingleAsync();
+        var task = BackupTask.ForPlan(Guid.NewGuid(), version.PlanId, version.Id, BackupRunPurpose.PlanFull, BackupTaskTriggerType.Manual, null);
+        var snapshot = BackupTaskSnapshot.ForPlan(task, version, planName, BackupRunPurpose.PlanFull,
             new(old.ServerId, old.ServerName, old.InstanceId, old.InstanceName, old.DatabaseId, old.DatabaseName),
             new(old.ConnectionAddress, old.SqlCredentialReferenceId, old.EncryptConnection, old.TrustServerCertificate,
                 old.CertificateTrustReason, old.ConnectionTimeoutSeconds, old.AllowLegacyTls, old.LegacyTlsReason),

@@ -9,7 +9,7 @@ internal sealed class FakeMonitoring : IBackupMonitoringService
     public BackupSearch? LastSearch { get; private set; }
     public BackupManagementCode Code { get; set; } = BackupManagementCode.Succeeded;
     public BackupOverview Overview { get; set; } = new(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddHours(-24),
-        121, 4, 3, 118, 25, 1, 2, 3, new("Online", DateTimeOffset.UtcNow),
+        121, 3, 118, 25, 1, 2, 3, new("Online", DateTimeOffset.UtcNow),
         [new(Guid.NewGuid(), "测试备份", "合成库", "Succeeded", "VerifyLocal", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, false, 4096)], [], []);
     public BackupPage<BackupFileSummary> Files { get; set; } = new([
         new(Guid.NewGuid(), Guid.NewGuid(), "合成库", "测试实例", "测试配置", @"D:\Synthetic\backup.bak", 4096, DateTimeOffset.UtcNow, 7,

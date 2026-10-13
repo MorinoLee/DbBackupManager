@@ -43,7 +43,7 @@ public sealed class HomeTests : MudBlazorComponentTest
         Assert.Contains("从未登记验证副本：3", page.Find("[data-testid='database-protection']").TextContent, StringComparison.Ordinal);
         Assert.Equal("/notifications", page.Find("[data-testid='dashboard-shortcuts'] a[href='/notifications']").GetAttribute("href"));
         Assert.Equal("/backup-plans", page.Find("[data-testid='dashboard-shortcuts'] a[href='/backup-plans']").GetAttribute("href"));
-        Assert.Contains("仍按旧备份配置计数", page.Find("[data-testid='database-protection']").TextContent, StringComparison.Ordinal);
+        Assert.Contains("保存备份计划不会自动开始执行", page.Find("[data-testid='database-protection']").TextContent, StringComparison.Ordinal);
     }
     [Fact]
     public void EmptyInventoryGuidesToAddServerAndDoesNotInventOnlineState()

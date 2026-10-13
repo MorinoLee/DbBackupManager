@@ -14,7 +14,7 @@ public sealed partial class PlatformDbContext
         foreach (var entry in tasks)
         {
             if (entry.State == EntityState.Modified)
-                foreach (var name in new[] { nameof(BackupTask.PolicyId), nameof(BackupTask.PlanId),
+                foreach (var name in new[] { nameof(BackupTask.PlanId),
                     nameof(BackupTask.PlanVersionId), nameof(BackupTask.BackupType), nameof(BackupTask.TriggerType),
                     nameof(BackupTask.ScheduledSlotAtUtc), nameof(BackupTask.CoveredDifferentialSlotUtc) })
                     if (entry.Property(name).IsModified

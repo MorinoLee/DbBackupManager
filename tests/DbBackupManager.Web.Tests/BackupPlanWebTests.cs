@@ -118,33 +118,8 @@ public sealed class BackupPlanWebTests
         Assert.False(local.RemoteUnrecoverable);
         Assert.Equal("NotRestorable", local.Conclusion);
 
-        using var manual = await SendAsync(client, HttpMethod.Post, "/api/v1/manual-backup-policies", new SaveManualBackupRequest
-        {
-            DatabaseId = databaseId,
-            Name = "旧手动策略",
-            RetentionDays = 7,
-            BackupTimeoutMinutes = 30,
-            VerifyTimeoutMinutes = 15,
-            UseCompression = false,
-            IsEnabled = true,
-        }, token);
-        Assert.Equal(HttpStatusCode.OK, manual.StatusCode);
-        var policy = (await manual.Content.ReadFromJsonAsync<ManualBackupPolicyResponse>())!;
-        var taskId = Guid.NewGuid();
-        using var run = await SendAsync(client, HttpMethod.Post, $"/api/v1/manual-backup-policies/{policy.Id}/run",
-            new BackupTaskCommandRequest { RequestId = taskId }, token);
-        Assert.Equal(HttpStatusCode.OK, run.StatusCode);
-        var detail = (await client.GetFromJsonAsync<BackupTaskDetailResponse>($"/api/v1/backup-tasks/{taskId}"))!;
-        Assert.Equal("Full", detail.Task.BackupType);
-        Assert.Equal("Backup", detail.Task.Stage);
-        Assert.Null(detail.Task.PlanId);
-        Assert.Null(detail.Task.PlanVersionId);
-        Assert.Equal("Unknown", detail.Task.SqlStatus);
-        Assert.Equal("Unknown", detail.Task.FileVerifyStatus);
-        Assert.Equal("NotApplicable", detail.Task.TransferStatus);
-        Assert.Equal("Unknown", detail.Task.DependencyStatus);
-        var listed = (await client.GetFromJsonAsync<BackupTaskPageResponse>("/api/v1/backup-tasks?search=synthetic-db"))!;
-        Assert.Contains(listed.Items, item => item.Id == taskId && item.BackupType == "Full" && item.SqlStatus == "Unknown");
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/v1/manual-backup-policies")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/backup-policies")).StatusCode);
     }
 
     private static SaveBackupPlanRequest Plan(

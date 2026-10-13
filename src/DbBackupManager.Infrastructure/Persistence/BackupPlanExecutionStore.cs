@@ -292,7 +292,7 @@ internal sealed partial class BackupPlanExecutionStore(
         return BackupExecutionContractCode.Succeeded;
     }
 
-    private static bool IsOpen(BackupTask task, BackupTaskSnapshot snapshot) => task.PlanId is not null && task.PolicyId is null
+    private static bool IsOpen(BackupTask task, BackupTaskSnapshot snapshot) => task.PlanId is not null
         && snapshot.FileNameRuleVersion == "v3" && snapshot.Purpose is BackupRunPurpose.PlanFull or BackupRunPurpose.PlanDifferential
         && snapshot.StorageMode is BackupStorageMode.LocalOnly or BackupStorageMode.LocalAndRemote or BackupStorageMode.RemoteOnly;
     internal static async Task<bool> ConfigurationEnabledAsync(PlatformDbContext db, BackupTaskSnapshot snapshot, CancellationToken token)

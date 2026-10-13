@@ -7,7 +7,7 @@ internal static class BackupArtifactProtection
 {
     internal static IQueryable<BackupFile> EligibleLegacyFiles(PlatformDbContext context) =>
         context.BackupFiles.Where(file => file.BackupSetId == null
-            && context.BackupTasks.Any(task => task.Id == file.TaskId && task.PlanId == null && task.PolicyId != null)
+            && context.BackupTasks.Any(task => task.Id == file.TaskId && task.PlanId == null)
             && context.BackupTaskSnapshots.Any(snapshot => snapshot.TaskId == file.TaskId
                 && snapshot.Purpose == null && snapshot.FileNameRuleVersion != "v3" && snapshot.DatabaseId == file.DatabaseId
                 && (file.Location == BackupFileLocation.Local && file.DatabaseServerId == snapshot.ServerId

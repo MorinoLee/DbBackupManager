@@ -11,139 +11,11 @@ namespace DbBackupManager.Infrastructure.Persistence;
 
 internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
 {
-    private const string CreatedReason = "task.created";
-
     internal const string CancellationReason = "task.cancellation_requested";
 
     private const string RetryReason = "task.retry_requested";
 
     private const string AdminReconciliationReason = "admin_reconciliation_requested";
-
-    public async Task<BackupTaskStoreResult<BackupTaskStateModel>> CreateTaskAsync(
-        CreateBackupTaskCommand command,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            return await persistence.ExecuteWithStrategyAsync(async context =>
-            {
-                await using var transaction = await context.Database.BeginTransactionAsync(
-                    IsolationLevel.Serializable,
-                    cancellationToken);
-                if (!await IsActorValidAsync(context, command.ActorAdminUserId, command.ActorSecurityStamp, cancellationToken))
-                    return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.AuthenticationRequired);
-                var replay = await ReadMutationAsync(
-                    context,
-                    command.MutationId,
-                    command.TaskId,
-                    CreatedReason,
-                    cancellationToken);
-                if (replay.Found)
-                {
-                    return replay.Matches
-                        && replay.Task!.PolicyId == command.PolicyId
-                        && replay.Task.TriggerType == command.TriggerType
-                        && replay.Task.ScheduledSlotAtUtc == command.ScheduledSlotAtUtc
-                            ? MutationStateResult(replay)
-                            : new BackupTaskStoreResult<BackupTaskStateModel>(
-                                BackupTaskStoreResultCode.StateMismatch);
-                }
-
-                if (command.TriggerType == BackupTaskTriggerType.Scheduled)
-                {
-                    if (await context.BackupPolicies.AnyAsync(x => x.Id == command.PolicyId && x.IsManualOnly, cancellationToken))
-                        return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.ConfigurationUnavailable);
-
-                    var existing = await context.BackupTasks.SingleOrDefaultAsync(
-                        task => task.PolicyId == command.PolicyId
-                            && task.ScheduledSlotAtUtc == command.ScheduledSlotAtUtc,
-                        cancellationToken);
-                    if (existing is not null)
-                    {
-                        return new BackupTaskStoreResult<BackupTaskStateModel>(
-                            BackupTaskStoreResultCode.AlreadyExists,
-                            existing.ToStateModel());
-                    }
-                }
-
-                var snapshot = await TryBuildSnapshotAsync(
-                    context,
-                    command.TaskId,
-                    command.PolicyId,
-                    cancellationToken);
-                if (snapshot is null || !BackupTaskPathFactory.TryCreate(
-                        snapshot, command.TaskId, command.OccurredAtUtc, out _))
-                {
-                    return new BackupTaskStoreResult<BackupTaskStateModel>(
-                        BackupTaskStoreResultCode.ConfigurationUnavailable);
-                }
-
-                var task = new BackupTask(
-                    command.TaskId,
-                    command.PolicyId,
-                    command.TriggerType,
-                    command.ScheduledSlotAtUtc);
-                context.AddRange(
-                    task,
-                    snapshot,
-                    CreateStateChange(
-                        command.MutationId,
-                        task,
-                        fromStatus: null,
-                        fromStage: null,
-                        CreatedReason,
-                        message: null,
-                        command.OccurredAtUtc),
-                    CreateAudit(
-                        command.ActorAdminUserId,
-                        task.Id,
-                        "backup.task.create",
-                        "succeeded",
-                        null));
-                await context.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-                return new BackupTaskStoreResult<BackupTaskStateModel>(
-                    BackupTaskStoreResultCode.Succeeded,
-                    task.ToStateModel());
-            }, cancellationToken);
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            return new BackupTaskStoreResult<BackupTaskStateModel>(
-                BackupTaskStoreResultCode.ConcurrencyConflict);
-        }
-        catch (DbUpdateException)
-        {
-            await using var context = await persistence.CreateDbContextAsync(cancellationToken);
-            var replay = await ReadMutationAsync(
-                context,
-                command.MutationId,
-                command.TaskId,
-                CreatedReason,
-                cancellationToken);
-            if (replay.Found)
-            {
-                return MutationStateResult(replay);
-            }
-
-            if (command.TriggerType == BackupTaskTriggerType.Scheduled)
-            {
-                var existing = await context.BackupTasks.SingleOrDefaultAsync(
-                    task => task.PolicyId == command.PolicyId
-                        && task.ScheduledSlotAtUtc == command.ScheduledSlotAtUtc,
-                    cancellationToken);
-                if (existing is not null)
-                {
-                    return new BackupTaskStoreResult<BackupTaskStateModel>(
-                        BackupTaskStoreResultCode.AlreadyExists,
-                        existing.ToStateModel());
-                }
-            }
-
-            return new BackupTaskStoreResult<BackupTaskStateModel>(
-                BackupTaskStoreResultCode.ConcurrencyConflict);
-        }
-    }
 
     public Task<BackupTaskStoreResult<BackupTaskStateModel>> RequestCancellationAsync(
         BackupTaskMutationCommand command,
@@ -176,7 +48,7 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
             "backup.task.retry",
             (task, storageMode) =>
             {
-                if (task.PlanId is not null || task.PolicyId is null) return BackupTaskStoreResultCode.StateMismatch;
+                if (task.PlanId is not null) return BackupTaskStoreResultCode.StateMismatch;
                 task.RetryFailed(storageMode, command.OccurredAtUtc);
                 return BackupTaskStoreResultCode.Succeeded;
             },
@@ -228,7 +100,7 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
                     || !await IsActorValidAsync(context, command.ActorAdminUserId, command.ActorSecurityStamp, cancellationToken))
                     return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.AuthenticationRequired);
                 if (reason != CancellationReason && await context.BackupTasks.AnyAsync(
-                    x => x.Id == command.TaskId && (x.PlanId != null || x.PolicyId == null), cancellationToken))
+                    x => x.Id == command.TaskId && x.PlanId != null, cancellationToken))
                     return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.StateMismatch);
                 var replay = await ReadMutationAsync(
                     context,
@@ -307,27 +179,4 @@ internal sealed class BackupTaskCommandStore(BackupTaskPersistence persistence)
         }
     }
 
-    private static async Task<BackupTaskSnapshot?> TryBuildSnapshotAsync(
-        PlatformDbContext context,
-        Guid taskId,
-        Guid policyId,
-        CancellationToken cancellationToken)
-    {
-        var policy = await context.BackupPolicies.SingleOrDefaultAsync(
-            item => item.Id == policyId,
-            cancellationToken);
-        if (policy is null || !policy.IsEnabled)
-        {
-            return null;
-        }
-
-        var configuration = await BackupTaskConfigurationReader.ReadAsync(context, policy.DatabaseId,
-            policy.StorageTargetId, BackupTaskPathFactory.CurrentVersion, cancellationToken);
-        if (configuration is null) return null;
-        return new BackupTaskSnapshot(taskId, policy.Name, configuration.Identity, configuration.SqlTarget,
-            configuration.Source, new BackupTaskPolicySnapshot(
-                policy.StorageMode, configuration.RemoteTarget, policy.LocalRetentionDays, policy.RemoteRetentionDays,
-                policy.UseChecksum, policy.UseCompression, policy.UseCopyOnly, policy.BackupTimeoutMinutes,
-                policy.VerifyTimeoutMinutes, policy.TransferTimeoutMinutes, policy.TimeZoneId));
-    }
 }

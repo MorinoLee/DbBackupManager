@@ -33,7 +33,6 @@ public sealed class BackupPlanSchedulingSqlServerTests(PlatformDatabaseSqlServer
             Assert.Equal(BackupTaskStatus.Pending, x.Status);
             Assert.Equal(plan.CurrentVersionId, x.PlanVersionId);
             Assert.Equal(TimeSpan.Zero, x.ScheduledSlotAtUtc!.Value.Offset);
-            Assert.Null(x.PolicyId);
             Assert.Null(x.CurrentBackupAttemptId);
         });
         var ids = tasks.Select(x => x.Id).ToArray();

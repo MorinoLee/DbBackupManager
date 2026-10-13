@@ -51,7 +51,7 @@ public sealed class WorkerHostTests
         Assert.Contains(
             host.Services.GetServices<IHostedService>(),
             service => service.GetType().Name == "BackupNotificationWorkerService");
-        Assert.Contains(
+        Assert.DoesNotContain(
             host.Services.GetServices<IHostedService>(),
             service => service.GetType().Name == "BackupScheduleWorkerService");
         Assert.DoesNotContain(

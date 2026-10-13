@@ -42,7 +42,7 @@
                     <RowTemplate Context="task">
                         <MudTd DataLabel="数据库 / 配置">@task.DatabaseName / @task.PolicyName</MudTd>
                         <MudTd DataLabel="类型">@BackupPlanPresentation.BackupType(task.BackupType)</MudTd>
-                        <MudTd DataLabel="计划版本">@(task.PlanVersionNumber is int version ? $"v{version}" : "旧策略任务")</MudTd>
+                        <MudTd DataLabel="计划版本">@(task.PlanVersionNumber is int version ? $"v{version}" : "未知")</MudTd>
                         <MudTd DataLabel="状态与阶段"><div><TaskStatusChip Status="@task.Status" /> <span>@BackupPresentation.Stage(task.Stage)</span>
                             @if (task.ErrorCode is not null) { <MudText Typo="Typo.caption">@BackupPresentation.FailureReason(task.ErrorCode)</MudText> }
                             @if (task.CancellationRequested && task.Status is "Pending" or "Running") { <MudText Typo="Typo.caption">已请求取消，等待安全边界。</MudText> }

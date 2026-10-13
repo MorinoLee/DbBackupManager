@@ -72,7 +72,7 @@ public sealed class BackupPlanArtifactProtectionSqlServerTests(PlatformDatabaseS
         Assert.Equal(status == "Available" ? BackupFileStatus.Available : status == "Failed" ? BackupFileStatus.DeleteFailed : BackupFileStatus.DeletePending,
             (await db.BackupFiles.AsNoTracking().SingleAsync()).Status);
         var protocol = new ProtocolSpy();
-        var adapter = new BackupFileStorageAdapter([protocol], new BackupArtifactDeletionGuard(factory, TimeProvider.System));
+        var adapter = new BackupFileStorageAdapter([protocol], new BackupArtifactDeletionGuard(factory));
         var physical = await adapter.DeleteAsync(new(endpoint, file.Path, file.LengthBytes, null, 30,
             new(plan.Task.TaskId, null, file.Id, BackupArtifactPathRole.RegisteredFile, token, file.RowVersion)));
         Assert.Equal(BackupFileStorageOutcome.ConfirmedFailed, physical.Outcome);
@@ -101,7 +101,7 @@ public sealed class BackupPlanArtifactProtectionSqlServerTests(PlatformDatabaseS
         Assert.Equal(0, spy.Writes);
         var protocol = new ProtocolSpy();
         var factory = new BackupExecutionContractSqlServerTests.Factory(database);
-        var adapter = new BackupFileStorageAdapter([protocol], new BackupArtifactDeletionGuard(factory, TimeProvider.System));
+        var adapter = new BackupFileStorageAdapter([protocol], new BackupArtifactDeletionGuard(factory));
         var path = role == BackupArtifactPathRole.RemotePartial ? plan.Attempt.WorkerSourceFilePath + ".part" : plan.Attempt.WorkerSourceFilePath;
         Assert.Equal(BackupFileStorageOutcome.ConfirmedFailed,
             (await adapter.DeleteAsync(new(Endpoint(plan), path, 4096, null, 30,
@@ -124,7 +124,7 @@ public sealed class BackupPlanArtifactProtectionSqlServerTests(PlatformDatabaseS
         db.Add(file);
         await db.SaveChangesAsync();
         var factory = new BackupExecutionContractSqlServerTests.Factory(database);
-        var guard = new BackupArtifactDeletionGuard(factory, TimeProvider.System);
+        var guard = new BackupArtifactDeletionGuard(factory);
         var request = new BackupFileDeleteRequest(Endpoint(work), file.Path, file.LengthBytes, null, 30,
             new(work.Task.TaskId, null, file.Id, BackupArtifactPathRole.RegisteredFile, token, file.RowVersion));
         Assert.Equal("artifact.owner_unknown", (await guard.EvaluateAsync(request)).ReasonCode);
@@ -140,7 +140,7 @@ public sealed class BackupPlanArtifactProtectionSqlServerTests(PlatformDatabaseS
         var work = await BackupSetTestData.WorkAsync(database);
         var spy = new ProtocolSpy();
         var guarded = new BackupFileStorageAdapter([spy],
-            new BackupArtifactDeletionGuard(new BackupExecutionContractSqlServerTests.Factory(database), TimeProvider.System));
+            new BackupArtifactDeletionGuard(new BackupExecutionContractSqlServerTests.Factory(database)));
         var request = new BackupFileDeleteRequest(Endpoint(work), work.Attempt.WorkerSourceFilePath, 4096, null, 30);
         Assert.Equal(BackupFileStorageOutcome.ConfirmedFailed, (await guarded.DeleteAsync(request)).Outcome);
         var unguarded = new BackupFileStorageAdapter([spy]);

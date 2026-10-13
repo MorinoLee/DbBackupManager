@@ -26,24 +26,8 @@ public sealed class BackupManagementController(IBackupManagementService service)
         var r = await service.ListAsync(actor, page, token);
         return r.Code == BackupManagementCode.Succeeded ? Ok(new BackupDashboardResponse(
             r.Value!.Databases.Select(x => new BackupDatabaseChoiceResponse(x.Id, x.Label)).ToArray(),
-            r.Value.Policies.Select(Map).ToArray(), r.Value.Tasks.Select(Map).ToArray(), r.Value.HasMore)) : Failure(r.Code);
+            r.Value.Tasks.Select(Map).ToArray(), r.Value.HasMore)) : Failure(r.Code);
     });
-    [HttpPost("manual-backup-policies")]
-    [ProducesResponseType<ManualBackupPolicyResponse>(200, "application/json")]
-    public Task<IActionResult> Create(SaveManualBackupRequest request, CancellationToken token) => Save(null, request, token);
-    [HttpPut("manual-backup-policies/{id:guid}")]
-    [ProducesResponseType<ManualBackupPolicyResponse>(200, "application/json")]
-    public Task<IActionResult> Update(Guid id, SaveManualBackupRequest request, CancellationToken token) => Save(id, request, token);
-    private Task<IActionResult> Save(Guid? id, SaveManualBackupRequest r, CancellationToken token) => Execute(async actor =>
-    {
-        var result = await service.SavePolicyAsync(actor, id, r.Version, new(r.DatabaseId, r.Name, r.RetentionDays,
-            r.BackupTimeoutMinutes, r.VerifyTimeoutMinutes, r.UseCompression, r.IsEnabled, r.StorageMode,
-            r.StorageTargetId, r.RemoteRetentionDays, r.TransferTimeoutMinutes), token);
-        return result.Code == BackupManagementCode.Succeeded ? Ok(Map(result.Value!)) : Failure(result.Code);
-    });
-    [HttpPost("manual-backup-policies/{id:guid}/run")]
-    [ProducesResponseType<BackupTaskCommandResponse>(200, "application/json")]
-    public Task<IActionResult> Run(Guid id, BackupTaskCommandRequest request, CancellationToken token) => Execute(async actor => Reply(await service.StartAsync(actor, id, request.RequestId, token)));
     [HttpPost("backup-tasks/{id:guid}/cancel")]
     [ProducesResponseType<BackupTaskCommandResponse>(200, "application/json")]
     public Task<IActionResult> Cancel(Guid id, BackupTaskCommandRequest request, CancellationToken token) => Execute(async actor => Reply(await service.CancelAsync(actor, id, request.RequestId, token)));
@@ -74,10 +58,6 @@ public sealed class BackupManagementController(IBackupManagementService service)
     { var actor = SqlCredentialPresentation.GetActor(User); return actor is null ? Task.FromResult<IActionResult>(Failure(BackupManagementCode.AuthenticationRequired)) : action(actor); }
     private ObjectResult Failure(BackupManagementCode code)
     { var e = BackupPresentation.Error(code); return StatusCode(e.Status, ApiProblemDetails.Create(HttpContext, e.Status, e.Code, e.Message)); }
-    private static ManualBackupPolicyResponse Map(ManualBackupPolicy x) => new(x.Id, new(x.Settings.DatabaseId, x.Settings.Name,
-        x.Settings.RetentionDays, x.Settings.BackupTimeoutMinutes, x.Settings.VerifyTimeoutMinutes, x.Settings.UseCompression,
-        x.Settings.IsEnabled, x.Settings.StorageMode, x.Settings.StorageTargetId, x.Settings.RemoteRetentionDays,
-        x.Settings.TransferTimeoutMinutes), x.Version);
     private static BackupTaskSummaryResponse Map(BackupTaskSummary x) => new(x.Id, x.PolicyName, x.DatabaseName, x.Status, x.Stage,
         x.CreatedAtUtc, x.CompletedAtUtc, x.ErrorCode, x.CancellationRequested, x.FileLength)
     {

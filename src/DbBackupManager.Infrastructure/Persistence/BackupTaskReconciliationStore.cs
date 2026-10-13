@@ -27,7 +27,7 @@ internal sealed class BackupTaskReconciliationStore(BackupTaskPersistence persis
 
         await using var context = await persistence.CreateDbContextAsync(cancellationToken);
         return await context.BackupTasks
-            .Where(task => task.PolicyId != null && task.PlanId == null && task.Status == BackupTaskStatus.NeedsAttention
+            .Where(task => task.PlanId == null && task.Status == BackupTaskStatus.NeedsAttention
                 && task.NextReconciliationAtUtc <= utcNow
                 && (task.LeaseToken == null
                     || (task.LeasePurpose == BackupLeasePurpose.Reconciliation
@@ -57,7 +57,7 @@ internal sealed class BackupTaskReconciliationStore(BackupTaskPersistence persis
                         BackupTaskStoreResultCode.NotFound);
                 }
 
-                if (task.PlanId is not null || task.PolicyId is null)
+                if (task.PlanId is not null)
                     return new BackupTaskStoreResult<BackupExecutionWorkItem>(BackupTaskStoreResultCode.StateMismatch);
 
                 if (task.LeasePurpose == BackupLeasePurpose.Reconciliation
@@ -128,7 +128,7 @@ internal sealed class BackupTaskReconciliationStore(BackupTaskPersistence persis
                 await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
                 await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, lockSnapshot.DatabaseId, cancellationToken);
                 if (await context.BackupTasks.AnyAsync(x => x.Id == lease.TaskId
-                    && (x.PlanId != null || x.PolicyId == null), cancellationToken))
+                    && x.PlanId != null, cancellationToken))
                     return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.StateMismatch);
                 var replay = await ReadMutationAsync(
                     context,
@@ -150,7 +150,7 @@ internal sealed class BackupTaskReconciliationStore(BackupTaskPersistence persis
                         BackupTaskStoreResultCode.NotFound);
                 }
 
-                if (task.PlanId is not null || task.PolicyId is null)
+                if (task.PlanId is not null)
                     return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.StateMismatch);
 
                 var leaseError = ValidateLease(task, lease, command.OccurredAtUtc);
@@ -269,7 +269,7 @@ internal sealed class BackupTaskReconciliationStore(BackupTaskPersistence persis
                 await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, lockSnapshot.DatabaseId, cancellationToken);
 
                 if (await context.BackupTasks.AnyAsync(x => x.Id == command.TaskId
-                    && (x.PlanId != null || x.PolicyId == null), cancellationToken))
+                    && x.PlanId != null, cancellationToken))
                     return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.StateMismatch);
                 var replay = await ReadMutationAsync(
                     context,
@@ -291,7 +291,7 @@ internal sealed class BackupTaskReconciliationStore(BackupTaskPersistence persis
                         BackupTaskStoreResultCode.NotFound);
                 }
 
-                if (task.PlanId is not null || task.PolicyId is null)
+                if (task.PlanId is not null)
                     return new BackupTaskStoreResult<BackupTaskStateModel>(BackupTaskStoreResultCode.StateMismatch);
 
                 var snapshot = await context.BackupTaskSnapshots.SingleAsync(

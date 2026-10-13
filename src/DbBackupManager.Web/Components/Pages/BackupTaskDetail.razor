@@ -77,7 +77,7 @@
                         <MudText Typo="Typo.body2">当前阶段：@BackupPresentation.Stage(_detail.Task.Stage)</MudText>
                         <section data-testid="task-facts">
                             <MudText Typo="Typo.body2">备份类型：@BackupPlanPresentation.BackupType(_detail.Task.BackupType)</MudText>
-                            <MudText Typo="Typo.body2">计划版本：@(_detail.Task.PlanVersionNumber is int version ? $"v{version}" : "旧策略任务")</MudText>
+                            <MudText Typo="Typo.body2">计划版本：@(_detail.Task.PlanVersionNumber is int version ? $"v{version}" : "未知")</MudText>
                             <MudText Typo="Typo.body2">SQL 执行：@BackupPlanPresentation.Fact(_detail.Task.SqlStatus)</MudText>
                             <MudText Typo="Typo.body2">文件校验：@BackupPlanPresentation.Fact(_detail.Task.FileVerifyStatus)</MudText>
                             <MudText Typo="Typo.body2">传输：@BackupPlanPresentation.Fact(_detail.Task.TransferStatus)</MudText>

@@ -34,10 +34,10 @@
     </MudStack>
 </MudPaper>
                 <MudTable T="BackupFileSummary" Items="_data.Items" Loading="Busy" Breakpoint="Breakpoint.Sm" Hover="true" Elevation="1" data-testid="file-list">
-                    <HeaderContent><MudTh>数据库 / 实例</MudTh><MudTh>备份配置</MudTh><MudTh>位置</MudTh><MudTh>备份集</MudTh><MudTh>差异基线</MudTh><MudTh>保留原因</MudTh><MudTh>状态</MudTh><MudTh>验证时间</MudTh><MudTh>大小</MudTh><MudTh>文件路径</MudTh><MudTh>保留天数</MudTh><MudTh>任务</MudTh></HeaderContent>
+                    <HeaderContent><MudTh>数据库 / 实例</MudTh><MudTh>名称</MudTh><MudTh>位置</MudTh><MudTh>备份集</MudTh><MudTh>差异基线</MudTh><MudTh>保留原因</MudTh><MudTh>状态</MudTh><MudTh>验证时间</MudTh><MudTh>大小</MudTh><MudTh>文件路径</MudTh><MudTh>保留天数</MudTh><MudTh>任务</MudTh></HeaderContent>
                     <RowTemplate>
                         <MudTd DataLabel="数据库 / 实例">@context.DatabaseName / @context.InstanceName</MudTd>
-                        <MudTd DataLabel="备份配置">@context.PolicyName</MudTd>
+                        <MudTd DataLabel="名称">@context.PolicyName</MudTd>
                         <MudTd DataLabel="位置">
                             <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
                                      Color="@(context.Location == "Remote" ? Color.Info : Color.Default)">

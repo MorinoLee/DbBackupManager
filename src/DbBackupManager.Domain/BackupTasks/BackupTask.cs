@@ -14,25 +14,6 @@ public sealed class BackupTask : ConcurrentEntity
     {
     }
 
-    public BackupTask(
-        Guid id,
-        Guid policyId,
-        BackupTaskTriggerType triggerType,
-        DateTimeOffset? scheduledSlotAtUtc)
-        : base(id)
-    {
-        PolicyId = BackupTaskValues.RequireId(policyId, nameof(policyId));
-        BackupTaskValues.RequireDefined(triggerType, nameof(triggerType));
-        ValidateTrigger(triggerType, scheduledSlotAtUtc);
-
-        TriggerType = triggerType;
-        ScheduledSlotAtUtc = BackupTaskValues.OptionalUtc(
-            scheduledSlotAtUtc,
-            nameof(scheduledSlotAtUtc));
-        Status = BackupTaskStatus.Pending;
-        CurrentStage = BackupTaskStage.Backup;
-    }
-
     public static BackupTask ForPlan(
         Guid id, Guid planId, Guid planVersionId, BackupRunPurpose purpose,
         BackupTaskTriggerType triggerType, DateTimeOffset? scheduledSlotAtUtc,
@@ -57,8 +38,6 @@ public sealed class BackupTask : ConcurrentEntity
             CurrentStage = BackupTaskStage.Backup
         };
     }
-
-    public Guid? PolicyId { get; private set; }
 
     public Guid? PlanId { get; private set; }
 

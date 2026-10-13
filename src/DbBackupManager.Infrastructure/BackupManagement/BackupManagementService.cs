@@ -17,7 +17,6 @@ public static class BackupManagementRegistration
     public static IServiceCollection AddBackupManagement(this IServiceCollection services)
     {
         services.AddScoped<IBackupManagementService, BackupManagementService>();
-        services.AddScoped<IScheduledBackupPolicyService, ScheduledBackupPolicyService>();
         services.AddScoped<IBackupMonitoringService, BackupMonitoringService>();
         services.AddScoped<IBackupPlanCatalogService, BackupPlanCatalogService>();
         services.AddScoped<ITaskEventStore, TaskEventStore>();
@@ -42,79 +41,10 @@ internal sealed class BackupManagementService(
                                  && i.ConnectionStatus == SqlConnectionStatus.Connected
                              orderby s.Name, i.Name, d.DatabaseName
                              select new BackupDatabaseChoice(d.Id, s.Name + " / " + i.Name + " / " + d.DatabaseName)).ToListAsync(token);
-        var policies = await db.BackupPolicies.AsNoTracking().Where(x => x.IsManualOnly).OrderBy(x => x.Name).ToListAsync(token);
         var rows = await Summaries(db, page: page).ToListAsync(token);
         var pageRows = await BackupSurfaceReader.EnrichTasksAsync(db, rows.Take(50).ToArray(), token);
         return new BackupManagementResult<BackupDashboard>(BackupManagementCode.Succeeded,
-            new(choices, policies.Select(Map).ToArray(), pageRows, rows.Count > 50));
-    });
-    public Task<BackupManagementResult<ManualBackupPolicy>> SavePolicyAsync(AdminSession actor, Guid? id, string? version, ManualBackupInput input, CancellationToken token = default) => Guard(async () =>
-    {
-        await using var strategyDb = await factory.CreateDbContextAsync(token);
-        return await strategyDb.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
-        {
-            await using var db = await factory.CreateDbContextAsync(token);
-            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, token);
-            await Authorize(db, actor, clock.GetUtcNow(), token);
-            if (string.IsNullOrWhiteSpace(input.Name) || input.Name.Any(char.IsControl)) throw new Rejected(BackupManagementCode.Invalid);
-            var valid = await (from d in db.ManagedDatabases
-                               join i in db.DatabaseInstances on d.InstanceId equals i.Id
-                               join s in db.DatabaseServers on i.ServerId equals s.Id
-                               where d.Id == input.DatabaseId && !d.IsSystemDatabase
-                                   && (!input.IsEnabled || d.IsManaged && d.IsAvailable && i.IsEnabled && s.IsEnabled && i.ConnectionStatus == SqlConnectionStatus.Connected)
-                               select d.Id).AnyAsync(token);
-            if (!valid) throw new Rejected(BackupManagementCode.Invalid);
-            if (!Enum.IsDefined((BackupStorageMode)input.StorageMode)) throw new Rejected(BackupManagementCode.Invalid);
-            var mode = (BackupStorageMode)input.StorageMode;
-            var localDays = mode == BackupStorageMode.RemoteOnly ? (int?)null : input.RetentionDays;
-            var remoteDays = mode == BackupStorageMode.LocalOnly ? null : input.RemoteRetentionDays;
-            if (mode != BackupStorageMode.LocalOnly)
-            {
-                if (input.StorageTargetId is null || remoteDays is null || input.TransferTimeoutMinutes is < 1 or > 1440)
-                    throw new Rejected(BackupManagementCode.Invalid);
-                var targetOk = await (from t in db.StorageTargets
-                                      join c in db.CredentialReferences on t.CredentialReferenceId equals c.Id
-                                      where t.Id == input.StorageTargetId
-                                          && (!input.IsEnabled || t.IsEnabled && c.IsEnabled)
-                                      select t.Id).AnyAsync(token);
-                if (!targetOk) throw new Rejected(BackupManagementCode.Invalid);
-            }
-            else if (input.StorageTargetId is not null || remoteDays is not null)
-            {
-                throw new Rejected(BackupManagementCode.Invalid);
-            }
-
-            var settings = new BackupPolicySettings(mode, input.StorageTargetId, BackupScheduleType.Daily, TimeOnly.MinValue,
-                BackupWeekdays.None, "UTC", localDays, remoteDays, true, input.UseCompression, true,
-                input.BackupTimeoutMinutes, input.VerifyTimeoutMinutes, input.TransferTimeoutMinutes);
-            BackupPolicy policy;
-            if (id is null)
-            { policy = new(Guid.NewGuid(), input.Name, input.DatabaseId, settings, input.IsEnabled, isManualOnly: true); db.BackupPolicies.Add(policy); }
-            else
-            {
-                policy = await db.BackupPolicies.AsTracking().SingleOrDefaultAsync(x => x.Id == id && x.IsManualOnly, token)
-                    ?? throw new Rejected(BackupManagementCode.NotFound);
-                if (version != Convert.ToBase64String(policy.RowVersion)) throw new Rejected(BackupManagementCode.Conflict);
-                if (policy.DatabaseId != input.DatabaseId) throw new Rejected(BackupManagementCode.Invalid);
-                policy.Update(input.Name, settings); policy.SetEnabled(input.IsEnabled);
-            }
-            db.AuditRecords.Add(new(actor.AdminUserId, "backup.manual_policy.save", "BackupPolicy", policy.Id.ToString("N"), "Succeeded", null));
-            await db.SaveChangesAsync(token); await tx.CommitAsync(token);
-            return new BackupManagementResult<ManualBackupPolicy>(BackupManagementCode.Succeeded, Map(policy));
-        });
-    });
-    public Task<BackupManagementResult<Guid>> StartAsync(AdminSession actor, Guid policyId, Guid requestId, CancellationToken token = default) => Guard(async () =>
-    {
-        if (requestId == Guid.Empty) throw new Rejected(BackupManagementCode.Invalid);
-        await using (var db = await factory.CreateDbContextAsync(token))
-        {
-            await Authorize(db, actor, clock.GetUtcNow(), token);
-            if (!await db.BackupPolicies.AnyAsync(x => x.Id == policyId && x.IsManualOnly && x.IsEnabled, token))
-                throw new Rejected(BackupManagementCode.NotFound);
-        }
-        var result = await store.CreateTaskAsync(new(requestId, policyId, BackupTaskTriggerType.Manual, null, requestId,
-            DateTimeOffset.UtcNow, actor.AdminUserId, actor.SecurityStamp), token);
-        return new BackupManagementResult<Guid>(MapCode(result.Code), result.Value?.TaskId ?? Guid.Empty);
+            new(choices, pageRows, rows.Count > 50));
     });
     public Task<BackupManagementResult<Guid>> CancelAsync(AdminSession actor, Guid taskId, Guid requestId, CancellationToken token = default) =>
         Mutate(actor, taskId, requestId, false, token);
@@ -198,10 +128,6 @@ internal sealed class BackupManagementService(
             file.Location.ToString(), file.Protocol.ToString(), target == null ? null : target.Name,
             file.Status.ToString(), file.DeletedAtUtc, file.DeletionErrorCode, file.Path);
 
-    private static ManualBackupPolicy Map(BackupPolicy p) => new(p.Id,
-        new(p.DatabaseId, p.Name, p.LocalRetentionDays ?? p.RemoteRetentionDays ?? 0, p.BackupTimeoutMinutes,
-            p.VerifyTimeoutMinutes, p.UseCompression, p.IsEnabled, (int)p.StorageMode, p.StorageTargetId,
-            p.RemoteRetentionDays, p.TransferTimeoutMinutes), Convert.ToBase64String(p.RowVersion));
     private static BackupManagementCode MapCode(BackupTaskStoreResultCode c) => c switch
     {
         BackupTaskStoreResultCode.Succeeded or BackupTaskStoreResultCode.AlreadyApplied or BackupTaskStoreResultCode.AlreadyExists => BackupManagementCode.Succeeded,

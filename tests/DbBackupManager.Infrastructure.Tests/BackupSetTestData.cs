@@ -1,50 +1,89 @@
 using DbBackupManager.Application.BackupSets;
 using DbBackupManager.Application.BackupTasks;
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
+using DbBackupManager.Domain.Entities;
+using DbBackupManager.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DbBackupManager.Infrastructure.Tests;
 
 internal static class BackupSetTestData
 {
-    internal static async Task<BackupExecutionWorkItem> WorkAsync(PlatformDatabaseSqlServerFixture database, Guid? policyId = null)
+    internal static async Task<BackupTaskSnapshot> HostSnapshotAsync(PlatformDatabaseSqlServerFixture database)
     {
-        if (policyId is null)
-        {
-            var suffix = Guid.NewGuid().ToString("N");
-            var source = new CredentialReference(Guid.NewGuid(), $"MetadataSource-{suffix}",
-                CredentialKind.SmbPassword, "synthetic-user", "protected:synthetic-value", "dp-v1");
-            var sql = new CredentialReference(Guid.NewGuid(), $"MetadataSql-{suffix}",
-                CredentialKind.SqlPassword, "synthetic-user", "protected:synthetic-value", "dp-v1");
-            var server = new DatabaseServer(Guid.NewGuid(), $"MetadataServer-{suffix}", @"D:\Synthetic\Backup",
-                new(FileTransferProtocol.Smb, "synthetic-host", null, "synthetic-share", source.Id, null));
-            var instance = new DatabaseInstance(Guid.NewGuid(), server.Id, $"MetadataInstance-{suffix}",
-                $"synthetic-sql-{suffix}", sql.Id, true, false, null, 30);
-            var managed = new ManagedDatabase(Guid.NewGuid(), instance.Id, $"MetadataDatabase_{suffix}",
-                false, true, DateTimeOffset.UtcNow, "FULL", "ONLINE");
-            managed.SetManaged(true);
-            var policy = new BackupPolicy(Guid.NewGuid(), $"MetadataPolicy-{suffix}", managed.Id,
-                new(BackupStorageMode.LocalOnly, null, BackupScheduleType.Daily, new(2, 0), BackupWeekdays.None,
-                    "Taipei Standard Time", 7, null, true, true, false, 120, 60, 180), isEnabled: true, nowUtc: DateTimeOffset.UtcNow);
-            await using var db = database.CreateContext();
-            db.AddRange(source, sql, server, instance, managed, policy);
-            await db.SaveChangesAsync();
-            policyId = policy.Id;
-        }
-        using var provider = database.CreateServiceProvider();
-        using var scope = provider.CreateScope();
-        var store = scope.ServiceProvider.GetRequiredService<IBackupTaskExecutionStore>();
+        var suffix = Guid.NewGuid().ToString("N");
+        var source = new CredentialReference(Guid.NewGuid(), $"MetadataSource-{suffix}",
+            CredentialKind.SmbPassword, "synthetic-user", "protected:synthetic-value", "dp-v1");
+        var sql = new CredentialReference(Guid.NewGuid(), $"MetadataSql-{suffix}",
+            CredentialKind.SqlPassword, "synthetic-user", "protected:synthetic-value", "dp-v1");
+        var server = new DatabaseServer(Guid.NewGuid(), $"MetadataServer-{suffix}", @"D:\Synthetic\Backup",
+            new(FileTransferProtocol.Smb, "synthetic-host", null, "synthetic-share", source.Id, null));
+        var instance = new DatabaseInstance(Guid.NewGuid(), server.Id, $"MetadataInstance-{suffix}",
+            $"synthetic-sql-{suffix}", sql.Id, true, false, null, 30);
+        var managed = new ManagedDatabase(Guid.NewGuid(), instance.Id, $"MetadataDatabase_{suffix}",
+            false, true, DateTimeOffset.UtcNow, "FULL", "ONLINE");
+        managed.SetManaged(true);
+        await using var db = database.CreateContext();
+        db.AddRange(source, sql, server, instance, managed);
+        await db.SaveChangesAsync();
+        return HostSnapshot(server, instance, managed);
+    }
+
+    internal static async Task<BackupExecutionWorkItem> WorkAsync(
+        PlatformDatabaseSqlServerFixture database, Guid? databaseId = null)
+    {
+        var host = databaseId is null
+            ? await HostSnapshotAsync(database)
+            : await LoadHostAsync(database, databaseId.Value);
         var now = DateTimeOffset.UtcNow;
-        var taskId = Guid.NewGuid();
-        var created = await store.CreateTaskAsync(new(taskId, policyId.Value, BackupTaskTriggerType.Manual,
-            null, Guid.NewGuid(), now));
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded, created.Code);
-        var claimed = await store.ClaimTaskAsync(taskId, new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            "合成核对测试", now, now.AddMinutes(10)));
-        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
-        return claimed.Value!;
+        await using var db = database.CreateContext();
+        var versionId = await db.BackupPlans.AsNoTracking()
+            .Where(plan => plan.DatabaseId == host.DatabaseId)
+            .Select(plan => EF.Property<Guid?>(plan, "_currentVersionId"))
+            .SingleOrDefaultAsync();
+        BackupPlanVersion version;
+        string planName;
+        if (versionId is null)
+        {
+            var definition = new BackupPlanDefinition(BackupPlanMode.Full,
+                new(BackupScheduleType.Daily, new(2, 0), BackupWeekdays.None),
+                null, null, "UTC", BackupStorageMode.LocalOnly, null, 7, null, true, true, 120, 60, 180);
+            var plan = BackupPlan.Create(Guid.NewGuid(), host.DatabaseId, $"MetadataPlan-{Guid.NewGuid():N}",
+                Guid.NewGuid(), definition, now);
+            planName = plan.Name;
+            using var provider = database.CreateServiceProvider();
+            await new BackupPlanStore(provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>()).AddAsync(plan);
+            version = await db.BackupPlanVersions.SingleAsync(item => item.PlanId == plan.Id);
+        }
+        else
+        {
+            version = await db.BackupPlanVersions.SingleAsync(item => item.Id == versionId);
+            planName = await db.BackupPlans.Where(plan => plan.Id == version.PlanId).Select(plan => plan.Name).SingleAsync();
+        }
+
+        var task = BackupTask.ForPlan(Guid.NewGuid(), version.PlanId, version.Id, BackupRunPurpose.PlanFull,
+            BackupTaskTriggerType.Manual, null);
+        var snapshot = BackupTaskSnapshot.ForPlan(task, version, planName, BackupRunPurpose.PlanFull,
+            new(host.ServerId, host.ServerName, host.InstanceId, host.InstanceName, host.DatabaseId, host.DatabaseName),
+            new(host.ConnectionAddress, host.SqlCredentialReferenceId, host.EncryptConnection, host.TrustServerCertificate,
+                host.CertificateTrustReason, host.ConnectionTimeoutSeconds, host.AllowLegacyTls, host.LegacyTlsReason),
+            new(host.LocalSqlBackupRootPath, "v3", new(host.SourceAccessProtocol, host.SourceAccessHost, host.SourceAccessPort,
+                host.SourceAccessBasePath, host.SourceCredentialReferenceId, host.SourceSftpHostKeyFingerprint)));
+        db.AddRange(task, snapshot);
+        await db.SaveChangesAsync();
+        var attemptId = Guid.NewGuid();
+        var attempt = new BackupAttempt(attemptId, task.Id, 1, now,
+            new($@"D:\Synthetic\Backup\{attemptId:N}_FULL.bak",
+                $@"\\synthetic-host\synthetic-share\{attemptId:N}_FULL.bak", null, null, null));
+        attempt.BindSqlIdentity(Guid.NewGuid(), Guid.NewGuid());
+        task.ClaimExecution(BackupStorageMode.LocalOnly, attemptId, Guid.NewGuid(), "合成核对测试", now, now.AddMinutes(10));
+        db.Add(attempt);
+        await db.SaveChangesAsync();
+        return new(task.ToStateModel(), snapshot.ToSnapshotModel(), attempt.ToAttemptModel(), task.ToLeaseHandle());
     }
 
     internal static BackupSetMetadata Full(Guid? setGuid = null) => new()
@@ -84,4 +123,24 @@ internal static class BackupSetTestData
         using var scope = provider.CreateScope();
         return await scope.ServiceProvider.GetRequiredService<IBackupSetRegistrationStore>().RegisterAsync(command);
     }
+
+    private static async Task<BackupTaskSnapshot> LoadHostAsync(PlatformDatabaseSqlServerFixture database, Guid databaseId)
+    {
+        await using var db = database.CreateContext();
+        var managed = await db.ManagedDatabases.AsNoTracking().SingleAsync(item => item.Id == databaseId);
+        var instance = await db.DatabaseInstances.AsNoTracking().SingleAsync(item => item.Id == managed.InstanceId);
+        var server = await db.DatabaseServers.AsNoTracking().SingleAsync(item => item.Id == instance.ServerId);
+        return HostSnapshot(server, instance, managed);
+    }
+
+    private static BackupTaskSnapshot HostSnapshot(DatabaseServer server, DatabaseInstance instance, ManagedDatabase managed) =>
+        new(Guid.NewGuid(), "合成主机",
+            new(server.Id, server.Name, instance.Id, instance.Name, managed.Id, managed.DatabaseName),
+            new(instance.ConnectionAddress, instance.SqlCredentialReferenceId, instance.EncryptConnection,
+                instance.TrustServerCertificate, instance.CertificateTrustReason, instance.ConnectionTimeoutSeconds,
+                instance.AllowLegacyTls, instance.LegacyTlsReason),
+            new(server.LocalBackupRootPath, "v1", new(server.StagingAccessProtocol, server.StagingAccessHost,
+                server.StagingAccessPort, server.StagingAccessBasePath, server.StagingCredentialReferenceId,
+                server.StagingSftpHostKeyFingerprint)),
+            new(BackupStorageMode.LocalOnly, null, 7, null, true, false, false, 120, 60, 180, "UTC"));
 }

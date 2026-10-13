@@ -26,7 +26,7 @@ public sealed record WorkerPresenceResponse(string Status, DateTimeOffset? LastS
 public sealed record BackupTaskPageResponse(IReadOnlyList<BackupTaskSummaryResponse> Items, int Page, long TotalCount, int PageSize, bool HasMore);
 public sealed record BackupFilePageResponse(IReadOnlyList<BackupFileSummaryResponse> Items, int Page, long TotalCount, int PageSize, bool HasMore);
 public sealed record BackupOverviewResponse(DateTimeOffset GeneratedAtUtc, DateTimeOffset RecentFromUtc,
-    int ManagedDatabases, int WithoutEnabledPolicy, int NeverVerified, int WithVerifiedFile,
+    int ManagedDatabases, int NeverVerified, int WithVerifiedFile,
     int PendingTasks, int RunningTasks, int NeedsAttentionTasks, int RecentFailedTasks,
     WorkerPresenceResponse Worker, IReadOnlyList<BackupTaskSummaryResponse> RecentTasks,
     IReadOnlyList<BackupTaskSummaryResponse> RecentFailures, IReadOnlyList<BackupFileSummaryResponse> RecentFiles);

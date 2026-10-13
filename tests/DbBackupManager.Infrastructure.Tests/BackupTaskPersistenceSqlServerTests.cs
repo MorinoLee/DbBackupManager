@@ -1,7 +1,10 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
+using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace DbBackupManager.Infrastructure.Tests;
 
@@ -13,12 +16,8 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     {
         var graph = await AddConfigurationGraphAsync();
         var now = DateTimeOffset.UtcNow;
-        var task = new BackupTask(
-            Guid.NewGuid(),
-            graph.PolicyId,
-            BackupTaskTriggerType.Scheduled,
-            now);
-        var snapshot = CreateSnapshot(task.Id, graph);
+        var task = CreateTask(graph, BackupTaskTriggerType.Scheduled, now);
+        var snapshot = CreateSnapshot(task, graph);
         var initialChange = CreateInitialChange(task.Id, Guid.NewGuid(), now);
 
         await using (var setup = database.CreateContext())
@@ -72,7 +71,7 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
         Assert.Equal(BackupTaskStatus.Running, persistedTask.Status);
         Assert.Equal(attemptId, persistedTask.CurrentBackupAttemptId);
         Assert.Equal(leaseToken, persistedTask.LeaseToken);
-        Assert.Equal(graph.PolicyName, persistedSnapshot.PolicyName);
+        Assert.Equal(graph.PlanName, persistedSnapshot.PolicyName);
         Assert.Equal(BackupStorageMode.LocalAndRemote, persistedSnapshot.StorageMode);
         Assert.Equal(BackupInvocationStatus.Prepared, persistedAttempt.BackupInvocationStatus);
         Assert.NotEmpty(persistedTask.RowVersion);
@@ -88,27 +87,22 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     {
         var graph = await AddConfigurationGraphAsync();
         var slot = DateTimeOffset.UtcNow;
-        var first = new BackupTask(
-            Guid.NewGuid(),
-            graph.PolicyId,
-            BackupTaskTriggerType.Scheduled,
-            slot);
+        var first = CreateTask(graph, BackupTaskTriggerType.Scheduled, slot);
         var mutationId = Guid.NewGuid();
 
         await using (var setup = database.CreateContext())
         {
             setup.Add(first);
+            setup.Add(CreateSnapshot(first, graph));
             setup.Add(CreateInitialChange(first.Id, mutationId, slot));
             await setup.SaveChangesAsync();
         }
 
         await using (var duplicateSlot = database.CreateContext())
         {
-            duplicateSlot.Add(new BackupTask(
-                Guid.NewGuid(),
-                graph.PolicyId,
-                BackupTaskTriggerType.Scheduled,
-                slot));
+            var duplicate = CreateTask(graph, BackupTaskTriggerType.Scheduled, slot);
+            duplicateSlot.Add(duplicate);
+            duplicateSlot.Add(CreateSnapshot(duplicate, graph));
             await Assert.ThrowsAsync<DbUpdateException>(() => duplicateSlot.SaveChangesAsync());
         }
 
@@ -119,9 +113,9 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
         }
 
         await using var manual = database.CreateContext();
-        manual.AddRange(
-            new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null),
-            new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null));
+        var left = CreateTask(graph, BackupTaskTriggerType.Manual, null);
+        var right = CreateTask(graph, BackupTaskTriggerType.Manual, null);
+        manual.AddRange(left, right, CreateSnapshot(left, graph), CreateSnapshot(right, graph));
         await manual.SaveChangesAsync();
     }
 
@@ -130,13 +124,13 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     {
         var graph = await AddConfigurationGraphAsync();
         var now = DateTimeOffset.UtcNow;
-        var ownerTask = new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null);
-        var otherTask = new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null);
+        var ownerTask = CreateTask(graph, BackupTaskTriggerType.Manual, null);
+        var otherTask = CreateTask(graph, BackupTaskTriggerType.Manual, null);
         var attempt = CreateAttempt(ownerTask.Id, Guid.NewGuid(), graph.StorageTargetId, now);
 
         await using (var setup = database.CreateContext())
         {
-            setup.AddRange(ownerTask, otherTask);
+            setup.AddRange(ownerTask, otherTask, CreateSnapshot(ownerTask, graph), CreateSnapshot(otherTask, graph));
             await setup.SaveChangesAsync();
             setup.Add(attempt);
             await setup.SaveChangesAsync();
@@ -154,11 +148,11 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     public async Task DatabaseRejectsIncompleteRunningLease()
     {
         var graph = await AddConfigurationGraphAsync();
-        var task = new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null);
+        var task = CreateTask(graph, BackupTaskTriggerType.Manual, null);
 
         await using (var setup = database.CreateContext())
         {
-            setup.Add(task);
+            setup.AddRange(task, CreateSnapshot(task, graph));
             await setup.SaveChangesAsync();
         }
 
@@ -174,11 +168,11 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     public async Task RowVersionRejectsStaleTaskUpdate()
     {
         var graph = await AddConfigurationGraphAsync();
-        var task = new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null);
+        var task = CreateTask(graph, BackupTaskTriggerType.Manual, null);
 
         await using (var setup = database.CreateContext())
         {
-            setup.Add(task);
+            setup.AddRange(task, CreateSnapshot(task, graph));
             await setup.SaveChangesAsync();
         }
 
@@ -200,12 +194,12 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     {
         var graph = await AddConfigurationGraphAsync();
         var now = DateTimeOffset.UtcNow;
-        var task = new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null);
+        var task = CreateTask(graph, BackupTaskTriggerType.Manual, null);
         var attempt = CreateAttempt(task.Id, Guid.NewGuid(), graph.StorageTargetId, now);
 
         await using (var setup = database.CreateContext())
         {
-            setup.Add(task);
+            setup.AddRange(task, CreateSnapshot(task, graph));
             await setup.SaveChangesAsync();
             setup.Add(attempt);
             await setup.SaveChangesAsync();
@@ -228,7 +222,7 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     {
         var graph = await AddConfigurationGraphAsync();
         var now = DateTimeOffset.UtcNow;
-        var task = new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null);
+        var task = CreateTask(graph, BackupTaskTriggerType.Manual, null);
         var attempt = CreateAttempt(task.Id, Guid.NewGuid(), graph.StorageTargetId, now);
         attempt.MarkBackupRunning(now.AddSeconds(1));
         attempt.RecordBackupSucceeded(now.AddSeconds(2));
@@ -236,7 +230,7 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
 
         await using (var setup = database.CreateContext())
         {
-            setup.Add(task);
+            setup.AddRange(task, CreateSnapshot(task, graph));
             await setup.SaveChangesAsync();
             setup.Add(attempt);
             await setup.SaveChangesAsync();
@@ -267,8 +261,8 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     {
         var graph = await AddConfigurationGraphAsync();
         var now = DateTimeOffset.UtcNow;
-        var task = new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null);
-        var snapshot = CreateSnapshot(task.Id, graph);
+        var task = CreateTask(graph, BackupTaskTriggerType.Manual, null);
+        var snapshot = CreateSnapshot(task, graph);
         var attempt = CreateAttempt(task.Id, Guid.NewGuid(), graph.StorageTargetId, now);
         attempt.MarkBackupRunning(now.AddSeconds(1));
         attempt.RecordBackupSucceeded(now.AddSeconds(2));
@@ -340,8 +334,8 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     {
         var graph = await AddConfigurationGraphAsync();
         var now = DateTimeOffset.UtcNow;
-        var task = new BackupTask(Guid.NewGuid(), graph.PolicyId, BackupTaskTriggerType.Manual, null);
-        var snapshot = CreateSnapshot(task.Id, graph);
+        var task = CreateTask(graph, BackupTaskTriggerType.Manual, null);
+        var snapshot = CreateSnapshot(task, graph);
         var change = CreateInitialChange(task.Id, Guid.NewGuid(), now);
 
         await using (var setup = database.CreateContext())
@@ -440,29 +434,6 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
             Guid.NewGuid(),
             $"SyntheticStorage-{suffix}",
             remoteEndpoint);
-        var policyName = $"SyntheticPolicy-{suffix}";
-        var policy = new BackupPolicy(
-            Guid.NewGuid(),
-            policyName,
-            managedDatabase.Id,
-            new BackupPolicySettings(
-                BackupStorageMode.LocalAndRemote,
-                storageTarget.Id,
-                BackupScheduleType.Daily,
-                new TimeOnly(2, 0),
-                BackupWeekdays.None,
-                "Taipei Standard Time",
-                LocalRetentionDays: 7,
-                RemoteRetentionDays: 30,
-                UseChecksum: true,
-                UseCompression: true,
-                UseCopyOnly: false,
-                BackupTimeoutMinutes: 120,
-                VerifyTimeoutMinutes: 60,
-                TransferTimeoutMinutes: 180),
-            isEnabled: true,
-            nowUtc: DateTimeOffset.UtcNow);
-
         await using var context = database.CreateContext();
         context.AddRange(
             stagingCredential,
@@ -471,13 +442,22 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
             server,
             instance,
             managedDatabase,
-            storageTarget,
-            policy);
+            storageTarget);
         await context.SaveChangesAsync();
+        var now = DateTimeOffset.UtcNow;
+        var definition = new BackupPlanDefinition(BackupPlanMode.Full,
+            new(BackupScheduleType.Daily, new TimeOnly(2, 0), BackupWeekdays.None),
+            null, null, "Taipei Standard Time", BackupStorageMode.LocalAndRemote, storageTarget.Id,
+            7, 30, true, true, 120, 60, 180);
+        var planName = $"SyntheticPlan-{suffix}";
+        var plan = BackupPlan.Create(Guid.NewGuid(), managedDatabase.Id, planName, Guid.NewGuid(), definition, now);
+        using var provider = database.CreateServiceProvider();
+        await new BackupPlanStore(provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>()).AddAsync(plan);
 
         return new ConfigurationGraph(
-            policy.Id,
-            policyName,
+            plan.Id,
+            plan.CurrentVersion,
+            planName,
             server.Id,
             server.Name,
             instance.Id,
@@ -491,11 +471,17 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
             remoteEndpoint);
     }
 
-    private static BackupTaskSnapshot CreateSnapshot(Guid taskId, ConfigurationGraph graph)
+    private static BackupTask CreateTask(
+        ConfigurationGraph graph, BackupTaskTriggerType trigger, DateTimeOffset? slot) =>
+        BackupTask.ForPlan(Guid.NewGuid(), graph.PlanId, graph.Version.Id, BackupRunPurpose.PlanFull, trigger, slot);
+
+    private static BackupTaskSnapshot CreateSnapshot(BackupTask task, ConfigurationGraph graph)
     {
-        return new BackupTaskSnapshot(
-            taskId,
-            graph.PolicyName,
+        return BackupTaskSnapshot.ForPlan(
+            task,
+            graph.Version,
+            graph.PlanName,
+            BackupRunPurpose.PlanFull,
             new BackupTaskIdentitySnapshot(
                 graph.ServerId,
                 graph.ServerName,
@@ -512,7 +498,7 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
                 ConnectionTimeoutSeconds: 30),
             new BackupSourceSnapshot(
                 @"D:\Synthetic\SqlBackup",
-                "v1",
+                "v3",
                 new FileEndpointSettings(
                     FileTransferProtocol.Smb,
                     "synthetic-smb-host",
@@ -520,18 +506,7 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
                     "synthetic-share",
                     graph.StagingCredentialId,
                     null)),
-            new BackupTaskPolicySnapshot(
-                BackupStorageMode.LocalAndRemote,
-                new BackupRemoteTargetSnapshot(graph.StorageTargetId, graph.RemoteEndpoint),
-                LocalRetentionDays: 7,
-                RemoteRetentionDays: 30,
-                UseChecksum: true,
-                UseCompression: true,
-                UseCopyOnly: false,
-                BackupTimeoutMinutes: 120,
-                VerifyTimeoutMinutes: 60,
-                TransferTimeoutMinutes: 180,
-                TimeZoneId: "Taipei Standard Time"));
+            new BackupRemoteTargetSnapshot(graph.StorageTargetId, graph.RemoteEndpoint));
     }
 
     private static BackupAttempt CreateAttempt(
@@ -573,8 +548,9 @@ public sealed class BackupTaskPersistenceSqlServerTests(PlatformDatabaseSqlServe
     }
 
     private sealed record ConfigurationGraph(
-        Guid PolicyId,
-        string PolicyName,
+        Guid PlanId,
+        BackupPlanVersion Version,
+        string PlanName,
         Guid ServerId,
         string ServerName,
         Guid InstanceId,

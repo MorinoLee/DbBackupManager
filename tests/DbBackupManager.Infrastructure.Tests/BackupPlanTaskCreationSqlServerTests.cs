@@ -41,7 +41,6 @@ public sealed class BackupPlanTaskCreationSqlServerTests(PlatformDatabaseSqlServ
         await using var db = database.CreateContext();
         var task = await db.BackupTasks.SingleAsync(x => x.Id == request.TaskId);
         var frozen = await db.BackupTaskSnapshots.SingleAsync(x => x.TaskId == task.Id);
-        Assert.Null(task.PolicyId);
         Assert.Equal(BackupTaskStatus.Pending, task.Status);
         Assert.Equal(BackupTaskStage.Backup, task.CurrentStage);
         Assert.Null(task.CurrentBackupAttemptId);

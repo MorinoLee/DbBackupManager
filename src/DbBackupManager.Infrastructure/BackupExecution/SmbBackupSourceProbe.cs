@@ -24,13 +24,10 @@ public static class BackupExecutionRegistration
         services.AddScoped<BackupTaskRunner>();
         services.AddScoped<IBackupFileRetentionStore, BackupFileRetentionStore>();
         services.AddScoped<BackupFileRetentionRunner>();
-        services.AddScoped<ISchedulableBackupPolicyReader, SchedulableBackupPolicyReader>();
-        services.AddScoped<IBackupTaskScheduler, BackupTaskScheduler>();
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton(BackupRunnerOptions.Default);
         services.AddSingleton(BackupReconciliationOptions.Default);
         services.AddSingleton(BackupFileRetentionOptions.Default);
-        services.AddSingleton(BackupScheduleWorkerOptions.Default);
         return services;
     }
 }

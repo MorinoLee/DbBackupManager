@@ -105,8 +105,7 @@ public sealed class BackupExecutionConstraintSqlServerTests(PlatformDatabaseSqlS
     {
         var first = await BackupSetTestData.WorkAsync(database);
         await using var db = database.CreateContext();
-        var policy = (await db.BackupTasks.SingleAsync(x => x.Id == first.Task.TaskId)).PolicyId!.Value;
-        var second = await BackupSetTestData.WorkAsync(database, policy);
+        var second = await BackupSetTestData.WorkAsync(database, first.Snapshot.Identity.DatabaseId);
         var op = new BackupPlanExecutionOperation(Guid.NewGuid(), first.Task.TaskId, first.Attempt.Id,
             BackupExecutionOperationKind.SqlResult, 1, Guid.NewGuid(), DateTimeOffset.UtcNow);
         var other = new BackupPlanExecutionOperation(Guid.NewGuid(), second.Task.TaskId, second.Attempt.Id,

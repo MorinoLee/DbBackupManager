@@ -20,11 +20,6 @@ internal sealed class BackupTaskExecutionStore : IBackupTaskExecutionStore
         _reconciliation = new BackupTaskReconciliationStore(persistence);
     }
 
-    public Task<BackupTaskStoreResult<BackupTaskStateModel>> CreateTaskAsync(
-        CreateBackupTaskCommand command,
-        CancellationToken cancellationToken = default) =>
-        _commands.CreateTaskAsync(command, cancellationToken);
-
     public Task<BackupTaskStoreResult<BackupExecutionWorkItem>> ClaimNextAsync(
         ClaimNextBackupTaskCommand command,
         CancellationToken cancellationToken = default) =>

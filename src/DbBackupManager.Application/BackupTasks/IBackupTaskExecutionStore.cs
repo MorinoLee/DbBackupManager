@@ -4,10 +4,6 @@ namespace DbBackupManager.Application.BackupTasks;
 
 public interface IBackupTaskExecutionStore
 {
-    Task<BackupTaskStoreResult<BackupTaskStateModel>> CreateTaskAsync(
-        CreateBackupTaskCommand command,
-        CancellationToken cancellationToken = default);
-
     Task<BackupTaskStoreResult<BackupExecutionWorkItem>> ClaimNextAsync(
         ClaimNextBackupTaskCommand command,
         CancellationToken cancellationToken = default);

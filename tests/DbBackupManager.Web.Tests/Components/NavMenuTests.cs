@@ -49,8 +49,6 @@ public sealed class NavMenuTests : MudBlazorComponentTest
     [InlineData("/databases", true, false, false)]
     [InlineData("/backup-tasks", false, true, false)]
     [InlineData("/backup-plans", false, true, false)]
-    [InlineData("/backup-policies", false, true, false)]
-    [InlineData("/scheduled-backup-policies", false, true, false)]
     [InlineData("/backup-tasks/9f2b1c6d-0000-4000-8000-000000000000", false, true, false)]
     [InlineData("/storage-targets", false, true, false)]
     [InlineData("/backup-files", false, true, false)]

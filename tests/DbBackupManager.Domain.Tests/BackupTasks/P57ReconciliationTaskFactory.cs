@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 
 namespace DbBackupManager.Domain.Tests.BackupTasks;
@@ -9,9 +10,11 @@ internal static class P57ReconciliationTaskFactory
         DateTimeOffset now,
         out Guid executionToken)
     {
-        var task = new BackupTask(
+        var task = BackupTask.ForPlan(
             Guid.NewGuid(),
             Guid.NewGuid(),
+            Guid.NewGuid(),
+            BackupRunPurpose.PlanFull,
             BackupTaskTriggerType.Manual,
             null);
         executionToken = Guid.NewGuid();

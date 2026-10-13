@@ -90,8 +90,7 @@ public sealed class BackupSetSqlServerTests(PlatformDatabaseSqlServerFixture dat
         var full = BackupSetTestData.Command(fullWork);
         await BackupSetTestData.RegisterAsync(database, full);
         await using var db = database.CreateContext();
-        var policyId = await db.BackupTasks.Where(x => x.Id == fullWork.Task.TaskId).Select(x => x.PolicyId).SingleAsync();
-        var diffWork = await BackupSetTestData.WorkAsync(database, policyId);
+        var diffWork = await BackupSetTestData.WorkAsync(database, fullWork.Snapshot.Identity.DatabaseId);
         var facts = full.Metadata with
         {
             BackupSetGuid = BackupMetadata.Known(Guid.NewGuid()),

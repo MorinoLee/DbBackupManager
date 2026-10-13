@@ -71,7 +71,7 @@ public sealed class BackupTaskSnapshot
 
     public Guid TaskId { get; private set; }
 
-    // 旧策略快照保持空值，不把旧 COPY_ONLY 开关反推为计划用途。
+    // 未走 ForPlan 的快照保持空用途，不把 COPY_ONLY 开关反推为计划用途。
     public BackupRunPurpose? Purpose { get; private set; }
 
     public static BackupTaskSnapshot ForPlan(
@@ -82,7 +82,7 @@ public sealed class BackupTaskSnapshot
         ArgumentNullException.ThrowIfNull(task);
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(version);
-        if (task.PlanId is null || task.PlanVersionId is null || task.PolicyId is not null
+        if (task.PlanId is null || task.PlanVersionId is null
             || task.PlanId != version.PlanId || task.PlanVersionId != version.Id
             || task.BackupType != BackupPlanRules.ToBackupType(purpose)
             || purpose != BackupRunPurpose.AdHocCopyOnlyFull && !BackupPlanRules.Includes(version.Mode, task.BackupType))

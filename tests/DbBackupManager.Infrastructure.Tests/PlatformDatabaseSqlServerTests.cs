@@ -1,4 +1,5 @@
 using DbBackupManager.Application.Identity;
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Domain.Entities;
@@ -45,34 +46,19 @@ public sealed class PlatformDatabaseSqlServerTests(PlatformDatabaseSqlServerFixt
         var instance = await context.DatabaseInstances
             .AsNoTracking()
             .SingleAsync(x => x.Id == graph.InstanceId);
-        var policy = await context.BackupPolicies
+        var plan = await context.BackupPlans
             .AsNoTracking()
-            .SingleAsync(x => x.Id == graph.PolicyId);
+            .Include(item => item.Versions)
+            .SingleAsync(x => x.Id == graph.PlanId);
 
         Assert.Equal("protected:synthetic-sql-secret", credential.ProtectedSecret);
         Assert.Equal("dp-v1", credential.ProtectionVersion);
         Assert.True(instance.EncryptConnection);
         Assert.False(instance.TrustServerCertificate);
-        Assert.Equal(BackupStorageMode.LocalAndRemote, policy.StorageMode);
+        Assert.Equal(BackupStorageMode.LocalAndRemote, plan.CurrentVersion.StorageMode);
         Assert.NotEmpty(credential.RowVersion);
         Assert.NotEmpty(instance.RowVersion);
-        Assert.NotEmpty(policy.RowVersion);
-    }
-
-    [Fact]
-    public async Task OnlyOneEnabledFullPolicyPerDatabaseIsAllowed()
-    {
-        var graph = await AddConfigurationGraphAsync();
-        await using var context = database.CreateContext();
-        context.BackupPolicies.Add(new BackupPolicy(
-            Guid.NewGuid(),
-            $"重复启用策略-{Guid.NewGuid():N}",
-            graph.DatabaseId,
-            CreatePolicySettings(graph.StorageTargetId),
-            isEnabled: true,
-            nowUtc: DateTimeOffset.UtcNow));
-
-        await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
+        Assert.NotEmpty(plan.RowVersion);
     }
 
     [Fact]
@@ -319,14 +305,6 @@ public sealed class PlatformDatabaseSqlServerTests(PlatformDatabaseSqlServerFixt
                 "/synthetic/root",
                 remoteCredential.Id,
                 "SHA256:synthetic-host-key"));
-        var policy = new BackupPolicy(
-            Guid.NewGuid(),
-            $"合成备份策略-{suffix}",
-            managedDatabase.Id,
-            CreatePolicySettings(storageTarget.Id),
-            isEnabled: true,
-            nowUtc: DateTimeOffset.UtcNow);
-
         await using var context = database.CreateContext();
         context.AddRange(
             stagingCredential,
@@ -335,35 +313,33 @@ public sealed class PlatformDatabaseSqlServerTests(PlatformDatabaseSqlServerFixt
             server,
             instance,
             managedDatabase,
-            storageTarget,
-            policy);
+            storageTarget);
         await context.SaveChangesAsync();
+        var definition = new BackupPlanDefinition(
+            BackupPlanMode.Full,
+            new(BackupScheduleType.Weekly, new TimeOnly(2, 0), BackupWeekdays.Monday | BackupWeekdays.Thursday),
+            null,
+            null,
+            "Taipei Standard Time",
+            BackupStorageMode.LocalAndRemote,
+            storageTarget.Id,
+            7,
+            30,
+            true,
+            true,
+            120,
+            60,
+            180);
+        var plan = BackupPlan.Create(Guid.NewGuid(), managedDatabase.Id, $"合成备份计划-{suffix}", Guid.NewGuid(), definition, DateTimeOffset.UtcNow);
+        using var provider = database.CreateServiceProvider();
+        await new BackupPlanStore(provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>()).AddAsync(plan);
 
         return new ConfigurationGraphIds(
             sqlCredential.Id,
             instance.Id,
             managedDatabase.Id,
             storageTarget.Id,
-            policy.Id);
-    }
-
-    private static BackupPolicySettings CreatePolicySettings(Guid storageTargetId)
-    {
-        return new BackupPolicySettings(
-            BackupStorageMode.LocalAndRemote,
-            storageTargetId,
-            BackupScheduleType.Weekly,
-            new TimeOnly(2, 0),
-            BackupWeekdays.Monday | BackupWeekdays.Thursday,
-            "Taipei Standard Time",
-            LocalRetentionDays: 7,
-            RemoteRetentionDays: 30,
-            UseChecksum: true,
-            UseCompression: true,
-            UseCopyOnly: false,
-            BackupTimeoutMinutes: 120,
-            VerifyTimeoutMinutes: 60,
-            TransferTimeoutMinutes: 180);
+            plan.Id);
     }
 
     private sealed record ConfigurationGraphIds(
@@ -371,5 +347,5 @@ public sealed class PlatformDatabaseSqlServerTests(PlatformDatabaseSqlServerFixt
         Guid InstanceId,
         Guid DatabaseId,
         Guid StorageTargetId,
-        Guid PolicyId);
+        Guid PlanId);
 }

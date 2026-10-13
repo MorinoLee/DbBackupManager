@@ -35,16 +35,6 @@ public sealed record BackupTaskStoreResult<T>(BackupTaskStoreResultCode Code, T?
         or BackupTaskStoreResultCode.AlreadyExists;
 }
 
-public sealed record CreateBackupTaskCommand(
-    Guid TaskId,
-    Guid PolicyId,
-    BackupTaskTriggerType TriggerType,
-    DateTimeOffset? ScheduledSlotAtUtc,
-    Guid MutationId,
-    DateTimeOffset OccurredAtUtc,
-    Guid? ActorAdminUserId = null,
-    string? ActorSecurityStamp = null);
-
 public sealed record ClaimNextBackupTaskCommand(
     Guid LeaseToken,
     Guid BackupAttemptId,

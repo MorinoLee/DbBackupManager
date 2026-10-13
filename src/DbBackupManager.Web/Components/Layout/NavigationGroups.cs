@@ -9,7 +9,7 @@ internal static class NavigationGroups
     public static bool IsDatabase(string path) => MatchesAny(path, "/servers", "/databases");
 
     public static bool IsBackup(string path) =>
-        MatchesAny(path, "/backups", "/backup-plans", "/backup-policies", "/scheduled-backup-policies", "/storage-targets", "/backup-tasks", "/backup-files");
+        MatchesAny(path, "/backups", "/backup-plans", "/storage-targets", "/backup-tasks", "/backup-files");
 
     public static bool IsSystem(string path) =>
         MatchesAny(path, "/sql-credentials", "/file-credentials", "/notifications", "/change-password");

@@ -41,8 +41,6 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
 
     public DbSet<StorageTarget> StorageTargets => Set<StorageTarget>();
 
-    public DbSet<BackupPolicy> BackupPolicies => Set<BackupPolicy>();
-
     public DbSet<BackupPlan> BackupPlans => Set<BackupPlan>();
 
     public DbSet<BackupPlanVersion> BackupPlanVersions => Set<BackupPlanVersion>();

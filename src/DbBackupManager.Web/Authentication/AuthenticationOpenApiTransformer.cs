@@ -49,7 +49,7 @@ internal sealed class AuthenticationOpenApiTransformer :
             && summary is OpenApiSchema summarySchema)
         {
             Describe(summarySchema, "hasCurrentPlan",
-                "为假时 locations 为空。没有当前计划的数据库仍由旧策略模型负责，不合成计划恢复窗口。");
+                "为假时 locations 为空。没有当前计划时不合成恢复窗口。");
             Describe(summarySchema, "locations",
                 "仅当 hasCurrentPlan 为真时返回各存储位置的恢复投影。");
         }
