@@ -82,7 +82,8 @@ public sealed record BackupLocationRecovery(
 public sealed record BackupRecoverySummary(
     Guid DatabaseId,
     bool HasCurrentPlan,
-    IReadOnlyList<BackupLocationRecovery> Locations);
+    IReadOnlyList<BackupLocationRecovery> Locations,
+    string? BaselineNotice = null);
 
 public sealed record BackupPlanListItem(
     Guid Id,

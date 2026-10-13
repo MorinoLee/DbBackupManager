@@ -46,6 +46,9 @@ public sealed class WorkerHostTests
             service => service.GetType().Name is "BackupRecoveryWorkerService" or "BackupWorkerService");
         Assert.Contains(
             host.Services.GetServices<IHostedService>(),
+            service => service.GetType().Name == "BackupPlanWorkerService");
+        Assert.Contains(
+            host.Services.GetServices<IHostedService>(),
             service => service.GetType().Name == "BackupRetentionWorkerService");
         Assert.Contains(
             host.Services.GetServices<IHostedService>(),

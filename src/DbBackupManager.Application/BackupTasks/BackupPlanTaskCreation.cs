@@ -17,7 +17,7 @@ public enum BackupPlanTaskCreationCode
 {
     Created, AlreadyApplied, AlreadyExists, InvalidRequest, AuthenticationRequired,
     NotFound, VersionConflict, PurposeNotInMode, PlanPaused, InvalidSlot,
-    ConfigurationUnavailable, RequestConflict, ConcurrencyConflict, StageNotOpen
+    ConfigurationUnavailable, RequestConflict, ConcurrencyConflict, StageNotOpen, BaselineRequired
 }
 
 public sealed record CreatedBackupPlanTask(

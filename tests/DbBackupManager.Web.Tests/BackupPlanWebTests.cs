@@ -122,6 +122,63 @@ public sealed class BackupPlanWebTests
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/backup-policies")).StatusCode);
     }
 
+    [Fact]
+    public async Task ManualRunRequiresCsrfAndRejectsDifferentialWithoutABaseline()
+    {
+        await using var host = await AuthTestHost.CreateAsync(services =>
+        {
+            services.RemoveAll<ITargetSqlReadOnlyProbe>();
+            services.AddSingleton<ITargetSqlReadOnlyProbe, FakeProbe>();
+        });
+        var client = host.Client;
+        var token = (await client.GetFromJsonAsync<CsrfTokenResponse>("/api/v1/auth/csrf"))!.Token;
+        using var setup = await SendAsync(client, HttpMethod.Post, "/api/v1/auth/setup", new AdminSetupRequest("admin", "synthetic-password"), token);
+        Assert.Equal(HttpStatusCode.OK, setup.StatusCode);
+        token = (await client.GetFromJsonAsync<CsrfTokenResponse>("/api/v1/auth/csrf"))!.Token;
+        var databaseId = await PrepareDatabaseAsync(client, token);
+        var paused = Plan(databaseId, "暂停后仍可手动完整备份", mode: 1, paused: true);
+        using var created = await SendAsync(client, HttpMethod.Post, "/api/v1/backup-plans", paused, token);
+        var plan = (await created.Content.ReadFromJsonAsync<BackupPlanResponse>())!;
+        var fullRequest = new RunBackupPlanRequest { TaskId = Guid.NewGuid(), MutationId = Guid.NewGuid(), Purpose = "PlanFull" };
+
+        using var missingCsrf = await client.PostAsJsonAsync($"/api/v1/backup-plans/{plan.Id}/runs", fullRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, missingCsrf.StatusCode);
+        Assert.Equal("invalid_csrf_token", await ReadCodeAsync(missingCsrf));
+
+        using var full = await SendAsync(client, HttpMethod.Post, $"/api/v1/backup-plans/{plan.Id}/runs", fullRequest, token);
+        var fullBody = (await full.Content.ReadFromJsonAsync<RunBackupPlanResponse>())!;
+        Assert.Equal(HttpStatusCode.OK, full.StatusCode);
+        Assert.Equal("PlanFull", fullBody.Purpose);
+        Assert.False(fullBody.UseCopyOnly);
+        Assert.Equal(plan.CurrentVersionId, fullBody.PlanVersionId);
+
+        using var replay = await SendAsync(client, HttpMethod.Post, $"/api/v1/backup-plans/{plan.Id}/runs", fullRequest, token);
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        Assert.Equal(fullBody.TaskId, (await replay.Content.ReadFromJsonAsync<RunBackupPlanResponse>())!.TaskId);
+
+        var copyRequest = new RunBackupPlanRequest { TaskId = Guid.NewGuid(), MutationId = Guid.NewGuid(), Purpose = "AdHocCopyOnlyFull" };
+        using var copy = await SendAsync(client, HttpMethod.Post, $"/api/v1/backup-plans/{plan.Id}/runs", copyRequest, token);
+        var copyBody = (await copy.Content.ReadFromJsonAsync<RunBackupPlanResponse>())!;
+        Assert.Equal(HttpStatusCode.OK, copy.StatusCode);
+        Assert.True(copyBody.UseCopyOnly);
+
+        var logRequest = new RunBackupPlanRequest { TaskId = Guid.NewGuid(), MutationId = Guid.NewGuid(), Purpose = "PlanLog" };
+        using var log = await SendAsync(client, HttpMethod.Post, $"/api/v1/backup-plans/{plan.Id}/runs", logRequest, token);
+        Assert.Equal(HttpStatusCode.BadRequest, log.StatusCode);
+        Assert.Equal("backup_plan_stage_not_open", await ReadCodeAsync(log));
+
+        var differential = Plan(databaseId, "完整加差异", mode: 2, paused: false, version: plan.Version, differential: new BackupPlanScheduleRequest { ScheduleType = 1, LocalTime = new TimeOnly(2, 30) });
+        using var updated = await SendAsync(client, HttpMethod.Put, $"/api/v1/backup-plans/{plan.Id}", differential, token);
+        Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        var diffRequest = new RunBackupPlanRequest { TaskId = Guid.NewGuid(), MutationId = Guid.NewGuid(), Purpose = "PlanDifferential" };
+        using var rejected = await SendAsync(client, HttpMethod.Post, $"/api/v1/backup-plans/{plan.Id}/runs", diffRequest, token);
+        Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
+        Assert.Equal("backup_plan_baseline_required", await ReadCodeAsync(rejected));
+
+        using var recovery = await client.GetAsync($"/api/v1/databases/{databaseId}/backup-recovery");
+        Assert.Equal(HttpStatusCode.OK, recovery.StatusCode);
+    }
+
     private static SaveBackupPlanRequest Plan(
         Guid databaseId, string name, int mode, bool paused, string? version = null, BackupPlanScheduleRequest? differential = null) => new()
         {

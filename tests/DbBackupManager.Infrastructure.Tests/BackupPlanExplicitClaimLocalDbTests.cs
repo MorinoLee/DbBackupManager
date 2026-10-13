@@ -12,9 +12,7 @@ public sealed class BackupPlanExplicitClaimLocalDbTests(PlatformDatabaseSqlServe
 {
     [Theory]
     [InlineData(BackupRunPurpose.PlanLog, BackupStorageMode.LocalOnly)]
-    [InlineData(BackupRunPurpose.AdHocCopyOnlyFull, BackupStorageMode.LocalOnly)]
     [InlineData(BackupRunPurpose.PlanLog, BackupStorageMode.RemoteOnly)]
-    [InlineData(BackupRunPurpose.AdHocCopyOnlyFull, BackupStorageMode.RemoteOnly)]
     public async Task ClosedPurposeAndModeAreRejectedBeforeClaimAndAttempt(BackupRunPurpose purpose, BackupStorageMode mode)
     {
         await using var test = await PlanExecutionTestEnvironment.CreateAsync(platform, mode);

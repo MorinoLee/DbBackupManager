@@ -54,7 +54,7 @@ internal sealed class BackupPlanCatalogService(
             await Authorize(db, actor, clock.GetUtcNow(), cancellationToken);
             var plan = await Plans(db).SingleOrDefaultAsync(item => item.DatabaseId == databaseId, cancellationToken)
                 ?? throw new Rejected(BackupPlanCatalogCode.NotFound);
-            return Succeeded(plan);
+            return Succeeded(plan, (await BackupPlanBaselineFacts.ReadAsync(db, plan.DatabaseId, cancellationToken)).Notice);
         });
 
     public Task<BackupPlanCatalogResult<BackupPlanView>> GetAsync(
@@ -70,7 +70,7 @@ internal sealed class BackupPlanCatalogService(
             await Authorize(db, actor, clock.GetUtcNow(), cancellationToken);
             var plan = await Plans(db).SingleOrDefaultAsync(item => item.Id == planId, cancellationToken)
                 ?? throw new Rejected(BackupPlanCatalogCode.NotFound);
-            return Succeeded(plan);
+            return Succeeded(plan, (await BackupPlanBaselineFacts.ReadAsync(db, plan.DatabaseId, cancellationToken)).Notice);
         });
 
     public Task<BackupPlanCatalogResult<BackupPlanView>> CreateAsync(
@@ -118,9 +118,10 @@ internal sealed class BackupPlanCatalogService(
                 item.Conclusion,
                 surface.Baseline,
                 item.Copies.Select(copy => copy.Reason).ToArray())).ToArray();
+            var notice = (await BackupPlanBaselineFacts.ReadAsync(db, databaseId, cancellationToken)).Notice;
             return new BackupPlanCatalogResult<BackupRecoverySummary>(
                 BackupPlanCatalogCode.Succeeded,
-                new BackupRecoverySummary(databaseId, surface.HasCurrentPlan, locations));
+                new BackupRecoverySummary(databaseId, surface.HasCurrentPlan, locations, notice));
         });
 
     private Task<BackupPlanCatalogResult<BackupPlanView>> SaveAsync(
@@ -222,8 +223,25 @@ internal sealed class BackupPlanCatalogService(
                         await db.SaveChangesAsync(cancellationToken);
                     }
 
+                    var supplement = await BackupPlanBaselineSupplementCore.ApplyAsync(
+                        db,
+                        plan,
+                        actor,
+                        Guid.NewGuid(),
+                        clock.GetUtcNow().ToUniversalTime(),
+                        cancellationToken);
+                    if (supplement.Code == BackupPlanBaselineSupplementCode.Conflict)
+                    {
+                        throw new Rejected(BackupPlanCatalogCode.VersionConflict);
+                    }
+
+                    var notice = (await BackupPlanBaselineFacts.ReadAsync(db, plan.DatabaseId, cancellationToken)).Notice;
                     await tx.CommitAsync(cancellationToken);
-                    return Succeeded(plan);
+                    return Succeeded(plan, notice);
+                }
+                catch (DbUpdateException exception) when (BackupPlanBaselineSupplementCore.IsEnablementUnique(exception))
+                {
+                    return new BackupPlanCatalogResult<BackupPlanView>(BackupPlanCatalogCode.VersionConflict);
                 }
                 catch (DbUpdateException exception) when (IsUniqueConstraint(exception))
                 {
@@ -340,10 +358,10 @@ internal sealed class BackupPlanCatalogService(
     private static AuditRecord Audit(AdminSession actor, string action, Guid planId) =>
         new(actor.AdminUserId, action, "BackupPlan", planId.ToString("N"), "Succeeded", null);
 
-    private static BackupPlanCatalogResult<BackupPlanView> Succeeded(BackupPlan plan) =>
-        new(BackupPlanCatalogCode.Succeeded, Map(plan));
+    private static BackupPlanCatalogResult<BackupPlanView> Succeeded(BackupPlan plan, string? notice = null) =>
+        new(BackupPlanCatalogCode.Succeeded, Map(plan, notice));
 
-    private static BackupPlanView Map(BackupPlan plan)
+    private static BackupPlanView Map(BackupPlan plan, string? notice = null)
     {
         var version = plan.CurrentVersion;
         return new BackupPlanView(
@@ -368,7 +386,7 @@ internal sealed class BackupPlanCatalogService(
             version.VerifyTimeoutMinutes,
             version.TransferTimeoutMinutes,
             version.EffectiveFromUtc,
-            []);
+            notice is null ? [] : [notice]);
     }
 
     private static async Task Authorize(PlatformDbContext db, AdminSession actor, DateTimeOffset nowUtc, CancellationToken token)
