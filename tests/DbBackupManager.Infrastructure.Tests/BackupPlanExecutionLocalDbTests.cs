@@ -197,6 +197,8 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
         {
             await master.OpenAsync();
             await using (var create = new SqlCommand($"CREATE DATABASE [{name}];", master)) await create.ExecuteNonQueryAsync();
+            // LocalDB 的 model 默认 AUTO_CLOSE。库被自动关闭后 database_guid 与 family_guid 会重新变空，准备探针将其视为无效响应。
+            await using (var autoClose = new SqlCommand($"ALTER DATABASE [{name}] SET AUTO_CLOSE OFF;", master)) await autoClose.ExecuteNonQueryAsync();
             await WaitUntilRecoveryIdentityIsVisibleAsync(master, name);
             var factory = new TrackingFactory(platform, interceptors);
             var connections = new LocalSqlConnections(master.ConnectionString, factory);
@@ -393,7 +395,7 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
             DeleteTestDirectory(_root);
         }
     }
-    // CREATE DATABASE 返回后，sys.database_recovery_status 的 GUID 可能仍为空；准备探针把空值当成无效响应。
+    // CREATE DATABASE 返回后，sys.database_recovery_status 的 GUID 可能仍为空；准备探针把空值当成无效响应。自动关闭已另行关掉。
     private static async Task WaitUntilRecoveryIdentityIsVisibleAsync(SqlConnection master, string databaseName)
     {
         await using var command = new SqlCommand("""
