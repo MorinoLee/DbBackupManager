@@ -11,7 +11,14 @@ public sealed record BackupPage<T>(IReadOnlyList<T> Items, int Page, long TotalC
 public sealed record BackupFileSummary(Guid TaskId, Guid DatabaseId, string DatabaseName, string InstanceName,
     string PolicyName, string SqlPath, long LengthBytes, DateTimeOffset VerifiedAtUtc, int RetentionDays,
     Guid FileId, string Location, string Protocol, string? TargetDisplayName, string Status,
-    DateTimeOffset? DeletedAtUtc, string? ErrorCode, string Path);
+    DateTimeOffset? DeletedAtUtc, string? ErrorCode, string Path)
+{
+    public Guid? BackupSetId { get; init; }
+
+    public Guid? DifferentialBaseBackupSetId { get; init; }
+
+    public string? RetentionReason { get; init; }
+}
 public sealed record WorkerPresence(string Status, DateTimeOffset? LastSeenAtUtc, int OfflineAfterSeconds = 90);
 public sealed record BackupOverview(DateTimeOffset GeneratedAtUtc, DateTimeOffset RecentFromUtc,
     int ManagedDatabases, int WithoutEnabledPolicy, int NeverVerified, int WithVerifiedFile,

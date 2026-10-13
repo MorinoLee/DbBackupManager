@@ -14,7 +14,14 @@ public sealed class BackupSearchRequest
 public sealed record BackupFileSummaryResponse(Guid TaskId, Guid DatabaseId, string DatabaseName, string InstanceName,
     string PolicyName, string SqlPath, long LengthBytes, DateTimeOffset VerifiedAtUtc, int RetentionDays,
     Guid FileId, string Location, string Protocol, string? TargetDisplayName, string Status,
-    DateTimeOffset? DeletedAtUtc, string? ErrorCode, string Path);
+    DateTimeOffset? DeletedAtUtc, string? ErrorCode, string Path)
+{
+    public Guid? BackupSetId { get; init; }
+
+    public Guid? DifferentialBaseBackupSetId { get; init; }
+
+    public string? RetentionReason { get; init; }
+}
 public sealed record WorkerPresenceResponse(string Status, DateTimeOffset? LastSeenAtUtc, int OfflineAfterSeconds);
 public sealed record BackupTaskPageResponse(IReadOnlyList<BackupTaskSummaryResponse> Items, int Page, long TotalCount, int PageSize, bool HasMore);
 public sealed record BackupFilePageResponse(IReadOnlyList<BackupFileSummaryResponse> Items, int Page, long TotalCount, int PageSize, bool HasMore);

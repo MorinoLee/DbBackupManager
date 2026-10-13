@@ -169,6 +169,16 @@ public sealed class BackupPlan : ConcurrentEntity
         return plan;
     }
 
+    /// <summary>
+    /// 循环外键要求先插入计划和版本。返回当前版本标识并暂时清空指针，调用方必须在同一事务内写回。
+    /// </summary>
+    internal Guid DetachCurrentVersion()
+    {
+        var versionId = CurrentVersionId;
+        _currentVersionId = null;
+        return versionId;
+    }
+
     public void Rename(string name)
     {
         var validatedName = ConfigurationValues.RequireText(name, 200, nameof(name));

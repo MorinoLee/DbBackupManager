@@ -21,7 +21,7 @@ public sealed class ScheduledBackupPolicySqlServerTests(PlatformDatabaseSqlServe
         var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
         var clock = new FrozenTime(new DateTimeOffset(2026, 9, 18, 1, 0, 0, TimeSpan.Zero));
         var scheduled = new ScheduledBackupPolicyService(factory, clock);
-        var manual = new BackupManagementService(factory, new BackupTaskExecutionStore(factory));
+        var manual = new BackupManagementService(factory, new BackupTaskExecutionStore(factory), TimeProvider.System);
 
         var created = await scheduled.SaveAsync(seed.Actor, null, null, EnabledDaily(seed.DatabaseId, $"计划-启用-{Guid.NewGuid():N}"));
         Assert.Equal(BackupManagementCode.Succeeded, created.Code);

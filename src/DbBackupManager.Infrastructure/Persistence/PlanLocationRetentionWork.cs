@@ -1,3 +1,4 @@
+using DbBackupManager.Application.BackupPlans;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupSets;
@@ -7,8 +8,20 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
+internal sealed record PlanLocationSurface(
+    bool HasCurrentPlan,
+    ActiveBaseline Baseline,
+    IReadOnlyList<PlanLocationAssessment> Assessments);
+
 internal static class PlanLocationRetentionWork
 {
+    internal static async Task<IReadOnlyList<PlanLocationAssessment>> LoadAsync(
+        PlatformDbContext db,
+        Guid databaseId,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken) =>
+        (await LoadSurfaceAsync(db, databaseId, nowUtc, cancellationToken)).Assessments;
+
     internal const string ClaimedReason = "plan.retention.claimed";
     internal const string StagingClaimedReason = "plan.staging.claimed";
     internal const string ReleasedReason = "plan.retention.protected";
@@ -52,7 +65,7 @@ internal static class PlanLocationRetentionWork
             .ToHashSet();
     }
 
-    internal static async Task<IReadOnlyList<PlanLocationAssessment>> LoadAsync(
+    internal static async Task<PlanLocationSurface> LoadSurfaceAsync(
         PlatformDbContext db,
         Guid databaseId,
         DateTimeOffset nowUtc,
@@ -140,7 +153,7 @@ internal static class PlanLocationRetentionWork
         var unproven = sets.Any(set => set.Metadata.Type.State != BackupMetadataState.Known
             || set.Metadata.Type.Value == BackupType.Differential && !Proven(set));
         var baseline = ResolveBaseline(version?.Mode, evidence, sets);
-        return PlanLocationRecovery.Evaluate(
+        var assessments = PlanLocationRecovery.Evaluate(
                 nowUtc,
                 baseline,
                 unproven,
@@ -155,6 +168,139 @@ internal static class PlanLocationRetentionWork
                 result.Conclusion,
                 result.Copies))
             .ToArray();
+        return new PlanLocationSurface(version is not null, baseline, assessments);
+    }
+
+    /// <summary>
+    /// 只加载本页副本、它们的备份集和同一备份集的其他副本。某个库还有未加载的历史时，窗口类原因保持未知。
+    /// </summary>
+    internal static async Task<IReadOnlyDictionary<Guid, string>> ReasonsForFilesAsync(
+        PlatformDbContext db,
+        IReadOnlyCollection<Guid> fileIds,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken)
+    {
+        if (fileIds.Count == 0)
+        {
+            return new Dictionary<Guid, string>();
+        }
+
+        var pageIds = fileIds.Distinct().ToArray();
+        var pageSet = pageIds.ToHashSet();
+        var files = await db.BackupFiles.AsNoTracking()
+            .Where(file => pageIds.Contains(file.Id))
+            .ToListAsync(cancellationToken);
+        if (files.Count == 0)
+        {
+            return new Dictionary<Guid, string>();
+        }
+
+        var setIds = files.Where(file => file.BackupSetId is not null).Select(file => file.BackupSetId!.Value).Distinct().ToArray();
+        var sets = setIds.Length == 0
+            ? new List<BackupSet>()
+            : await db.BackupSets.AsNoTracking().Where(set => setIds.Contains(set.Id)).ToListAsync(cancellationToken);
+        var loadedSetIds = sets.Select(set => set.Id).ToHashSet();
+        var baseIds = sets
+            .Where(set => set.BaseBackupSetId is { } baseId && loadedSetIds.Add(baseId))
+            .Select(set => set.BaseBackupSetId!.Value)
+            .Distinct()
+            .ToArray();
+        if (baseIds.Length > 0)
+        {
+            sets.AddRange(await db.BackupSets.AsNoTracking().Where(set => baseIds.Contains(set.Id)).ToListAsync(cancellationToken));
+        }
+
+        var knownSetIds = sets.Select(set => set.Id).ToArray();
+        if (knownSetIds.Length > 0)
+        {
+            files.AddRange(await db.BackupFiles.AsNoTracking()
+                .Where(file => file.BackupSetId != null && knownSetIds.Contains(file.BackupSetId.Value) && !pageIds.Contains(file.Id))
+                .ToListAsync(cancellationToken));
+        }
+
+        var databaseIds = files.Select(file => file.DatabaseId).Distinct().ToArray();
+        var fileCounts = await db.BackupFiles.AsNoTracking()
+            .Where(file => databaseIds.Contains(file.DatabaseId))
+            .GroupBy(file => file.DatabaseId)
+            .Select(group => new { DatabaseId = group.Key, Count = group.Count() })
+            .ToListAsync(cancellationToken);
+        var setCounts = await db.BackupSets.AsNoTracking()
+            .Where(set => databaseIds.Contains(set.DatabaseId))
+            .GroupBy(set => set.DatabaseId)
+            .Select(group => new { DatabaseId = group.Key, Count = group.Count() })
+            .ToListAsync(cancellationToken);
+        var fileCountByDatabase = fileCounts.ToDictionary(item => item.DatabaseId, item => item.Count);
+        var setCountByDatabase = setCounts.ToDictionary(item => item.DatabaseId, item => item.Count);
+        var taskIds = files.Select(file => file.TaskId).Distinct().ToArray();
+        var snapshots = await db.BackupTaskSnapshots.AsNoTracking()
+            .Where(snapshot => taskIds.Contains(snapshot.TaskId))
+            .ToListAsync(cancellationToken);
+        var tasks = await db.BackupTasks.AsNoTracking()
+            .Where(task => taskIds.Contains(task.Id))
+            .ToListAsync(cancellationToken);
+        var openTasks = await (
+            from task in db.BackupTasks.AsNoTracking()
+            join snapshot in db.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
+            where databaseIds.Contains(snapshot.DatabaseId)
+                && task.PlanId != null
+                && (task.Status == BackupTaskStatus.Pending
+                    || task.Status == BackupTaskStatus.Running
+                    || task.Status == BackupTaskStatus.NeedsAttention)
+            select new { snapshot.DatabaseId, TaskId = task.Id }).ToListAsync(cancellationToken);
+        var openTaskIds = openTasks.Select(item => item.TaskId).Distinct().ToArray();
+        var admitted = openTaskIds.Length == 0
+            ? []
+            : await db.BackupAttempts.AsNoTracking()
+                .Where(attempt => attempt.AdmittedFullBackupSetId != null && openTaskIds.Contains(attempt.TaskId))
+                .Select(attempt => new { attempt.TaskId, SetId = attempt.AdmittedFullBackupSetId!.Value })
+                .ToListAsync(cancellationToken);
+        var plans = await db.BackupPlans.AsNoTracking()
+            .Where(plan => databaseIds.Contains(plan.DatabaseId))
+            .Select(plan => new { plan.DatabaseId, VersionId = EF.Property<Guid?>(plan, "_currentVersionId") })
+            .ToListAsync(cancellationToken);
+        var versionIds = plans.Where(plan => plan.VersionId is not null).Select(plan => plan.VersionId!.Value).Distinct().ToArray();
+        var versions = versionIds.Length == 0
+            ? []
+            : await db.BackupPlanVersions.AsNoTracking().Where(version => versionIds.Contains(version.Id)).ToListAsync(cancellationToken);
+        var versionById = versions.ToDictionary(version => version.Id);
+        var taskById = tasks.ToDictionary(task => task.Id);
+        var snapshotByTask = snapshots.GroupBy(snapshot => snapshot.TaskId)
+            .ToDictionary(group => group.Key, group => group.First());
+        var reasons = new Dictionary<Guid, string>();
+        foreach (var databaseId in databaseIds)
+        {
+            var databaseFiles = files.Where(file => file.DatabaseId == databaseId).ToArray();
+            var databaseSets = sets.Where(set => set.DatabaseId == databaseId).ToArray();
+            var complete = fileCountByDatabase.GetValueOrDefault(databaseId) == databaseFiles.Length
+                && setCountByDatabase.GetValueOrDefault(databaseId) == databaseSets.Length;
+            var openIds = openTasks.Where(item => item.DatabaseId == databaseId).Select(item => item.TaskId).ToHashSet();
+            var admittedSets = admitted.Where(item => openIds.Contains(item.TaskId)).Select(item => item.SetId).ToHashSet();
+            var pointer = plans.SingleOrDefault(plan => plan.DatabaseId == databaseId);
+            var version = pointer?.VersionId is { } versionId && versionById.TryGetValue(versionId, out var found)
+                ? found
+                : null;
+            var evidence = await LoadActiveBaselineAsync(db, databaseId, cancellationToken);
+            var unproven = !complete || databaseSets.Any(set =>
+                set.Metadata.Type.State != BackupMetadataState.Known
+                || set.Metadata.Type.Value == BackupType.Differential && !Proven(set));
+            var assessments = ProjectDatabase(
+                version,
+                ResolveBaseline(version?.Mode, evidence, databaseSets),
+                unproven,
+                openIds,
+                admittedSets,
+                databaseSets,
+                databaseFiles,
+                taskById,
+                snapshotByTask,
+                nowUtc);
+            foreach (var (fileId, reason) in BackupFileRetentionScope.Select(pageSet, assessments, complete))
+            {
+                reasons[fileId] = reason;
+            }
+        }
+
+        return reasons;
     }
 
     internal static async Task ReleaseSupersededAsync(
@@ -324,4 +470,83 @@ internal static class PlanLocationRetentionWork
 
     private static bool IsOpen(BackupTaskStatus status) =>
         status is BackupTaskStatus.Pending or BackupTaskStatus.Running or BackupTaskStatus.NeedsAttention;
+
+    private static PlanLocationAssessment[] ProjectDatabase(
+        BackupPlanVersion? version,
+        ActiveBaseline baseline,
+        bool unproven,
+        HashSet<Guid> activeTasks,
+        HashSet<Guid> admittedSets,
+        IReadOnlyList<BackupSet> sets,
+        IReadOnlyList<BackupFile> files,
+        Dictionary<Guid, BackupTask> taskById,
+        Dictionary<Guid, BackupTaskSnapshot> snapshotByTask,
+        DateTimeOffset nowUtc)
+    {
+        var setInputs = sets.Select(set =>
+        {
+            var task = taskById.GetValueOrDefault(set.TaskId);
+            return new PlanRecoverySetInput(
+                set.Id,
+                set.Metadata.Type.State == BackupMetadataState.Known ? set.Metadata.Type.Value : null,
+                set.Completion.Source == BackupCompletionTimeSource.Unknown ? null : set.Completion.CompletedAtUtc,
+                set.BaseBackupSetId,
+                set.Metadata.IsCopyOnly.State == BackupMetadataState.Known ? set.Metadata.IsCopyOnly.Value : null,
+                Proven(set),
+                task is not null && IsOpen(task.Status) || admittedSets.Contains(set.Id));
+        }).ToArray();
+        var copyInputs = files.Select(file =>
+        {
+            snapshotByTask.TryGetValue(file.TaskId, out var snapshot);
+            taskById.TryGetValue(file.TaskId, out var task);
+            var owned = task?.PlanId is not null
+                && snapshot is not null
+                && snapshot.DatabaseId == file.DatabaseId
+                && snapshot.FileNameRuleVersion == "v3"
+                && file.BackupSetId is not null
+                && (file.Location == BackupFileLocation.Local
+                    ? file.DatabaseServerId == snapshot.ServerId
+                    : file.StorageTargetId == snapshot.StorageTargetId);
+            var staging = snapshot?.StorageMode == BackupStorageMode.RemoteOnly && file.Location == BackupFileLocation.Local;
+            return new PlanRecoveryCopyInput(
+                file.Id,
+                file.BackupSetId,
+                file.Location,
+                file.StorageTargetId,
+                file.Status,
+                staging,
+                owned,
+                staging ? snapshot!.StorageTargetId : null,
+                activeTasks.Any(id => id != file.TaskId));
+        }).ToArray();
+        var windows = new List<PlanLocationWindow> { new(BackupFileLocation.Local, null, version?.LocalRecoveryWindowDays) };
+        var remoteTargets = files
+            .Where(file => file.Location == BackupFileLocation.Remote && file.StorageTargetId is not null)
+            .Select(file => file.StorageTargetId!.Value)
+            .ToHashSet();
+        if (version?.StorageTargetId is { } currentTarget)
+        {
+            remoteTargets.Add(currentTarget);
+        }
+
+        windows.AddRange(remoteTargets.Select(target => new PlanLocationWindow(
+            BackupFileLocation.Remote,
+            target,
+            version?.RemoteRecoveryWindowDays)));
+        return PlanLocationRecovery.Evaluate(
+                nowUtc,
+                baseline,
+                unproven,
+                activeTasks.Count > 0,
+                windows,
+                setInputs,
+                copyInputs)
+            .Select(result => new PlanLocationAssessment(
+                result.Location,
+                result.StorageTargetId,
+                result.WindowDays,
+                result.Conclusion,
+                result.Copies))
+            .ToArray();
+    }
 }

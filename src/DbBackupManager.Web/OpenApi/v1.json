@@ -1727,6 +1727,528 @@
         ]
       }
     },
+    "/api/v1/databases/{databaseId}/backup-plan": {
+      "get": {
+        "tags": [
+          "BackupPlans"
+        ],
+        "parameters": [
+          {
+            "name": "databaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPlanResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminCookie": [ ]
+          }
+        ]
+      }
+    },
+    "/api/v1/backup-plans/{id}": {
+      "get": {
+        "tags": [
+          "BackupPlans"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPlanResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminCookie": [ ]
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "BackupPlans"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-CSRF-TOKEN",
+            "in": "header",
+            "description": "从 GET /api/v1/auth/csrf 获取，并与当前身份和配套 Antiforgery Cookie 一起使用。身份变化后必须重新获取。",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveBackupPlanRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveBackupPlanRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveBackupPlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPlanResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminCookie": [ ]
+          }
+        ]
+      }
+    },
+    "/api/v1/backup-plans": {
+      "post": {
+        "tags": [
+          "BackupPlans"
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-TOKEN",
+            "in": "header",
+            "description": "从 GET /api/v1/auth/csrf 获取，并与当前身份和配套 Antiforgery Cookie 一起使用。身份变化后必须重新获取。",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveBackupPlanRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveBackupPlanRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveBackupPlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPlanResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminCookie": [ ]
+          }
+        ]
+      }
+    },
+    "/api/v1/databases/{databaseId}/backup-recovery": {
+      "get": {
+        "tags": [
+          "BackupPlans"
+        ],
+        "parameters": [
+          {
+            "name": "databaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupRecoverySummaryResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminCookie": [ ]
+          }
+        ]
+      }
+    },
     "/api/v1/file-credentials": {
       "get": {
         "tags": [
@@ -6149,6 +6671,95 @@
           },
           "path": {
             "type": "string"
+          },
+          "backupSetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "differentialBaseBackupSetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "retentionReason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupLocationRecoveryResponse": {
+        "required": [
+          "location",
+          "storageTargetId",
+          "windowDays",
+          "conclusion",
+          "baseline",
+          "managedBaselineBackupSetId",
+          "unknown",
+          "remoteUnrecoverable",
+          "gapReasonCodes",
+          "unknownReasonCodes"
+        ],
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string"
+          },
+          "storageTargetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "windowDays": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "conclusion": {
+            "type": "string"
+          },
+          "baseline": {
+            "type": "string"
+          },
+          "managedBaselineBackupSetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "unknown": {
+            "type": "boolean",
+            "description": "为真表示该位置必须按不健康显示。可以与 remoteUnrecoverable 同时为真；即使 remoteUnrecoverable 为假，或结论看起来可恢复，也不能显示为健康。"
+          },
+          "remoteUnrecoverable": {
+            "type": "boolean",
+            "description": "远端存在已分类缺口，或在没有未知项时判定为不可恢复。为假不表示健康；unknown 为真时仍必须按不健康显示。"
+          },
+          "gapReasonCodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unknownReasonCodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -6266,6 +6877,224 @@
           }
         }
       },
+      "BackupPlanResponse": {
+        "required": [
+          "id",
+          "databaseId",
+          "name",
+          "isPaused",
+          "version",
+          "currentVersionId",
+          "versionNumber",
+          "mode",
+          "fullSchedule",
+          "differentialSchedule",
+          "timeZoneId",
+          "storageMode",
+          "storageTargetId",
+          "localRecoveryWindowDays",
+          "remoteRecoveryWindowDays",
+          "useChecksum",
+          "useCompression",
+          "backupTimeoutMinutes",
+          "verifyTimeoutMinutes",
+          "transferTimeoutMinutes",
+          "effectiveFromUtc",
+          "notices"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "databaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "isPaused": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          },
+          "currentVersionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "versionNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "mode": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fullSchedule": {
+            "$ref": "#/components/schemas/BackupPlanScheduleResponse"
+          },
+          "differentialSchedule": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BackupPlanScheduleResponse"
+              }
+            ]
+          },
+          "timeZoneId": {
+            "type": "string"
+          },
+          "storageMode": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "storageTargetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "localRecoveryWindowDays": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "remoteRecoveryWindowDays": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "useChecksum": {
+            "type": "boolean"
+          },
+          "useCompression": {
+            "type": "boolean"
+          },
+          "backupTimeoutMinutes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "verifyTimeoutMinutes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "transferTimeoutMinutes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "effectiveFromUtc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "notices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "BackupPlanScheduleRequest": {
+        "required": [
+          "scheduleType",
+          "localTime"
+        ],
+        "type": "object",
+        "properties": {
+          "scheduleType": {
+            "maximum": 2,
+            "minimum": 1,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "localTime": {
+            "type": "string",
+            "format": "time"
+          },
+          "daysOfWeek": {
+            "maximum": 127,
+            "minimum": 0,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "BackupPlanScheduleResponse": {
+        "required": [
+          "scheduleType",
+          "localTime",
+          "daysOfWeek"
+        ],
+        "type": "object",
+        "properties": {
+          "scheduleType": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "localTime": {
+            "type": "string",
+            "format": "time"
+          },
+          "daysOfWeek": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "BackupReconciliationResponse": {
         "required": [
           "attemptCount",
@@ -6298,6 +7127,31 @@
           },
           "canRequest": {
             "type": "boolean"
+          }
+        }
+      },
+      "BackupRecoverySummaryResponse": {
+        "required": [
+          "databaseId",
+          "hasCurrentPlan",
+          "locations"
+        ],
+        "type": "object",
+        "properties": {
+          "databaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hasCurrentPlan": {
+            "type": "boolean",
+            "description": "为假时 locations 为空。没有当前计划的数据库仍由旧策略模型负责，不合成计划恢复窗口。"
+          },
+          "locations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BackupLocationRecoveryResponse"
+            },
+            "description": "仅当 hasCurrentPlan 为真时返回各存储位置的恢复投影。"
           }
         }
       },
@@ -6502,6 +7356,44 @@
               "string"
             ],
             "format": "int64"
+          },
+          "backupType": {
+            "type": "string"
+          },
+          "planId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "planVersionId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "planVersionNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "sqlStatus": {
+            "type": "string"
+          },
+          "fileVerifyStatus": {
+            "type": "string"
+          },
+          "transferStatus": {
+            "type": "string"
+          },
+          "dependencyStatus": {
+            "type": "string"
           }
         }
       },
@@ -7089,6 +7981,150 @@
             "maxLength": 128,
             "minLength": 0,
             "type": "string"
+          }
+        }
+      },
+      "SaveBackupPlanRequest": {
+        "required": [
+          "databaseId",
+          "name",
+          "mode",
+          "fullSchedule",
+          "timeZoneId",
+          "storageMode",
+          "useCompression",
+          "backupTimeoutMinutes",
+          "verifyTimeoutMinutes",
+          "transferTimeoutMinutes",
+          "isPaused"
+        ],
+        "type": "object",
+        "properties": {
+          "version": {
+            "maxLength": 16,
+            "minLength": 0,
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "databaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 0,
+            "type": "string"
+          },
+          "mode": {
+            "maximum": 3,
+            "minimum": 1,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fullSchedule": {
+            "$ref": "#/components/schemas/BackupPlanScheduleRequest"
+          },
+          "differentialSchedule": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BackupPlanScheduleRequest"
+              }
+            ]
+          },
+          "timeZoneId": {
+            "maxLength": 150,
+            "minLength": 0,
+            "type": "string"
+          },
+          "storageMode": {
+            "maximum": 3,
+            "minimum": 1,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "storageTargetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "localRecoveryWindowDays": {
+            "maximum": 36500,
+            "minimum": 1,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "remoteRecoveryWindowDays": {
+            "maximum": 36500,
+            "minimum": 1,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "useChecksum": {
+            "type": [
+              "null",
+              "boolean"
+            ]
+          },
+          "useCompression": {
+            "type": "boolean"
+          },
+          "backupTimeoutMinutes": {
+            "maximum": 1440,
+            "minimum": 1,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "verifyTimeoutMinutes": {
+            "maximum": 1440,
+            "minimum": 1,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "transferTimeoutMinutes": {
+            "maximum": 1440,
+            "minimum": 1,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "isPaused": {
+            "type": "boolean"
           }
         }
       },
@@ -8303,6 +9339,9 @@
     },
     {
       "name": "BackupMonitoring"
+    },
+    {
+      "name": "BackupPlans"
     },
     {
       "name": "FileCredentials"

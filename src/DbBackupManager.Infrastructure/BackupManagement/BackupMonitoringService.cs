@@ -8,7 +8,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DbBackupManager.Infrastructure.BackupManagement;
 
-internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContext> factory) : IBackupMonitoringService
+internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContext> factory, TimeProvider clock) : IBackupMonitoringService
 {
     public Task<BackupManagementResult<BackupOverview>> OverviewAsync(AdminSession actor, CancellationToken token = default) => Read(actor, async db =>
     {
@@ -31,10 +31,10 @@ internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContex
             await db.BackupTasks.CountAsync(x => x.Status == BackupTaskStatus.Running, token),
             await db.BackupTasks.CountAsync(x => x.Status == BackupTaskStatus.NeedsAttention, token),
             await failures.CountAsync(token), presence,
-            await Summaries(rows.OrderByDescending(x => x.Task.CreatedAtUtc).ThenByDescending(x => x.Task.Id).Take(5)).ToListAsync(token),
-            await Summaries(failures.OrderByDescending(x => x.Task.CompletedAtUtc).ThenByDescending(x => x.Task.Id).Take(5)).ToListAsync(token),
-            await Files(FileRows(db).Where(x => x.File.Location == BackupFileLocation.Local)
-                .OrderByDescending(x => x.File.ValidatedAtUtc).ThenByDescending(x => x.File.TaskId).Take(5)).ToListAsync(token));
+            await BackupSurfaceReader.EnrichTasksAsync(db, await Summaries(rows.OrderByDescending(x => x.Task.CreatedAtUtc).ThenByDescending(x => x.Task.Id).Take(5)).ToListAsync(token), token),
+            await BackupSurfaceReader.EnrichTasksAsync(db, await Summaries(failures.OrderByDescending(x => x.Task.CompletedAtUtc).ThenByDescending(x => x.Task.Id).Take(5)).ToListAsync(token), token),
+            await BackupSurfaceReader.EnrichFilesAsync(db, await Files(FileRows(db).Where(x => x.File.Location == BackupFileLocation.Local)
+                .OrderByDescending(x => x.File.ValidatedAtUtc).ThenByDescending(x => x.File.TaskId).Take(5)).ToListAsync(token), now, token));
     }, token);
 
     public Task<BackupManagementResult<BackupPage<BackupTaskSummary>>> TasksAsync(AdminSession actor, BackupSearch search, CancellationToken token = default) => Read(actor, async db =>
@@ -53,7 +53,8 @@ internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContex
         var total = await rows.LongCountAsync(token);
         var ordered = search.OldestFirst ? rows.OrderBy(x => x.Task.CreatedAtUtc).ThenBy(x => x.Task.Id)
             : rows.OrderByDescending(x => x.Task.CreatedAtUtc).ThenByDescending(x => x.Task.Id);
-        return new BackupPage<BackupTaskSummary>(await Summaries(ordered.Skip(search.Page * 20).Take(20)).ToListAsync(token), search.Page, total);
+        var items = await BackupSurfaceReader.EnrichTasksAsync(db, await Summaries(ordered.Skip(search.Page * 20).Take(20)).ToListAsync(token), token);
+        return new BackupPage<BackupTaskSummary>(items, search.Page, total);
     }, token);
 
     public Task<BackupManagementResult<BackupPage<BackupFileSummary>>> FilesAsync(AdminSession actor, BackupSearch search, CancellationToken token = default) => Read(actor, async db =>
@@ -68,7 +69,8 @@ internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContex
         var total = await rows.LongCountAsync(token);
         var ordered = search.OldestFirst ? rows.OrderBy(x => x.File.ValidatedAtUtc).ThenBy(x => x.File.TaskId)
             : rows.OrderByDescending(x => x.File.ValidatedAtUtc).ThenByDescending(x => x.File.TaskId);
-        return new BackupPage<BackupFileSummary>(await Files(ordered.Skip(search.Page * 20).Take(20)).ToListAsync(token), search.Page, total);
+        var items = await BackupSurfaceReader.EnrichFilesAsync(db, await Files(ordered.Skip(search.Page * 20).Take(20)).ToListAsync(token), clock.GetUtcNow(), token);
+        return new BackupPage<BackupFileSummary>(items, search.Page, total);
     }, token);
 
     private static IQueryable<FileRow> FileRows(PlatformDbContext db) =>
@@ -113,7 +115,7 @@ internal sealed class BackupMonitoringService(IDbContextFactory<PlatformDbContex
         {
             await using var db = await factory.CreateDbContextAsync(token);
             var admin = await db.AdminUsers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == actor.AdminUserId, token);
-            if (admin is not { IsEnabled: true } || admin.IsLockedOut(DateTimeOffset.UtcNow) || admin.SecurityStamp != actor.SecurityStamp)
+            if (admin is not { IsEnabled: true } || admin.IsLockedOut(clock.GetUtcNow()) || admin.SecurityStamp != actor.SecurityStamp)
                 return new(BackupManagementCode.AuthenticationRequired);
             db.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
             return new(BackupManagementCode.Succeeded, await query(db));

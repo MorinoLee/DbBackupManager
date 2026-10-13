@@ -76,7 +76,7 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
         var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
         var store = new BackupTaskExecutionStore(factory);
         var seed = await SeedAsync(store);
-        var monitoring = new BackupMonitoringService(factory);
+        var monitoring = new BackupMonitoringService(factory, TimeProvider.System);
         for (var i = 0; i < 22; i++)
         {
             var request = Guid.NewGuid();
@@ -176,7 +176,7 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
             await db.SaveChangesAsync();
         }
 
-        var monitoring = new BackupMonitoringService(factory);
+        var monitoring = new BackupMonitoringService(factory, TimeProvider.System);
         var overview = (await monitoring.OverviewAsync(seed.Actor)).Value!;
         Assert.Single(overview.RecentFiles);
         Assert.Equal("Local", overview.RecentFiles[0].Location);
@@ -189,7 +189,7 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
         using var provider = database.CreateServiceProvider();
         var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
         var seed = await SeedAsync(new BackupTaskExecutionStore(factory));
-        var monitoring = new BackupMonitoringService(factory);
+        var monitoring = new BackupMonitoringService(factory, TimeProvider.System);
         await using var db = database.CreateContext();
         await db.WorkerHeartbeats.ExecuteDeleteAsync();
         Assert.Equal("Unknown", (await monitoring.OverviewAsync(seed.Actor)).Value!.Worker.Status);
@@ -330,7 +330,7 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
         // PlatformDbContext 按 MutationId 为每条状态历史生成且只生成一条 TaskEvent，因此这里断言精确平价。
         // 该平价只在 P6.3 清理未运行时成立：清理只删除派生的已发布事件，不删除权威状态历史。
         Assert.Equal(await db.BackupTaskStateChanges.CountAsync(x => x.TaskId == seed.TaskId), await db.TaskEvents.CountAsync(x => x.TaskId == seed.TaskId));
-        var manager = new BackupManagementService(factory, store);
+        var manager = new BackupManagementService(factory, store, TimeProvider.System);
         var detail = await manager.DetailAsync(seed.Actor, seed.TaskId);
         Assert.Equal(BackupManagementCode.Succeeded, detail.Code);
         var json = JsonSerializer.Serialize(detail.Value);
@@ -381,7 +381,7 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
         var seed = await SeedAsync(store);
         _adapters.Unknown = true;
         Assert.True(await Runner(store, factory).RunOnceAsync(CancellationToken.None));
-        var manager = new BackupManagementService(factory, store);
+        var manager = new BackupManagementService(factory, store, TimeProvider.System);
 
         var before = await manager.DetailAsync(seed.Actor, seed.TaskId);
         var invalid = await manager.RequestReconciliationAsync(seed.Actor, seed.TaskId, Guid.Empty);
@@ -952,7 +952,7 @@ public sealed class BackupRunnerSqlServerTests(PlatformDatabaseSqlServerFixture 
     {
         using var provider = database.CreateServiceProvider(); var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
         var store = new BackupTaskExecutionStore(factory); var seed = await SeedAsync(store);
-        var manager = new BackupManagementService(factory, store);
+        var manager = new BackupManagementService(factory, store, TimeProvider.System);
         var revoked = seed.Actor with { SecurityStamp = "revoked" };
         Assert.Equal(BackupManagementCode.AuthenticationRequired, (await manager.ListAsync(revoked)).Code);
         Assert.Equal(BackupManagementCode.AuthenticationRequired, (await manager.CancelAsync(revoked, seed.TaskId, Guid.NewGuid())).Code);
