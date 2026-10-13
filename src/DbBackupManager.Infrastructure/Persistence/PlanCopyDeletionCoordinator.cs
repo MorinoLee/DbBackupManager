@@ -5,10 +5,14 @@ using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace DbBackupManager.Infrastructure.Persistence;
 
-internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbContext> factory, TimeProvider clock)
+internal sealed class PlanCopyDeletionCoordinator(
+    IDbContextFactory<PlatformDbContext> factory,
+    TimeProvider clock,
+    ILogger<PlanCopyDeletionCoordinator>? logger = null)
     : IPlanCopyDeletionCoordinator
 {
     public async Task<IPlanCopyDeletionPermit> OpenAsync(
@@ -88,7 +92,8 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
             }
 
             await transaction.CommitAsync(cancellationToken);
-            return new PlanCopyDeletionPermit(factory, connection, file.DatabaseId, current.Id, request.Owner.LeaseToken, clock, allowed: true, null);
+            return new PlanCopyDeletionPermit(
+                factory, connection, file.DatabaseId, current.Id, request.Owner.LeaseToken, clock, allowed: true, null, logger);
         }
         catch
         {
@@ -158,6 +163,7 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
         private readonly Guid _databaseId;
         private readonly Guid _fileId;
         private readonly Guid _leaseToken;
+        private readonly ILogger? _logger;
         private bool _disposed;
 
         private PlanCopyDeletionPermit(bool applies, bool allowed, string? reason)
@@ -175,7 +181,8 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
             Guid leaseToken,
             TimeProvider clock,
             bool allowed,
-            string? reason)
+            string? reason,
+            ILogger? logger)
         {
             _factory = factory;
             _connection = connection;
@@ -183,6 +190,7 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
             _fileId = fileId;
             _leaseToken = leaseToken;
             _clock = clock;
+            _logger = logger;
             Applies = true;
             Allowed = allowed;
             ReasonCode = reason;
@@ -231,6 +239,13 @@ internal sealed class PlanCopyDeletionCoordinator(IDbContextFactory<PlatformDbCo
             context.AuditRecords.Add(new(null, "backup.file.plan_retention.commit", "BackupFile", file.Id.ToString("N"), "succeeded", PlanLocationRetentionWork.DeletedReason));
             await context.SaveChangesAsync(CancellationToken.None);
             await transaction.CommitAsync(CancellationToken.None);
+            // 会话锁与投影用的是同一把保留锁。删除已经提交后再放开，这次写入口才能补做待投影。
+            if (_connection is not null)
+            {
+                await ReleaseSessionAsync(_connection, _databaseId);
+            }
+
+            await RemoteGapNotices.TryDrainPendingAsync(_factory, _databaseId, CancellationToken.None, _logger);
             return true;
         }
 

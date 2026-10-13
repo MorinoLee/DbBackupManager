@@ -21,18 +21,11 @@ internal static class PlanRetentionLock
     internal static async Task<bool> TryAcquireAsync(
         PlatformDbContext context,
         Guid databaseId,
-        CancellationToken cancellationToken,
-        int? timeoutMilliseconds = null)
+        CancellationToken cancellationToken)
     {
-        var wait = timeoutMilliseconds ?? LockTimeoutMilliseconds;
-        if (wait < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(timeoutMilliseconds), "锁等待不能为负。");
-        }
-
         var result = new SqlParameter("@result", SqlDbType.Int) { Direction = ParameterDirection.Output };
         var resource = new SqlParameter("@resource", SqlDbType.NVarChar, 255) { Value = Name(databaseId) };
-        var timeout = new SqlParameter("@timeout", SqlDbType.Int) { Value = wait };
+        var timeout = new SqlParameter("@timeout", SqlDbType.Int) { Value = LockTimeoutMilliseconds };
         await context.Database.ExecuteSqlRawAsync(
             "EXEC @result = sys.sp_getapplock @Resource = @resource, @LockMode = 'Exclusive', "
             + "@LockOwner = 'Transaction', @LockTimeout = @timeout",

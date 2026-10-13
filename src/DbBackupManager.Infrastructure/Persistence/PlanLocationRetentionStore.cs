@@ -23,14 +23,7 @@ internal sealed class PlanLocationRetentionStore(
         RequireDatabase(databaseId);
         RequireUtc(nowUtc, nameof(nowUtc));
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
-        var assessments = await PlanLocationRetentionWork.LoadAsync(context, databaseId, nowUtc, cancellationToken);
-        await RemoteGapNotices.TryDrainPendingAsync(
-            contextFactory,
-            databaseId,
-            cancellationToken,
-            logger,
-            RemoteGapNotices.OpportunisticLockTimeoutMilliseconds);
-        return assessments;
+        return await PlanLocationRetentionWork.LoadAsync(context, databaseId, nowUtc, cancellationToken);
     }
 
     public async Task<PlanStagingRelease> ReadOwnStagingAsync(

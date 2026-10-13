@@ -1,8 +1,12 @@
+using DbBackupManager.Application.BackupPlans;
+using DbBackupManager.Application.Identity;
 using DbBackupManager.Application.Notifications;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
+using DbBackupManager.Domain.Entities;
 using DbBackupManager.Domain.Notifications;
+using DbBackupManager.Infrastructure.BackupManagement;
 using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -58,7 +62,7 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
     }
 
     [Fact]
-    public async Task FailedProjectionIsRetriedByTheNextEntryAndSendsOneNotice()
+    public async Task FailedProjectionIsRetriedByTheNextWriteAndReadsDoNotSend()
     {
         var graph = await SeedAsync();
         using var provider = database.CreateServiceProvider();
@@ -74,6 +78,43 @@ public sealed class RemoteGapNoticeSqlServerTests(PlatformDatabaseSqlServerFixtu
 
         Assert.Equal(1, await CountPendingAsync(graph.DatabaseId));
         await RemoteGapNotices.TryProjectAsync(new ThrowingFactory(), observation, CancellationToken.None);
+        Assert.Equal(0, await CountNoticesAsync(graph.DatabaseId));
+        Assert.Equal(1, await CountPendingAsync(graph.DatabaseId));
+
+        await new PlanLocationRetentionStore(factory).AssessAsync(graph.DatabaseId, Opened);
+        var adminId = Guid.NewGuid();
+        var stamp = "synthetic-stamp";
+        await using (var db = database.CreateContext())
+        {
+            db.AdminUsers.Add(new AdminUser(adminId, $"admin-{adminId:N}", $"ADMIN-{adminId:N}", "synthetic-hash", stamp));
+            await db.SaveChangesAsync();
+        }
+
+        var actor = new AdminSession(adminId, $"admin-{adminId:N}", stamp);
+        var catalog = new BackupPlanCatalogService(factory, TimeProvider.System);
+        var withoutPlan = await catalog.RecoveryAsync(actor, graph.DatabaseId);
+        Assert.Equal(BackupPlanCatalogCode.Succeeded, withoutPlan.Code);
+        Assert.False(withoutPlan.Value!.HasCurrentPlan);
+        var definition = new BackupPlanDefinition(
+            BackupPlanMode.Full,
+            new RecurringBackupSchedule(BackupScheduleType.Daily, new TimeOnly(2, 0), BackupWeekdays.None),
+            null,
+            null,
+            "UTC",
+            BackupStorageMode.RemoteOnly,
+            graph.TargetId,
+            null,
+            7,
+            true,
+            false,
+            120,
+            60,
+            60);
+        await new BackupPlanStore(factory).AddAsync(
+            BackupPlan.Create(Guid.NewGuid(), graph.DatabaseId, "合成计划", Guid.NewGuid(), definition, Opened));
+        var withPlan = await catalog.RecoveryAsync(actor, graph.DatabaseId);
+        Assert.Equal(BackupPlanCatalogCode.Succeeded, withPlan.Code);
+        Assert.True(withPlan.Value!.HasCurrentPlan);
         Assert.Equal(0, await CountNoticesAsync(graph.DatabaseId));
         Assert.Equal(1, await CountPendingAsync(graph.DatabaseId));
 

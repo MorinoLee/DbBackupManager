@@ -9,14 +9,12 @@ using DbBackupManager.Domain.Entities;
 using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 
 namespace DbBackupManager.Infrastructure.BackupManagement;
 
 internal sealed class BackupPlanCatalogService(
     IDbContextFactory<PlatformDbContext> factory,
-    TimeProvider clock,
-    ILogger<BackupPlanCatalogService>? logger = null)
+    TimeProvider clock)
     : IBackupPlanCatalogService
 {
     public Task<BackupPlanCatalogResult<IReadOnlyList<BackupPlanListItem>>> ListAsync(
@@ -106,12 +104,6 @@ internal sealed class BackupPlanCatalogService(
                 cancellationToken);
             if (!hasCurrentPlan)
             {
-                await RemoteGapNotices.TryDrainPendingAsync(
-                    factory,
-                    databaseId,
-                    cancellationToken,
-                    logger,
-                    RemoteGapNotices.OpportunisticLockTimeoutMilliseconds);
                 return new BackupPlanCatalogResult<BackupRecoverySummary>(
                     BackupPlanCatalogCode.Succeeded,
                     new BackupRecoverySummary(databaseId, false, []));
@@ -126,12 +118,6 @@ internal sealed class BackupPlanCatalogService(
                 item.Conclusion,
                 surface.Baseline,
                 item.Copies.Select(copy => copy.Reason).ToArray())).ToArray();
-            await RemoteGapNotices.TryDrainPendingAsync(
-                factory,
-                databaseId,
-                cancellationToken,
-                logger,
-                RemoteGapNotices.OpportunisticLockTimeoutMilliseconds);
             return new BackupPlanCatalogResult<BackupRecoverySummary>(
                 BackupPlanCatalogCode.Succeeded,
                 new BackupRecoverySummary(databaseId, surface.HasCurrentPlan, locations));

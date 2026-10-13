@@ -11,7 +11,8 @@ namespace DbBackupManager.Infrastructure.Persistence;
 
 /// <summary>
 /// 远端缺口通知在运行事实提交之后单独投影。需要投影时，待补发标记与事实写在同一事务。
-/// 投影成功后清除标记；失败或拿不到保留锁时标记留下，后续入口碰到该库再补做。不启动后台循环。
+/// 投影成功后清除标记；失败或拿不到保留锁时标记留下。之后只由写入口补做：
+/// 阶段提交、Cleanup、远端副本删除和计划保留删除。读取恢复摘要不写库、不拿锁、不入队。不启动后台循环。
 /// 同一数据库、远端目标和缺口在恢复前只保留一封；恢复后再次出现可以再发。
 /// 位置未知或这次没有该目标的投影时，不新开也不关闭已打开缺口。
 /// </summary>
@@ -33,8 +34,6 @@ internal static class RemoteGapNotices
         BackupTaskStage? Stage,
         DateTimeOffset OccurredAtUtc,
         IReadOnlyCollection<Guid> StorageTargetIds);
-
-    internal const int OpportunisticLockTimeoutMilliseconds = 0;
 
     internal static async Task MarkPendingAsync(
         PlatformDbContext context,
@@ -78,7 +77,6 @@ internal static class RemoteGapNotices
         Guid databaseId,
         CancellationToken cancellationToken,
         ILogger? logger = null,
-        int? lockTimeoutMilliseconds = null,
         IReadOnlyDictionary<Guid, RemoteGapProjection>? knownGaps = null)
     {
         if (databaseId == Guid.Empty)
@@ -107,8 +105,7 @@ internal static class RemoteGapNotices
                     pending.TargetIds()),
                 knownGaps,
                 cancellationToken,
-                logger,
-                lockTimeoutMilliseconds);
+                logger);
         }
         catch (Exception exception)
         {
@@ -127,7 +124,7 @@ internal static class RemoteGapNotices
     {
         try
         {
-            await ProjectAsync(factory, observation, knownGaps: null, cancellationToken, logger, lockTimeoutMilliseconds: null);
+            await ProjectAsync(factory, observation, knownGaps: null, cancellationToken, logger);
         }
         catch (Exception exception)
         {
@@ -144,8 +141,7 @@ internal static class RemoteGapNotices
         Observation observation,
         IReadOnlyDictionary<Guid, RemoteGapProjection>? knownGaps,
         CancellationToken cancellationToken,
-        ILogger? logger = null,
-        int? lockTimeoutMilliseconds = null)
+        ILogger? logger = null)
     {
         var requested = DistinctTargets(observation.StorageTargetIds);
         if (observation.DatabaseId == Guid.Empty || observation.TaskId == Guid.Empty || requested.Length == 0)
@@ -161,7 +157,7 @@ internal static class RemoteGapNotices
             await using var transaction = await context.Database.BeginTransactionAsync(
                 IsolationLevel.Serializable, cancellationToken);
             if (!await PlanRetentionLock.TryAcquireAsync(
-                context, observation.DatabaseId, cancellationToken, lockTimeoutMilliseconds))
+                context, observation.DatabaseId, cancellationToken))
             {
                 if (logger is not null)
                 {
