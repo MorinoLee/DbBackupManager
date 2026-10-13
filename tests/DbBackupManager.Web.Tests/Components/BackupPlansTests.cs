@@ -157,8 +157,56 @@ public sealed class BackupPlansTests : MudBlazorComponentTest
         var page = Render<Page>();
 
         page.WaitForAssertion(() => Assert.Contains("远端暂时无法恢复", page.Find("[data-testid='recovery-remote-gap']").TextContent, StringComparison.Ordinal));
-        Assert.Contains("不可恢复", page.Find("[data-testid='recovery-health']").TextContent, StringComparison.Ordinal);
-        Assert.DoesNotContain("不健康", page.Find("[data-testid='recovery-health']").TextContent, StringComparison.Ordinal);
+        var health = page.Find("[data-testid='recovery-health']");
+        Assert.Contains("不可恢复", health.TextContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("不健康", health.TextContent, StringComparison.Ordinal);
+        Assert.Contains("mud-chip-color-error", health.ClassList, StringComparer.Ordinal);
+        Assert.DoesNotContain("mud-chip-color-success", health.ClassList, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void OnlyARecoverableLocationUsesGreen()
+    {
+        Authenticate();
+        _catalog.Recovery = new BackupRecoverySummary(FakeCatalog.DatabaseId, true,
+        [
+            new BackupLocationRecovery(
+                BackupFileLocation.Local, null, 7, LocationRecoveryConclusion.RestorableWindowSatisfied,
+                "None", null, false, false, [], []),
+            new BackupLocationRecovery(
+                BackupFileLocation.Remote, Guid.NewGuid(), 30, LocationRecoveryConclusion.RestorableWindowIncomplete,
+                "None", null, false, false, [], []),
+        ]);
+        Services.GetRequiredService<NavigationManager>().NavigateTo($"/backup-plans?database={FakeCatalog.DatabaseId}");
+        var page = Render<Page>();
+
+        page.WaitForAssertion(() => Assert.Equal(2, page.FindAll("[data-testid='recovery-health']").Count));
+        var chips = page.FindAll("[data-testid='recovery-health']");
+        Assert.Contains("可恢复", chips[0].TextContent, StringComparison.Ordinal);
+        Assert.Contains("mud-chip-color-success", chips[0].ClassList, StringComparer.Ordinal);
+        Assert.Contains("窗口不完整", chips[1].TextContent, StringComparison.Ordinal);
+        Assert.Contains("mud-chip-color-warning", chips[1].ClassList, StringComparer.Ordinal);
+        Assert.DoesNotContain("mud-chip-color-success", chips[1].ClassList, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void RemoteGapDoesNotPaintASatisfiedWindowGreen()
+    {
+        Authenticate();
+        _catalog.Recovery = new BackupRecoverySummary(FakeCatalog.DatabaseId, true,
+        [
+            new BackupLocationRecovery(
+                BackupFileLocation.Remote, Guid.NewGuid(), 30, LocationRecoveryConclusion.RestorableWindowSatisfied,
+                "None", null, false, true, ["remote_base_unconfirmed"], []),
+        ]);
+        Services.GetRequiredService<NavigationManager>().NavigateTo($"/backup-plans?database={FakeCatalog.DatabaseId}");
+        var page = Render<Page>();
+
+        page.WaitForAssertion(() => Assert.Contains("可恢复", page.Find("[data-testid='recovery-health']").TextContent, StringComparison.Ordinal));
+        var health = page.Find("[data-testid='recovery-health']");
+        Assert.Contains("mud-chip-color-warning", health.ClassList, StringComparer.Ordinal);
+        Assert.DoesNotContain("mud-chip-color-success", health.ClassList, StringComparer.Ordinal);
+        Assert.Contains("远端暂时无法恢复", page.Find("[data-testid='recovery-remote-gap']").TextContent, StringComparison.Ordinal);
     }
 
     private void Authenticate()

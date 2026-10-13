@@ -124,7 +124,7 @@
                                     <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Wrap="Wrap.Wrap">
                                         <MudText Typo="Typo.subtitle2">@LocationName(location.Location)</MudText>
                                         <MudChip T="string" Size="Size.Small" data-testid="recovery-health"
-                                                 Color="@(location.Unknown ? Color.Error : Color.Success)" Variant="Variant.Filled">
+                                                 Color="@HealthColor(location)" Variant="Variant.Filled">
                                             @Health(location)
                                         </MudChip>
                                         @if (location.RemoteUnrecoverable)
@@ -390,6 +390,30 @@
             LocationRecoveryConclusion.RestorableWindowIncomplete => "窗口不完整",
             _ => "不可恢复",
         };
+    }
+
+    private static Color HealthColor(BackupLocationRecovery location)
+    {
+        if (!location.Unknown
+            && !location.RemoteUnrecoverable
+            && location.Conclusion == LocationRecoveryConclusion.RestorableWindowSatisfied)
+        {
+            return Color.Success;
+        }
+
+        if (!location.Unknown && location.Conclusion == LocationRecoveryConclusion.RestorableWindowIncomplete)
+        {
+            return Color.Warning;
+        }
+
+        if (!location.Unknown
+            && location.RemoteUnrecoverable
+            && location.Conclusion == LocationRecoveryConclusion.RestorableWindowSatisfied)
+        {
+            return Color.Warning;
+        }
+
+        return Color.Error;
     }
 
     private static string LocationName(BackupFileLocation location) => location switch
