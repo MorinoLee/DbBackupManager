@@ -146,7 +146,8 @@ public sealed class BackupPlanArtifactProtectionSqlServerTests(PlatformDatabaseS
             ["RequestCancellationAsync"],
             typeof(IBackupTaskExecutionStore).GetMethods().Select(method => method.Name).Order(StringComparer.Ordinal).ToArray());
         await using var db = database.CreateContext();
-        Assert.Equal(BackupTaskStatus.Pending, (await db.BackupTasks.SingleAsync(x => x.Id == plan.Task.TaskId)).Status);
+        // 夹具直接调用领域领取，所以任务是 Running。已删除的执行存储不再提供领取、重试、核对或确认失败。
+        Assert.Equal(BackupTaskStatus.Running, (await db.BackupTasks.SingleAsync(x => x.Id == plan.Task.TaskId)).Status);
         Assert.Equal(0, await db.BackupInvocationAuthorizations.CountAsync());
         Assert.Equal(0, await db.BackupPlanExecutionOperations.CountAsync());
     }

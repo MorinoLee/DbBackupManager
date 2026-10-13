@@ -147,7 +147,8 @@ public sealed class BackupManagementWebTests
         foreach (var path in new[] { "retry", "reconcile", "confirm-failed" })
         {
             using var closed = await client.PostAsync($"/api/v1/backup-tasks/{requestId}/{path}", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
-            Assert.Equal(HttpStatusCode.NotFound, closed.StatusCode);
+            // 这三个动作已从 API 删除。未匹配的 POST 会落到只接受 GET 的页面终结点，因此返回 405。
+            Assert.Equal(HttpStatusCode.MethodNotAllowed, closed.StatusCode);
         }
         // 旧 /backups 入口保留兼容跳转，指向拆分后的任务记录页。
         using var backupsPage = await client.GetAsync("/backups");
