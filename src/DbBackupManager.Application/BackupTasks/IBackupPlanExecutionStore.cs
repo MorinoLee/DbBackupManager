@@ -37,6 +37,13 @@ public interface IBackupPlanExecutionStore
     /// <summary>结束本库已经留下清理证据、却停在 NeedsAttention/Cleanup 的 RemoteOnly 任务。</summary>
     Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// RemoteOnly 暂存清理的只读核对：暂存记录已经解开时补齐终态；暂存仍在时只释放核对租约、
+    /// 保留原 Attempt 和文件，由执行路径按原阶段重试。核对本身不删除任何文件。
+    /// </summary>
+    Task<BackupExecutionContractCode> ReleaseDeferredCleanupForExecutionAsync(LeaseHandle lease,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed record ReconcileBackupPlanTaskRequest(Guid TaskId, Guid RequestMutationId);

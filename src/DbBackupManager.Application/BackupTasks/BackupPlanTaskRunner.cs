@@ -50,30 +50,29 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
                 if (next is null) return code;
                 session = next;
             }
-            if (session.Work.Lease.Stage != BackupTaskStage.ValidateCopy)
+            if (session.Work.Lease.Stage == BackupTaskStage.ValidateCopy)
+            {
+                var confirmed = await ConfirmCopyAsync(session, heartbeat.Token);
+                if (confirmed != BackupExecutionContractCode.Succeeded) return confirmed;
+                // 远端确认成功后任务直接进入 Cleanup（RemoteOnly）或已完成（LocalAndRemote）；
+                // 成功的任务已经释放租约，不能再按原租约续读。只有 Cleanup 需要本轮的会话状态，
+                // 因此这里用 RefreshAsync 的“同租约且仍开放”语义做一个可选刷新。
+                session = await store.RefreshAsync(request.TaskId, session.Work.Lease.LeaseToken, CancellationToken.None) ?? session;
+            }
+
+            // RemoteOnly 的 Cleanup 由执行路径收口：无论本轮新完成 ValidateCopy，还是核对释放租约后
+            // 从 Pending/Cleanup 续跑，都执行同一段暂存清理，不重新发起 BACKUP。
+            if (session.Work.Lease.Stage != BackupTaskStage.Cleanup)
             {
                 return BackupExecutionContractCode.Succeeded;
             }
 
-            var confirmed = await ConfirmCopyAsync(session, heartbeat.Token);
-            if (confirmed != BackupExecutionContractCode.Succeeded
-                || session.Work.Snapshot.Policy.StorageMode != BackupStorageMode.RemoteOnly)
-            {
-                return confirmed;
-            }
-
-            var cleaned = await store.RefreshAsync(request.TaskId, lease, CancellationToken.None);
-            if (cleaned is null)
-            {
-                throw new PlanExecutionLeaseLostException();
-            }
-
-            if (cleaned.Work.Lease.Stage != BackupTaskStage.Cleanup)
+            if (session.Work.Snapshot.Policy.StorageMode != BackupStorageMode.RemoteOnly)
             {
                 return BackupExecutionContractCode.StageNotOpen;
             }
 
-            return await staging.CleanOwnAsync(cleaned, heartbeat.Token);
+            return await staging.CleanOwnAsync(session, heartbeat.Token);
         }
         catch (PlanExecutionLeaseLostException) { return BackupExecutionContractCode.LeaseLost; }
         catch (PlanExecutionConflictException exception) when (exception.Code == BackupExecutionContractCode.CancellationRequested)

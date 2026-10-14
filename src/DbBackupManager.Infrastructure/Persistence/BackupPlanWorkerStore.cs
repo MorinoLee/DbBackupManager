@@ -110,18 +110,35 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
     }
 
     internal static void CloseWithoutBaseline(
-        PlatformDbContext db, BackupTask task, BackupStorageMode storageMode, DateTimeOffset nowUtc)
+        PlatformDbContext db, BackupTask task, BackupStorageMode storageMode, DateTimeOffset nowUtc, Guid? mutationId = null)
     {
         var before = task.Status;
         var stage = task.CurrentStage;
+        var key = mutationId ?? BaselineRejectionMutationId(db, task.Id);
         task.RejectPendingBackup(
             storageMode,
             nowUtc,
             BaselineRequiredCode,
             "还没有已核对的受管完整备份基线，该差异时隙已结束，不会改成完整备份，也不会当作未调用失败重试。");
         db.AddRange(
-            CreateStateChange(Guid.NewGuid(), task, before, stage, "plan.baseline_required", BaselineRequiredCode, nowUtc),
+            CreateStateChange(key, task, before, stage, "plan.baseline_required", BaselineRequiredCode, nowUtc),
             CreateAudit(null, task.Id, "backup.plan.task.baseline_required", "closed", BaselineRequiredCode));
+        // 明确失败与状态、历史、审计在同一次提交里入队；核对确认成功不补发，这里只处理明确失败。
+        NotificationOutboxWriter.EnqueuePlanOutcome(db, key, task.Id, task.CurrentStage, task.Status, nowUtc, BaselineRequiredCode);
+    }
+
+    /// <summary>
+    /// 补充基线失败通知键：沿用首次收口的状态变更标识，重复选择不会重复入队，
+    /// 也与状态变更、历史、审计同一次事务提交。
+    /// </summary>
+    private static Guid BaselineRejectionMutationId(PlatformDbContext db, Guid taskId)
+    {
+        var existing = db.BackupTaskStateChanges.Local
+            .FirstOrDefault(change => change.TaskId == taskId && change.ReasonCode == "plan.baseline_required");
+        return existing?.MutationId
+            ?? db.BackupTaskStateChanges.Where(change => change.TaskId == taskId && change.ReasonCode == "plan.baseline_required")
+                .Select(change => (Guid?)change.MutationId).FirstOrDefault()
+            ?? Guid.NewGuid();
     }
 
     private async Task CloseScheduledDifferentialsWithoutBaselineAsync(
@@ -182,6 +199,11 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
         });
     }
 
+    /// <summary>
+    /// 可执行候选：与认领时的配置复核保持同一口径，在 SQL 里直接排除已停用的源、实例、凭据和存储目标。
+    /// 这样停用的旧任务不会占住队首，同一夹具里的健康任务仍能取得执行机会；
+    /// 未终止调用等其他全局阻塞不在这里放宽。
+    /// </summary>
     private static IQueryable<Guid> Eligible(PlatformDbContext db, BackupRunPurpose purpose) =>
         from task in db.BackupTasks.AsNoTracking()
         join snapshot in db.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
@@ -192,6 +214,15 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
             && (snapshot.StorageMode == BackupStorageMode.LocalOnly
                 || snapshot.StorageMode == BackupStorageMode.LocalAndRemote
                 || snapshot.StorageMode == BackupStorageMode.RemoteOnly)
+            && db.ManagedDatabases.Any(database => database.Id == snapshot.DatabaseId
+                && database.IsManaged && database.IsAvailable && !database.IsSystemDatabase)
+            && db.DatabaseInstances.Any(instance => instance.Id == snapshot.InstanceId && instance.IsEnabled)
+            && db.DatabaseServers.Any(server => server.Id == snapshot.ServerId && server.IsEnabled)
+            && db.CredentialReferences.Any(credential => credential.Id == snapshot.SqlCredentialReferenceId && credential.IsEnabled)
+            && db.CredentialReferences.Any(credential => credential.Id == snapshot.SourceCredentialReferenceId && credential.IsEnabled)
+            && (snapshot.StorageTargetId == null
+                || db.CredentialReferences.Any(credential => credential.Id == snapshot.RemoteCredentialReferenceId && credential.IsEnabled)
+                    && db.StorageTargets.Any(target => target.Id == snapshot.StorageTargetId && target.IsEnabled))
         orderby task.CreatedAtUtc
         select task.Id;
 

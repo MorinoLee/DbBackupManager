@@ -1,3 +1,4 @@
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.Configuration;
 
@@ -6,9 +7,10 @@ namespace DbBackupManager.Application.BackupTasks;
 /// <summary>调度、执行及阶段提交共用的完整备份事实；活动结论不替代历史依赖。</summary>
 public static class BackupPlanExecutionFactRules
 {
-    public static bool MetadataPassed(BackupSet? set, IReadOnlyList<BackupSetEvidence> evidence, BackupType type = BackupType.Full)
+    public static bool MetadataPassed(BackupSet? set, IReadOnlyList<BackupSetEvidence> evidence, BackupType type = BackupType.Full,
+        bool expectCopyOnly = false)
     {
-        if (set is null || set.HasMetadataConflict || !set.SqlSuccessObserved || !CompleteBackup(set.Metadata, type)
+        if (set is null || set.HasMetadataConflict || !set.SqlSuccessObserved || !CompleteBackup(set.Metadata, type, expectCopyOnly)
             || !Passed(set.Assessment) || evidence.Count == 0) return false;
         var latest = evidence.Max(x => x.ReconciliationNumber);
         var round = evidence.Where(x => x.ReconciliationNumber == latest).ToArray();
@@ -18,7 +20,7 @@ public static class BackupPlanExecutionFactRules
             var rows = round.Where(x => x.Source == source && x.Kind == BackupSetEvidenceKind.Backup).ToArray();
             if (rows.Length != 1 || rows[0].BackupSetId != set.Id || !rows[0].SqlSuccessObserved
                 || rows[0].TaskId != set.TaskId || rows[0].AttemptId != set.AttemptId
-                || !Passed(rows[0].Assessment) || !CompleteBackup(rows[0].Metadata, type)) return false;
+                || !Passed(rows[0].Assessment) || !CompleteBackup(rows[0].Metadata, type, expectCopyOnly)) return false;
             _ = set.Metadata.Merge(rows[0].Metadata, out var conflict);
             if (conflict) return false;
         }
@@ -30,8 +32,17 @@ public static class BackupPlanExecutionFactRules
                 && assessment.Conclusion == DifferentialBaselineConclusion.Verified && set?.BaseBackupSetId is not null;
     }
 
-    public static bool CompleteBackup(BackupSetMetadata m, BackupType type) =>
-        m.Type.Value == type && m.IsCopyOnly.Value == false
+    /// <summary>差异备份永远不是 COPY_ONLY；完整备份按本次用途要求实际标志与用途相符。</summary>
+    public static bool ExpectedCopyOnly(BackupType type, BackupRunPurpose purpose) =>
+        type == BackupType.Full && BackupPlanRules.UseCopyOnly(purpose);
+
+    /// <summary>
+    /// 备份有效性规则：用于证明这份备份本身完整可核对。COPY_ONLY 是执行选项，不改变有效性；
+    /// 由调用方通过 <paramref name="expectCopyOnly"/> 指定本次用途要求的实际标志。
+    /// 是否可作为受管普通 FULL 基线由差异依赖基线规则单独判断，不在这里放宽。
+    /// </summary>
+    public static bool CompleteBackup(BackupSetMetadata m, BackupType type, bool expectCopyOnly) =>
+        m.Type.Value == type && m.IsCopyOnly.Value == expectCopyOnly
         && m.BackupSetGuid.Value is { } guid && guid != Guid.Empty
         && m.DatabaseGuid.Value is { } database && database != Guid.Empty
         && m.FamilyGuid.Value is { } family && family != Guid.Empty
@@ -39,7 +50,7 @@ public static class BackupPlanExecutionFactRules
         && m.DatabaseBackupLsn.Value is not null
         && (type == BackupType.Full
             ? m.DifferentialBaseGuid.State == BackupMetadataState.NotApplicable && m.DifferentialBaseLsn.State == BackupMetadataState.NotApplicable
-            : type == BackupType.Differential && m.DifferentialBaseGuid.Value is { } baseGuid && baseGuid != Guid.Empty
+            : type == BackupType.Differential && expectCopyOnly == false && m.DifferentialBaseGuid.Value is { } baseGuid && baseGuid != Guid.Empty
                 && m.DifferentialBaseLsn.Value is not null && m.DatabaseBackupLsn.Value == m.DifferentialBaseLsn.Value)
         && m.FirstRecoveryForkId.Value is { } fork && fork != Guid.Empty && m.RecoveryForkId.Value == fork
         && m.ForkPointLsn.State != BackupMetadataState.Unknown

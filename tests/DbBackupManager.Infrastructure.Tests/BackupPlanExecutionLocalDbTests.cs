@@ -613,6 +613,8 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
             CancellationToken cancellationToken = default) => inner.CloseDeferredRemoteCleanupAsync(taskId, cancellationToken);
         public Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId,
             CancellationToken cancellationToken = default) => inner.CloseReadyRemoteCleanupsAsync(databaseId, cancellationToken);
+        public Task<BackupExecutionContractCode> ReleaseDeferredCleanupForExecutionAsync(LeaseHandle lease,
+            CancellationToken cancellationToken = default) => inner.ReleaseDeferredCleanupForExecutionAsync(lease, cancellationToken);
     }
     private string SmbRoot(string child)
     {

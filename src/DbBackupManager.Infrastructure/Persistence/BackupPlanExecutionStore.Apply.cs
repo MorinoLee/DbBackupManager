@@ -262,7 +262,8 @@ internal sealed partial class BackupPlanExecutionStore
     }
     private static bool MetadataMatches(BackupTaskSnapshot snapshot, BackupAttempt attempt, BackupSet set, IReadOnlyList<BackupSetEvidence> rows) =>
         set.Id != Guid.Empty && set.TaskId == attempt.TaskId && set.DatabaseId == snapshot.DatabaseId
-        && BackupPlanExecutionFactRules.MetadataPassed(set, rows, snapshot.BackupType)
+        && BackupPlanExecutionFactRules.MetadataPassed(set, rows, snapshot.BackupType,
+            BackupPlanExecutionFactRules.ExpectedCopyOnly(snapshot.BackupType, snapshot.Purpose!.Value))
         && set.Metadata.DatabaseGuid.Value == attempt.ExpectedDatabaseGuid && set.Metadata.FamilyGuid.Value == attempt.ExpectedFamilyGuid
         && set.Metadata.IsCopyOnly.Value == snapshot.UseCopyOnly && set.Metadata.HasBackupChecksums.Value == snapshot.UseChecksum
         && set.Metadata.IsCompressed.Value == snapshot.UseCompression;
