@@ -7,8 +7,9 @@ using Microsoft.EntityFrameworkCore;
 namespace DbBackupManager.Infrastructure.Tests;
 
 /// <summary>
-/// A01 清理核对交接的边界对照：等待协调锁期间租约换主必须拒绝，并且不得写状态、历史或通知；
-/// 真正到期的边界由独立复审反例覆盖。
+/// A01 清理核对交接的边界对照：等待协调锁期间租约换主必须拒绝，并且不得写状态、历史或通知。
+/// 真正到期的边界由独立复审反例覆盖；有效租约仍能收口由 A01 验收用例和审计反例覆盖。
+/// 这里不伪造"等待期间续租成功"，那条路径需要真实续租，无法用生产代码之外的手段诚实构造。
 /// </summary>
 public sealed class BackupPlanCleanupReconciliationLeaseLocalDbTests(PlatformDatabaseSqlServerFixture platform)
     : IClassFixture<PlatformDatabaseSqlServerFixture>
