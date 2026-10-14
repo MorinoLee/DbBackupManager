@@ -38,14 +38,18 @@ internal sealed class BackupPlanManualExecutionStore(IDbContextFactory<PlatformD
                 return new BackupPlanTaskCreationResult(BackupPlanTaskCreationCode.NotFound);
             }
 
-            var current = new CreateBackupPlanTaskCommand(
-                request with { PlanVersionId = plan.CurrentVersionId },
-                BackupTaskTriggerType.Manual,
-                clock.GetUtcNow().ToUniversalTime(),
-                command.ActorAdminUserId,
-                command.ActorSecurityStamp);
-            var replay = await BackupPlanTaskCreationCore.FindReplayAsync(db, current, cancellationToken);
-            if (replay is not null)
+            // 成功重放也必须在返回前复核管理员状态与安全戳，不能依赖周期性的 Cookie/Circuit 重验证。
+            if (command.ActorAdminUserId is null || command.ActorAdminUserId == Guid.Empty
+                || !await BackupTaskPersistence.IsActorValidAsync(
+                    db, command.ActorAdminUserId, command.ActorSecurityStamp, cancellationToken))
+            {
+                return new BackupPlanTaskCreationResult(BackupPlanTaskCreationCode.AuthenticationRequired);
+            }
+
+            var normalized = command with { NowUtc = clock.GetUtcNow().ToUniversalTime() };
+
+            // 先按持久化原回执匹配完整请求，命中即返回原任务，不按当前计划版本重写重放身份。
+            if (await BackupPlanTaskCreationCore.FindReplayForManualAsync(db, normalized, cancellationToken) is { } replay)
             {
                 if (replay.Code is BackupPlanTaskCreationCode.AlreadyApplied or BackupPlanTaskCreationCode.AlreadyExists)
                 {
@@ -55,7 +59,8 @@ internal sealed class BackupPlanManualExecutionStore(IDbContextFactory<PlatformD
                 return replay;
             }
 
-            if (await ReplayByTaskIdAsync(db, current.Request, cancellationToken) is { } taskReplay)
+            // 复用已有任务时原子绑定本次 MutationId，避免同一 MutationId 之后指向另一个任务。
+            if (await BackupPlanTaskCreationCore.ReplayManualByTaskIdAsync(db, normalized, cancellationToken) is { } taskReplay)
             {
                 if (taskReplay.Code is BackupPlanTaskCreationCode.AlreadyApplied or BackupPlanTaskCreationCode.AlreadyExists)
                 {
@@ -65,6 +70,8 @@ internal sealed class BackupPlanManualExecutionStore(IDbContextFactory<PlatformD
                 return taskReplay;
             }
 
+            // 只有全新请求才绑定当前计划版本。
+            var current = normalized with { Request = request with { PlanVersionId = plan.CurrentVersionId } };
             if (request.Purpose == BackupRunPurpose.PlanDifferential)
             {
                 var facts = await BackupPlanBaselineFacts.ReadAsync(db, plan.DatabaseId, cancellationToken);
@@ -83,36 +90,5 @@ internal sealed class BackupPlanManualExecutionStore(IDbContextFactory<PlatformD
 
             return result;
         }, cancellationToken);
-    }
-
-    private static async Task<BackupPlanTaskCreationResult?> ReplayByTaskIdAsync(
-        PlatformDbContext db, CreateBackupPlanTaskRequest request, CancellationToken cancellationToken)
-    {
-        if (request.TaskId == Guid.Empty
-            || !await db.BackupTasks.AsNoTracking().AnyAsync(item => item.Id == request.TaskId, cancellationToken))
-        {
-            return null;
-        }
-
-        var snapshot = await db.BackupTaskSnapshots.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.TaskId == request.TaskId, cancellationToken);
-        var task = await db.BackupTasks.AsNoTracking().SingleAsync(item => item.Id == request.TaskId, cancellationToken);
-        if (snapshot?.Purpose != request.Purpose || task.PlanId != request.PlanId)
-        {
-            return new BackupPlanTaskCreationResult(BackupPlanTaskCreationCode.RequestConflict);
-        }
-
-        return new BackupPlanTaskCreationResult(
-            BackupPlanTaskCreationCode.AlreadyApplied,
-            new CreatedBackupPlanTask(
-                task.Id,
-                task.PlanId!.Value,
-                task.PlanVersionId!.Value,
-                snapshot.DatabaseId,
-                snapshot.Purpose!.Value,
-                task.BackupType,
-                task.TriggerType,
-                task.ScheduledSlotAtUtc,
-                task.CoveredDifferentialSlotUtc));
     }
 }

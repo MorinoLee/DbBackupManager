@@ -126,6 +126,85 @@ internal static class BackupPlanTaskCreationCore
         return null;
     }
 
+    /// <summary>
+    /// 手动请求按 MutationId 重放：用原任务版本还原规范身份再比对，使计划改版后同一请求仍返回原任务，
+    /// 而逻辑身份变化仍返回冲突；不把当前计划版本写进重放身份。
+    /// </summary>
+    internal static async Task<BackupPlanTaskCreationResult?> FindReplayForManualAsync(
+        PlatformDbContext context, CreateBackupPlanTaskCommand command, CancellationToken token)
+    {
+        var request = command.Request;
+        var receipt = await context.BackupTaskStateChanges.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.MutationId == request.MutationId, token);
+        if (receipt is null)
+        {
+            return null;
+        }
+
+        if (receipt.ReasonCode is not (CreatedReason or ReusedReason or SupplementReason))
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        var original = await ReadIdentityAsync(context, receipt.TaskId, token);
+        if (original is null)
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        var expected = RequestIdentity(command with { Request = request with { PlanVersionId = original.PlanVersionId } });
+        return string.Equals(receipt.Message, expected, StringComparison.Ordinal)
+            ? new(BackupPlanTaskCreationCode.AlreadyApplied, original)
+            : new(BackupPlanTaskCreationCode.RequestConflict);
+    }
+
+    /// <summary>
+    /// 手动请求按 TaskId 命中已有任务时，用原请求身份复核并原子绑定本次 MutationId，
+    /// 使不同 MutationId 不能再指向另一个任务。
+    /// </summary>
+    internal static async Task<BackupPlanTaskCreationResult?> ReplayManualByTaskIdAsync(
+        PlatformDbContext context, CreateBackupPlanTaskCommand command, CancellationToken token)
+    {
+        var request = command.Request;
+        if (request.TaskId == Guid.Empty)
+        {
+            return null;
+        }
+
+        var task = await context.BackupTasks.AsTracking().SingleOrDefaultAsync(x => x.Id == request.TaskId, token);
+        if (task is null)
+        {
+            return null;
+        }
+
+        if (task.PlanId is null || task.PlanVersionId is null)
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        var snapshot = await context.BackupTaskSnapshots.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.TaskId == request.TaskId, token);
+        if (snapshot?.Purpose is null)
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        var canonical = command with { Request = request with { PlanVersionId = task.PlanVersionId.Value } };
+        var expected = RequestIdentity(canonical);
+        var matches = await context.BackupTaskStateChanges.AsNoTracking().AnyAsync(
+            item => item.TaskId == request.TaskId
+                && (item.ReasonCode == CreatedReason || item.ReasonCode == ReusedReason || item.ReasonCode == SupplementReason)
+                && item.Message == expected, token);
+        if (!matches)
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        AddReceipt(context, canonical, task, reused: true);
+        await context.SaveChangesAsync(token);
+        return new(BackupPlanTaskCreationCode.AlreadyApplied, Identity(task, snapshot));
+    }
+
     // 有版本的规范化请求只含身份及时隙；不保存安全戳、当前时钟或任何连接配置。
     private static string RequestIdentity(CreateBackupPlanTaskCommand command)
     {
