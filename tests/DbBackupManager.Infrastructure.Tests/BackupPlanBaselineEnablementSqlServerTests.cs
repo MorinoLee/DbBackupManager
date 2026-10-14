@@ -171,9 +171,10 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
         Assert.False(await db.BackupTaskSnapshots.Where(item => item.TaskId == full.Task.TaskId).Select(item => item.UseCopyOnly).SingleAsync());
         Assert.True(await db.BackupTaskSnapshots.Where(item => item.TaskId == copy.Task.TaskId).Select(item => item.UseCopyOnly).SingleAsync());
 
-        var differentialPlan = await AddPlanAsync(database, graph, BackupPlanMode.FullAndDifferential, paused: false);
+        var differentialGraph = await SeedAsync(database);
+        var differentialPlan = await AddPlanAsync(database, differentialGraph, BackupPlanMode.FullAndDifferential, paused: false);
         var before = await CountTasksAsync(database, differentialPlan.Id);
-        var rejected = await runs.RunAsync(graph.Actor, differentialPlan.Id, Guid.NewGuid(), Guid.NewGuid(), BackupRunPurpose.PlanDifferential);
+        var rejected = await runs.RunAsync(differentialGraph.Actor, differentialPlan.Id, Guid.NewGuid(), Guid.NewGuid(), BackupRunPurpose.PlanDifferential);
         Assert.Equal(BackupPlanTaskCreationCode.BaselineRequired, rejected.Code);
         Assert.Null(rejected.Task);
         Assert.Equal(before, await CountTasksAsync(database, differentialPlan.Id));
@@ -226,8 +227,9 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
             var pending = await CreateTaskAsync(isolated, graph, plan, BackupRunPurpose.PlanFull);
             await using (var db = isolated.CreateContext())
             {
-                var attempt = new BackupAttempt(Guid.NewGuid(), running.TaskId, 1, Now, new(
-                    $@"D:\Synthetic\Backup\{running.TaskId:N}.bak", $@"\\synthetic-host\synthetic-share\{running.TaskId:N}.bak", null, null, null));
+                var attemptId = Guid.NewGuid();
+                var attempt = new BackupAttempt(attemptId, running.TaskId, 1, Now, new(
+                    $@"D:\Synthetic\Backup\{attemptId:N}.bak", $@"\\synthetic-host\synthetic-share\{attemptId:N}.bak", null, null, null));
                 attempt.MarkBackupRunning(Now);
                 db.BackupAttempts.Add(attempt);
                 await db.SaveChangesAsync();
