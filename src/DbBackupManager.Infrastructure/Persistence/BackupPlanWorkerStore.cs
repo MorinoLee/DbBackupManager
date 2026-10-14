@@ -58,6 +58,7 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
             return new(BackupPlanWorkerSelectionKind.Wait, null);
         }
 
+        // 已恢复或已推进到后续阶段的任务同样继续执行，不新建 BACKUP。
         var fullId = await Eligible(db, BackupRunPurpose.PlanFull).FirstOrDefaultAsync(cancellationToken);
         if (fullId != Guid.Empty)
         {
@@ -70,6 +71,7 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
             return new(BackupPlanWorkerSelectionKind.Execute, copyId);
         }
 
+        // 只有仍未调用 BACKUP 的差异任务需要当前基线门禁；已过 Backup 的按历史依赖续跑。
         var differentialDatabases = await (
             from task in db.BackupTasks.AsNoTracking()
             join snapshot in db.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
@@ -89,20 +91,14 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
             }
         }
 
-        if (allowed.Count == 0)
-        {
-            return new(BackupPlanWorkerSelectionKind.Idle, null);
-        }
-
         var differentialId = await (
             from task in db.BackupTasks.AsNoTracking()
             join snapshot in db.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
             where task.PlanId != null
                 && task.Status == BackupTaskStatus.Pending
-                && task.CurrentStage == BackupTaskStage.Backup
                 && snapshot.FileNameRuleVersion == "v3"
                 && snapshot.Purpose == BackupRunPurpose.PlanDifferential
-                && allowed.Contains(snapshot.DatabaseId)
+                && (task.CurrentStage != BackupTaskStage.Backup || allowed.Contains(snapshot.DatabaseId))
                 && (snapshot.StorageMode == BackupStorageMode.LocalOnly
                     || snapshot.StorageMode == BackupStorageMode.LocalAndRemote
                     || snapshot.StorageMode == BackupStorageMode.RemoteOnly)
@@ -191,7 +187,6 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
         join snapshot in db.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
         where task.PlanId != null
             && task.Status == BackupTaskStatus.Pending
-            && task.CurrentStage == BackupTaskStage.Backup
             && snapshot.FileNameRuleVersion == "v3"
             && snapshot.Purpose == purpose
             && (snapshot.StorageMode == BackupStorageMode.LocalOnly

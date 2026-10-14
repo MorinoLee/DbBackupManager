@@ -63,7 +63,7 @@ internal sealed partial class BackupPlanExecutionStore(
             {
                 if (task.Status != BackupTaskStatus.Pending)
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
-                if (snapshot.Purpose == BackupRunPurpose.PlanDifferential)
+                if (snapshot.Purpose == BackupRunPurpose.PlanDifferential && task.CurrentStage == BackupTaskStage.Backup)
                 {
                     var facts = await BackupPlanBaselineFacts.ReadAsync(db, snapshot.DatabaseId, cancellationToken);
                     if (!BackupPlanBaselineRules.AllowsDifferentialExecution(
