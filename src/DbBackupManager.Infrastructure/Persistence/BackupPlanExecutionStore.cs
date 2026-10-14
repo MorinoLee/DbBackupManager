@@ -55,8 +55,6 @@ internal sealed partial class BackupPlanExecutionStore(
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
                 if (task.LeaseToken is not null && task.LeaseExpiresAtUtc > now)
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
-                if (task.NextReconciliationAtUtc > now)
-                    return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
                 task.RequestReconciliation(now);
                 task.AcquireReconciliationLease(leaseToken, owner, now, expires);
                 attempt = await db.BackupAttempts.AsTracking().SingleAsync(x => x.Id == task.CurrentBackupAttemptId, cancellationToken);
