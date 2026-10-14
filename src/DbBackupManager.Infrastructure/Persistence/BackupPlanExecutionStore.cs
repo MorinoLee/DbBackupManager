@@ -257,21 +257,19 @@ internal sealed partial class BackupPlanExecutionStore(
     }
 
     /// <summary>
-    /// 只读核对 RemoteOnly 暂存清理：暂存记录已经解开时补齐终态；暂存仍在时只释放核对租约、
-    /// 保留原 Attempt 和文件，由执行路径按原阶段重试清理。本方法不删除任何文件。
+    /// 只读核对 RemoteOnly 暂存清理。已确认物理删除（本地行已解开且 Attempt 记下清理完成）时按既有
+    /// 删除证据收口，不需要重新执行，也不受已停用配置影响；暂存仍在时只释放核对租约、保留原 Attempt
+    /// 和文件，由执行路径按原阶段重试清理。本方法不删除任何文件，也不把缺失或归属未知当成已清理。
     /// </summary>
     public async Task<BackupExecutionContractCode> ReleaseDeferredCleanupForExecutionAsync(LeaseHandle lease,
         CancellationToken cancellationToken = default)
     {
-        Guid? remoteGap = null;
+        Guid? settledDatabase = null;
         var code = await _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == lease.TaskId, cancellationToken);
             if (snapshot is null) return BackupExecutionContractCode.NotFound;
-            var now = clock.GetUtcNow();
-            // 先在做决定前用独立短 Context 读取保留评估，避免在持有任务行锁时再开第二个连接。
-            var release = await new PlanLocationRetentionStore(factory).ReadOwnStagingAsync(lease.TaskId, now, cancellationToken);
             if (!await PlanRetentionLock.TryAcquireAsync(db, snapshot.DatabaseId, cancellationToken))
                 return BackupExecutionContractCode.DatabaseBlocked;
             await BackupInvocationAuthorizationStore.LockDatabaseAsync(db, snapshot.DatabaseId, cancellationToken);
@@ -279,32 +277,41 @@ internal sealed partial class BackupPlanExecutionStore(
             if (task is null) return BackupExecutionContractCode.NotFound;
             if (snapshot.StorageMode != BackupStorageMode.RemoteOnly || task.CurrentStage != BackupTaskStage.Cleanup)
                 return BackupExecutionContractCode.StageNotOpen;
+            // 协调锁、数据库锁和任务行锁都已经取得后再读当前时间：等待期间租约可能已经到期，
+            // 不能沿用取锁之前缓存的时刻。
+            var now = clock.GetUtcNow();
             if (ValidateLease(task, lease, now) is not null) return BackupExecutionContractCode.LeaseLost;
             var attempt = await db.BackupAttempts.AsTracking().SingleAsync(x => x.Id == lease.BackupAttemptId && x.TaskId == task.Id, cancellationToken);
             var localRemains = await db.BackupFiles.AnyAsync(x => x.TaskId == task.Id && x.AttemptId == attempt.Id
                 && x.Location == BackupFileLocation.Local && x.Status != BackupFileStatus.Deleted, cancellationToken);
             var before = task.Status;
-            // 暂存副本已经不在保留评估里（文件行已解开或归属/依赖无法证明）时，收口既不可靠也不能由核对代删，
-            // 一律释放租约交回执行路径；执行路径的显式解析入口会给出确切原因。
-            var settled = !localRemains && release.FileId is not null;
-            var outcome = settled ? BackupReconciliationOutcome.Succeeded : BackupReconciliationOutcome.SafeToRetry;
-            var reason = settled
-                ? release.Releasable ? "plan.staging.clean" : "plan.staging.retain"
-                : "plan.staging.deferred";
-            task.CompleteReconciliation(snapshot.StorageMode, lease.LeaseToken, now, outcome,
-                settled ? reason : null, settled ? null : "暂存清理证据仍不完整，已释放核对租约交回执行路径。");
+            string reason;
+            if (attempt.LocalCleanupCompletedAtUtc is not null && !localRemains)
+            {
+                // 物理删除已经提交，只差任务终态：按既有删除证据收口，不依赖已停用配置重新执行。
+                task.CompleteReconciliation(snapshot.StorageMode, lease.LeaseToken, now, BackupReconciliationOutcome.Succeeded);
+                reason = "plan.staging.clean";
+                settledDatabase = snapshot.DatabaseId;
+            }
+            else
+            {
+                // 暂存仍在（或归属/依赖仍无法证明）：核对不做删除，释放租约交回执行路径按原 Attempt 继续。
+                task.CompleteReconciliation(snapshot.StorageMode, lease.LeaseToken, now, BackupReconciliationOutcome.SafeToRetry,
+                    null, "暂存清理证据仍不完整，已释放核对租约交回执行路径。");
+                reason = "plan.staging.deferred";
+            }
+
             db.AddRange(CreateStateChange(Guid.NewGuid(), task, before, BackupTaskStage.Cleanup,
                     "plan.reconciliation.cleanup", reason, now),
                 CreateAudit(null, task.Id, "plan.staging.cleanup_review", "succeeded", reason));
             await db.SaveChangesAsync(cancellationToken);
-            if (snapshot.StorageTargetId is Guid target)
+            if (settledDatabase is not null && snapshot.StorageTargetId is Guid target)
                 await RemoteGapNotices.MarkPendingAsync(db, new RemoteGapNotices.Observation(
                     snapshot.DatabaseId, task.Id, BackupTaskStage.Cleanup, now, [target]), cancellationToken);
             await tx.CommitAsync(cancellationToken);
-            remoteGap = snapshot.DatabaseId;
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
-        if (code == BackupExecutionContractCode.Succeeded && remoteGap is Guid databaseId)
+        if (code == BackupExecutionContractCode.Succeeded && settledDatabase is Guid databaseId)
             await RemoteGapNotices.TryDrainPendingAsync(factory, databaseId, cancellationToken, logger);
         return code;
     }

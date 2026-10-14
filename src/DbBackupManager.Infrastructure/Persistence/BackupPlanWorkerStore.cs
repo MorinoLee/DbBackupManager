@@ -92,18 +92,16 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
         }
 
         var differentialId = await (
-            from task in db.BackupTasks.AsNoTracking()
-            join snapshot in db.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
-            where task.PlanId != null
-                && task.Status == BackupTaskStatus.Pending
-                && snapshot.FileNameRuleVersion == "v3"
-                && snapshot.Purpose == BackupRunPurpose.PlanDifferential
-                && (task.CurrentStage != BackupTaskStage.Backup || allowed.Contains(snapshot.DatabaseId))
-                && (snapshot.StorageMode == BackupStorageMode.LocalOnly
-                    || snapshot.StorageMode == BackupStorageMode.LocalAndRemote
-                    || snapshot.StorageMode == BackupStorageMode.RemoteOnly)
-            orderby task.CreatedAtUtc
-            select task.Id).FirstOrDefaultAsync(cancellationToken);
+                from task in db.BackupTasks.AsNoTracking()
+                join snapshot in ConfigAvailable(db, db.BackupTaskSnapshots.AsNoTracking()) on task.Id equals snapshot.TaskId
+                where task.PlanId != null
+                    && task.Status == BackupTaskStatus.Pending
+                    && snapshot.FileNameRuleVersion == "v3"
+                    && snapshot.Purpose == BackupRunPurpose.PlanDifferential
+                    && (task.CurrentStage != BackupTaskStage.Backup || allowed.Contains(snapshot.DatabaseId))
+                orderby task.CreatedAtUtc
+                select task.Id)
+            .FirstOrDefaultAsync(cancellationToken);
         return differentialId == Guid.Empty
             ? new(BackupPlanWorkerSelectionKind.Idle, null)
             : new(BackupPlanWorkerSelectionKind.Execute, differentialId);
@@ -206,12 +204,21 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
     /// </summary>
     private static IQueryable<Guid> Eligible(PlatformDbContext db, BackupRunPurpose purpose) =>
         from task in db.BackupTasks.AsNoTracking()
-        join snapshot in db.BackupTaskSnapshots.AsNoTracking() on task.Id equals snapshot.TaskId
+        join snapshot in ConfigAvailable(db, db.BackupTaskSnapshots.AsNoTracking()) on task.Id equals snapshot.TaskId
         where task.PlanId != null
             && task.Status == BackupTaskStatus.Pending
             && snapshot.FileNameRuleVersion == "v3"
             && snapshot.Purpose == purpose
-            && (snapshot.StorageMode == BackupStorageMode.LocalOnly
+        orderby task.CreatedAtUtc
+        select task.Id;
+
+    /// <summary>
+    /// FULL、COPY_ONLY 和 DIFF 的所有候选共用这一段可用性条件，避免某条查询漏掉过滤而让停用配置
+    /// 继续占住队首。条件在投影前应用于快照实体，与认领事务里的配置复核保持一致。
+    /// </summary>
+    private static IQueryable<BackupTaskSnapshot> ConfigAvailable(PlatformDbContext db, IQueryable<BackupTaskSnapshot> snapshots) =>
+        snapshots.Where(snapshot =>
+            (snapshot.StorageMode == BackupStorageMode.LocalOnly
                 || snapshot.StorageMode == BackupStorageMode.LocalAndRemote
                 || snapshot.StorageMode == BackupStorageMode.RemoteOnly)
             && db.ManagedDatabases.Any(database => database.Id == snapshot.DatabaseId
@@ -222,9 +229,7 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
             && db.CredentialReferences.Any(credential => credential.Id == snapshot.SourceCredentialReferenceId && credential.IsEnabled)
             && (snapshot.StorageTargetId == null
                 || db.CredentialReferences.Any(credential => credential.Id == snapshot.RemoteCredentialReferenceId && credential.IsEnabled)
-                    && db.StorageTargets.Any(target => target.Id == snapshot.StorageTargetId && target.IsEnabled))
-        orderby task.CreatedAtUtc
-        select task.Id;
+                    && db.StorageTargets.Any(target => target.Id == snapshot.StorageTargetId && target.IsEnabled)));
 
     private sealed record PendingDifferential(Guid Id, Guid DatabaseId, BackupStorageMode StorageMode);
 }

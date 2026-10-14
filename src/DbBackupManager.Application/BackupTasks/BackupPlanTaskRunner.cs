@@ -54,10 +54,19 @@ public sealed class BackupPlanTaskRunner(IBackupPlanExecutionStore store, IBacku
             {
                 var confirmed = await ConfirmCopyAsync(session, heartbeat.Token);
                 if (confirmed != BackupExecutionContractCode.Succeeded) return confirmed;
-                // 远端确认成功后任务直接进入 Cleanup（RemoteOnly）或已完成（LocalAndRemote）；
-                // 成功的任务已经释放租约，不能再按原租约续读。只有 Cleanup 需要本轮的会话状态，
-                // 因此这里用 RefreshAsync 的“同租约且仍开放”语义做一个可选刷新。
-                session = await store.RefreshAsync(request.TaskId, session.Work.Lease.LeaseToken, CancellationToken.None) ?? session;
+                // RemoteOnly 远端确认后任务进入 Running/Cleanup 且租约仍有效，这里必须取到原租约会话；
+                // 取不到说明等待期间已经失租，不能拿陈旧的 ValidateCopy 会话返回成功。
+                // LocalAndRemote 的 ValidateCopy 已是最后阶段，成功提交会释放租约，取不到属正常。
+                var refreshed = await store.RefreshAsync(request.TaskId, session.Work.Lease.LeaseToken, CancellationToken.None);
+                if (refreshed is null)
+                {
+                    if (session.Work.Snapshot.Policy.StorageMode == BackupStorageMode.RemoteOnly)
+                        throw new PlanExecutionLeaseLostException();
+                }
+                else
+                {
+                    session = refreshed;
+                }
             }
 
             // RemoteOnly 的 Cleanup 由执行路径收口：无论本轮新完成 ValidateCopy，还是核对释放租约后
