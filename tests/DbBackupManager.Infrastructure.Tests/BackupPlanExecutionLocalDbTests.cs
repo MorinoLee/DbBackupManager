@@ -175,9 +175,57 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
         await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE [BackupTasks] SET [LeaseAcquiredAtUtc] = {DateTimeOffset.UtcNow.AddMinutes(-5)}, [LeaseExpiresAtUtc] = {DateTimeOffset.UtcNow.AddSeconds(-1)} WHERE [Id] = {taskId} AND [LeaseToken] IS NOT NULL");
     }
 
+    /// <summary>
+    /// 认领现在排除整个平台上仍未结束的调用。上一个场景留下的 Running 租约或未终止授权
+    /// 不能挡住这个新场景；只结束那些调用，不删除任务历史。
+    /// </summary>
+    private static async Task ReleasePreviousOpenClaimsAsync(PlatformDatabaseSqlServerFixture platform)
+    {
+        await using var db = platform.CreateContext();
+        var now = DateTimeOffset.UtcNow;
+        var attempts = await db.BackupAttempts
+            .Where(attempt => attempt.BackupInvocationStatus == BackupInvocationStatus.Running
+                || attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate)
+            .ToListAsync();
+        foreach (var attempt in attempts)
+        {
+            var finished = attempt.BackupStartedAtUtc is { } started && started > now ? started : now;
+            attempt.ReconcileBackupConfirmedFailed(finished, "test.previous_claim_released");
+        }
+
+        var authorizations = await db.BackupInvocationAuthorizations
+            .Where(authorization => authorization.TerminalObservedAtUtc == null)
+            .ToListAsync();
+        foreach (var authorization in authorizations)
+        {
+            authorization.RecordTermination(
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                BackupInvocationTerminationKind.PlatformConfirmedFailed,
+                now,
+                originalCallTerminated: true,
+                originalCallerCannotInvoke: true);
+        }
+
+        if (attempts.Count > 0 || authorizations.Count > 0)
+        {
+            await db.SaveChangesAsync();
+        }
+
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE [BackupTasks]
+            SET [LeaseExpiresAtUtc] = DATEADD(millisecond, 1, [LeaseAcquiredAtUtc])
+            WHERE [Status] = N'Running'
+              AND [LeaseExpiresAtUtc] > {now}
+              AND [LeaseAcquiredAtUtc] < {now}
+              AND DATEADD(millisecond, 1, [LeaseAcquiredAtUtc]) <= {now};
+            """);
+    }
+
     public static async Task<PlanExecutionTestEnvironment> CreateAsync(PlatformDatabaseSqlServerFixture platform, BackupStorageMode mode,
         PlanExecutionCommitFault? fault = null, params IInterceptor[] interceptors)
     {
+        await ReleasePreviousOpenClaimsAsync(platform);
         var name = $"DbBPE_{Guid.NewGuid():N}";
         var root = Path.Combine(Path.GetTempPath(), $"DbBPE_{Guid.NewGuid():N}");
         Directory.CreateDirectory(Path.Combine(root, "source"));

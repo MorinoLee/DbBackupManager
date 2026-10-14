@@ -128,7 +128,7 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
             CreateAudit(null, task.Id, "backup.plan.task.baseline_required", "closed", BaselineRequiredCode));
     }
 
-    private static async Task CloseScheduledDifferentialsWithoutBaselineAsync(
+    private async Task CloseScheduledDifferentialsWithoutBaselineAsync(
         PlatformDbContext db, DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
         var pending = await (
@@ -162,23 +162,28 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
             return;
         }
 
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        foreach (var item in closing)
+        var strategy = db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
         {
-            var task = await db.BackupTasks.FromSqlInterpolated(
-                    $"SELECT * FROM [BackupTasks] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {item.Id}")
-                .AsTracking()
-                .SingleOrDefaultAsync(cancellationToken);
-            if (task is null || task.Status != BackupTaskStatus.Pending || task.TriggerType != BackupTaskTriggerType.Scheduled)
+            await using var write = await factory.CreateDbContextAsync(cancellationToken);
+            await using var transaction = await write.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            foreach (var item in closing)
             {
-                continue;
+                var task = await write.BackupTasks.FromSqlInterpolated(
+                        $"SELECT * FROM [BackupTasks] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {item.Id}")
+                    .AsTracking()
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (task is null || task.Status != BackupTaskStatus.Pending || task.TriggerType != BackupTaskTriggerType.Scheduled)
+                {
+                    continue;
+                }
+
+                CloseWithoutBaseline(write, task, item.StorageMode, nowUtc);
             }
 
-            CloseWithoutBaseline(db, task, item.StorageMode, nowUtc);
-        }
-
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+            await write.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        });
     }
 
     private static IQueryable<Guid> Eligible(PlatformDbContext db, BackupRunPurpose purpose) =>
