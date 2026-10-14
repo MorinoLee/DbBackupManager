@@ -28,6 +28,11 @@ internal sealed partial class BackupPlanExecutionStore(
         return _persistence.ExecuteWithStrategyAsync(async db =>
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            if (!reconciliationOnly && !await PlanExecutionLock.TryAcquireAsync(db, cancellationToken))
+            {
+                return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
+            }
+
             var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == taskId, cancellationToken);
             if (snapshot is null) return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.NotFound);
             await BackupInvocationAuthorizationStore.LockDatabaseAsync(db, snapshot.DatabaseId, cancellationToken);
@@ -50,6 +55,8 @@ internal sealed partial class BackupPlanExecutionStore(
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
                 if (task.LeaseToken is not null && task.LeaseExpiresAtUtc > now)
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
+                if (task.NextReconciliationAtUtc > now)
+                    return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
                 task.RequestReconciliation(now);
                 task.AcquireReconciliationLease(leaseToken, owner, now, expires);
                 attempt = await db.BackupAttempts.AsTracking().SingleAsync(x => x.Id == task.CurrentBackupAttemptId, cancellationToken);
@@ -57,6 +64,25 @@ internal sealed partial class BackupPlanExecutionStore(
             else
             {
                 if (task.Status != BackupTaskStatus.Pending)
+                    return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
+                if (snapshot.Purpose == BackupRunPurpose.PlanDifferential)
+                {
+                    var facts = await BackupPlanBaselineFacts.ReadAsync(db, snapshot.DatabaseId, cancellationToken);
+                    if (!BackupPlanBaselineRules.AllowsDifferentialExecution(
+                            facts.HasVerifiedManagedOrdinaryFull, facts.ActiveBaselineConclusion))
+                    {
+                        if (task.TriggerType == BackupTaskTriggerType.Scheduled)
+                        {
+                            BackupPlanWorkerStore.CloseWithoutBaseline(db, task, snapshot.StorageMode, now);
+                            await db.SaveChangesAsync(cancellationToken);
+                            await tx.CommitAsync(cancellationToken);
+                        }
+
+                        return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
+                    }
+                }
+
+                if (await AnotherBackupIsStillOpenAsync(db, now, cancellationToken))
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
                 if (!await ConfigurationEnabledAsync(db, snapshot, cancellationToken))
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
@@ -127,21 +153,27 @@ internal sealed partial class BackupPlanExecutionStore(
     }
 
     internal static async Task<QualifiedManagedFull?> FindQualifiedFullInContextAsync(PlatformDbContext db,
-        Guid databaseId, Guid backupSetGuid, CancellationToken cancellationToken)
+        Guid databaseId, Guid backupSetGuid, CancellationToken cancellationToken, bool asNoTracking = false)
     {
-        var sets = await db.BackupSets.Where(x => x.DatabaseId == databaseId && x.Metadata.BackupSetGuid.Value == backupSetGuid).ToArrayAsync(cancellationToken);
+        var setsQuery = db.BackupSets.Where(x => x.DatabaseId == databaseId && x.Metadata.BackupSetGuid.Value == backupSetGuid);
+        var sets = await (asNoTracking ? setsQuery.AsNoTracking() : setsQuery).ToArrayAsync(cancellationToken);
         if (sets.Length != 1) return null;
         var set = sets[0];
-        var attempt = await db.BackupAttempts.AsTracking().SingleAsync(x => x.Id == set.AttemptId, cancellationToken);
-        var evidence = await db.BackupSetEvidence.Where(x => x.AttemptId == set.AttemptId).ToArrayAsync(cancellationToken);
-        var local = await db.BackupFiles.SingleOrDefaultAsync(x => x.BackupSetId == set.Id && x.Location == BackupFileLocation.Local, cancellationToken);
-        var content = await db.BackupPlanExecutionOperations.Where(x => x.AttemptId == set.AttemptId && x.Kind == BackupExecutionOperationKind.VerifyLocal
-            && x.State == BackupExecutionOperationState.Applied).Select(x => x.Facts.Content).SingleOrDefaultAsync(cancellationToken);
+        var attempts = db.BackupAttempts.Where(x => x.Id == set.AttemptId);
+        var attempt = await (asNoTracking ? attempts.AsNoTracking() : attempts.AsTracking()).SingleAsync(cancellationToken);
+        var evidenceQuery = db.BackupSetEvidence.Where(x => x.AttemptId == set.AttemptId);
+        var evidence = await (asNoTracking ? evidenceQuery.AsNoTracking() : evidenceQuery).ToArrayAsync(cancellationToken);
+        var files = db.BackupFiles.Where(x => x.BackupSetId == set.Id && x.Location == BackupFileLocation.Local);
+        var local = await (asNoTracking ? files.AsNoTracking() : files).SingleOrDefaultAsync(cancellationToken);
+        var operations = db.BackupPlanExecutionOperations.Where(x => x.AttemptId == set.AttemptId && x.Kind == BackupExecutionOperationKind.VerifyLocal
+            && x.State == BackupExecutionOperationState.Applied);
+        var content = await (asNoTracking ? operations.AsNoTracking() : operations).Select(x => x.Facts.Content).SingleOrDefaultAsync(cancellationToken);
         if (attempt.BackupInvocationStatus != BackupInvocationStatus.Succeeded || attempt.LocalVerifiedAtUtc is null || attempt.SourceLengthBytes is not > 0
             || !BackupPlanExecutionFactRules.MetadataPassed(set, evidence) || local?.Status != BackupFileStatus.Available
             || local.TaskId != set.TaskId || local.AttemptId != set.AttemptId || !string.Equals(local.Path, attempt.WorkerSourceFilePath, local.Protocol == FileTransferProtocol.Smb ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)
             || local.LengthBytes != attempt.SourceLengthBytes || content?.LengthBytes != local.LengthBytes) return null;
-        var snapshot = await db.BackupTaskSnapshots.SingleAsync(x => x.TaskId == set.TaskId, cancellationToken);
+        var snapshots = db.BackupTaskSnapshots.Where(x => x.TaskId == set.TaskId);
+        var snapshot = await (asNoTracking ? snapshots.AsNoTracking() : snapshots).SingleAsync(cancellationToken);
         return new(set.Id, new(set.Id, BackupMetadataReconciliationService.Full(set.Metadata, BaselineEvidenceStatus.Complete)),
             Endpoint(snapshot.ToSnapshotModel().WorkerSourceEndpoint), local.Path, content);
     }
@@ -291,6 +323,17 @@ internal sealed partial class BackupPlanExecutionStore(
 
         return BackupExecutionContractCode.Succeeded;
     }
+
+    private static async Task<bool> AnotherBackupIsStillOpenAsync(
+        PlatformDbContext db, DateTimeOffset now, CancellationToken cancellationToken) =>
+        await db.BackupTasks.AsNoTracking().AnyAsync(
+            task => task.Status == BackupTaskStatus.Running && task.LeaseExpiresAtUtc > now, cancellationToken)
+        || await db.BackupInvocationAuthorizations.AsNoTracking().AnyAsync(
+            item => item.TerminalObservedAtUtc == null, cancellationToken)
+        || await db.BackupAttempts.AsNoTracking().AnyAsync(
+            attempt => attempt.BackupInvocationStatus == BackupInvocationStatus.Running
+                || attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate,
+            cancellationToken);
 
     private static bool IsOpen(BackupTask task, BackupTaskSnapshot snapshot) => task.PlanId is not null
         && snapshot.FileNameRuleVersion == "v3"

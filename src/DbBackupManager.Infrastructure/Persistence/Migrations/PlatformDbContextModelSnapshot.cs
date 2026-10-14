@@ -93,6 +93,9 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .HasMaxLength(40)
                         .HasColumnType("nvarchar(40)");
 
+                    b.Property<int>("EnablementSequence")
+                        .HasColumnType("int");
+
                     b.Property<Guid>("MutationId")
                         .HasColumnType("uniqueidentifier");
 
@@ -126,13 +129,18 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .HasDatabaseName("UX_BackupPlanBaselineEnablements_TaskId")
                         .HasFilter("[TaskId] IS NOT NULL");
 
-                    b.HasIndex("PlanId", "PlanVersionId")
+                    b.HasIndex("PlanId", "EnablementSequence")
                         .IsUnique()
-                        .HasDatabaseName("UX_BackupPlanBaselineEnablements_PlanVersion");
+                        .HasDatabaseName("UX_BackupPlanBaselineEnablements_Sequence");
+
+                    b.HasIndex("PlanId", "PlanVersionId")
+                        .HasDatabaseName("IX_BackupPlanBaselineEnablements_PlanVersion");
 
                     b.ToTable("BackupPlanBaselineEnablements", null, t =>
                         {
                             t.HasCheckConstraint("CK_BackupPlanBaselineEnablements_Decision", "([Decision] = 'Queued' AND [TaskId] IS NOT NULL) OR ([Decision] IN ('SkippedManagedBaseline', 'SkippedUncertainBaseline', 'SkippedOutstandingFull') AND [TaskId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanBaselineEnablements_Sequence", "[EnablementSequence] >= 1");
                         });
                 });
 
@@ -3069,7 +3077,7 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupTasks_StatusStage", "[Status] = 'Cancelled' OR [CurrentStage] IS NOT NULL");
 
-                            t.HasCheckConstraint("CK_BackupTasks_Trigger", "([TriggerType] = 'Scheduled' AND [ScheduledSlotAtUtc] IS NOT NULL) OR ([TriggerType] = 'Manual' AND [ScheduledSlotAtUtc] IS NULL)");
+                            t.HasCheckConstraint("CK_BackupTasks_Trigger", "([TriggerType] = 'Scheduled' AND [ScheduledSlotAtUtc] IS NOT NULL) OR ([TriggerType] IN ('Manual', 'BaselineSupplement') AND [ScheduledSlotAtUtc] IS NULL)");
                         });
                 });
 

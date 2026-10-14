@@ -41,7 +41,8 @@ public sealed record BackupPlanInput(
     int BackupTimeoutMinutes,
     int VerifyTimeoutMinutes,
     int TransferTimeoutMinutes,
-    bool IsPaused);
+    bool IsPaused,
+    Guid MutationId);
 
 public sealed record BackupPlanView(
     Guid Id,

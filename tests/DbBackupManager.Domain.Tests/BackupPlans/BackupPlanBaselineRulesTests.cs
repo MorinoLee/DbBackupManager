@@ -64,6 +64,17 @@ public sealed class BackupPlanBaselineRulesTests
     }
 
     [Fact]
+    public void ResumingAPausedDifferentialPlanIsAnEnablementEvenWhenThePreviousVersionAlreadyIncludesIt()
+    {
+        Assert.True(BackupPlanBaselineRules.IsEnablement(false, true, true, resumedFromPause: true));
+        Assert.Equal(
+            BackupPlanBaselineEnablementDecision.Queued,
+            BackupPlanBaselineRules.Decide(false, true, true, false, null, false, resumedFromPause: true));
+        Assert.Null(BackupPlanBaselineRules.Decide(false, true, true, false, null, false));
+        Assert.False(BackupPlanBaselineRules.IsEnablement(true, true, false, resumedFromPause: true));
+    }
+
+    [Fact]
     public void DifferentialRunsOnlyAfterAVerifiedNonUncertainBaseline()
     {
         Assert.True(BackupPlanBaselineRules.AllowsDifferentialExecution(true, DifferentialBaselineConclusion.Verified));
@@ -79,18 +90,22 @@ public sealed class BackupPlanBaselineEnablementTests
     public void QueuedEnablementRequiresTheTaskAndSkippedEnablementForbidsIt()
     {
         var queued = new BackupPlanBaselineEnablement(
-            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 1, Guid.NewGuid(), Guid.NewGuid(),
             BackupPlanBaselineEnablementDecision.Queued);
         Assert.NotNull(queued.TaskId);
+        Assert.Equal(1, queued.EnablementSequence);
         var skipped = new BackupPlanBaselineEnablement(
-            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), null,
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 2, Guid.NewGuid(), null,
             BackupPlanBaselineEnablementDecision.SkippedUncertainBaseline);
         Assert.Null(skipped.TaskId);
         Assert.Throws<ArgumentException>(() => new BackupPlanBaselineEnablement(
-            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), null,
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 1, Guid.NewGuid(), null,
             BackupPlanBaselineEnablementDecision.Queued));
         Assert.Throws<ArgumentException>(() => new BackupPlanBaselineEnablement(
-            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 1, Guid.NewGuid(), Guid.NewGuid(),
+            BackupPlanBaselineEnablementDecision.SkippedManagedBaseline));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new BackupPlanBaselineEnablement(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 0, Guid.NewGuid(), null,
             BackupPlanBaselineEnablementDecision.SkippedManagedBaseline));
     }
 }

@@ -21,27 +21,27 @@ internal static class BackupPlanBaselineFacts
     internal static async Task<bool> HasVerifiedManagedOrdinaryFullAsync(
         PlatformDbContext db, Guid databaseId, CancellationToken cancellationToken)
     {
-        var sets = await db.BackupSets.Where(set => set.DatabaseId == databaseId).ToArrayAsync(cancellationToken);
-        foreach (var set in sets)
+        var candidates = await (
+            from set in db.BackupSets.AsNoTracking()
+            join snapshot in db.BackupTaskSnapshots.AsNoTracking() on set.TaskId equals snapshot.TaskId
+            where set.DatabaseId == databaseId
+                && snapshot.Purpose == BackupRunPurpose.PlanFull
+                && !snapshot.UseCopyOnly
+                && set.Metadata.Type.Value == BackupType.Full
+                && set.Metadata.IsCopyOnly.Value == false
+                && set.Metadata.BackupSetGuid.Value != null
+                && set.Metadata.BackupSetGuid.Value != Guid.Empty
+            orderby set.CreatedAtUtc descending
+            select set.Metadata.BackupSetGuid.Value).ToListAsync(cancellationToken);
+        foreach (var guid in candidates)
         {
-            if (set.Metadata.Type.Value != BackupType.Full || set.Metadata.IsCopyOnly.Value != false)
+            if (guid is not Guid backupSetGuid || backupSetGuid == Guid.Empty)
             {
                 continue;
             }
 
-            if (set.Metadata.BackupSetGuid.Value is not Guid guid || guid == Guid.Empty)
-            {
-                continue;
-            }
-
-            var snapshot = await db.BackupTaskSnapshots.AsNoTracking()
-                .SingleOrDefaultAsync(item => item.TaskId == set.TaskId, cancellationToken);
-            if (snapshot?.Purpose != BackupRunPurpose.PlanFull || snapshot.UseCopyOnly)
-            {
-                continue;
-            }
-
-            if (await BackupPlanExecutionStore.FindQualifiedFullInContextAsync(db, databaseId, guid, cancellationToken) is not null)
+            if (await BackupPlanExecutionStore.FindQualifiedFullInContextAsync(
+                    db, databaseId, backupSetGuid, cancellationToken, asNoTracking: true) is not null)
             {
                 return true;
             }

@@ -13,6 +13,7 @@ public sealed class BackupPlanBaselineEnablement : ConcurrentEntity
         Guid id,
         Guid planId,
         Guid planVersionId,
+        int enablementSequence,
         Guid mutationId,
         Guid? taskId,
         BackupPlanBaselineEnablementDecision decision)
@@ -21,6 +22,11 @@ public sealed class BackupPlanBaselineEnablement : ConcurrentEntity
         if (planId == Guid.Empty || planVersionId == Guid.Empty || mutationId == Guid.Empty)
         {
             throw new ArgumentException("启用事件的计划、版本和 MutationId 不能为空。");
+        }
+
+        if (enablementSequence < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(enablementSequence), "启用序号必须从 1 开始。");
         }
 
         if (!Enum.IsDefined(decision))
@@ -42,6 +48,7 @@ public sealed class BackupPlanBaselineEnablement : ConcurrentEntity
 
         PlanId = planId;
         PlanVersionId = planVersionId;
+        EnablementSequence = enablementSequence;
         MutationId = mutationId;
         TaskId = taskId;
         Decision = decision;
@@ -50,6 +57,8 @@ public sealed class BackupPlanBaselineEnablement : ConcurrentEntity
     public Guid PlanId { get; private set; }
 
     public Guid PlanVersionId { get; private set; }
+
+    public int EnablementSequence { get; private set; }
 
     public Guid MutationId { get; private set; }
 

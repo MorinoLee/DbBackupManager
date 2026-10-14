@@ -19,15 +19,21 @@ public static class BackupPlanBaselineRules
             or DifferentialBaselineConclusion.Mismatch;
 
     /// <summary>
-    /// 当前版本含 DIFF、计划未暂停，且这是首次启用或版本刚改为含 DIFF 时，才是启用事件。
-    /// 仅 FULL、暂停，或上一版本已经含 DIFF 的档位扩展，都不是启用事件。
+    /// 当前版本含 DIFF 且计划未暂停时，首次启用、版本刚改为含 DIFF，或从暂停恢复，都是启用事件。
+    /// 仅 FULL、仍暂停，或未恢复时上一版本已经含 DIFF 的档位扩展，都不是启用事件。
     /// </summary>
     public static bool IsEnablement(
         bool isPaused,
         bool currentIncludesDifferential,
-        bool previousIncludesDifferential)
+        bool previousIncludesDifferential,
+        bool resumedFromPause = false)
     {
-        return !isPaused && currentIncludesDifferential && !previousIncludesDifferential;
+        if (isPaused || !currentIncludesDifferential)
+        {
+            return false;
+        }
+
+        return resumedFromPause || !previousIncludesDifferential;
     }
 
     public static BackupPlanBaselineEnablementDecision? Decide(
@@ -36,9 +42,10 @@ public static class BackupPlanBaselineRules
         bool previousIncludesDifferential,
         bool hasVerifiedManagedOrdinaryFull,
         DifferentialBaselineConclusion? activeBaselineConclusion,
-        bool hasOutstandingOrdinaryPlanFull)
+        bool hasOutstandingOrdinaryPlanFull,
+        bool resumedFromPause = false)
     {
-        if (!IsEnablement(isPaused, currentIncludesDifferential, previousIncludesDifferential))
+        if (!IsEnablement(isPaused, currentIncludesDifferential, previousIncludesDifferential, resumedFromPause))
         {
             return null;
         }

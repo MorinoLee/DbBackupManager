@@ -6895,7 +6895,8 @@
           "backupTimeoutMinutes",
           "verifyTimeoutMinutes",
           "transferTimeoutMinutes",
-          "isPaused"
+          "isPaused",
+          "mutationId"
         ],
         "type": "object",
         "properties": {
@@ -7024,6 +7025,10 @@
           },
           "isPaused": {
             "type": "boolean"
+          },
+          "mutationId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },

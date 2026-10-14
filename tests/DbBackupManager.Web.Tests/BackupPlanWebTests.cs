@@ -196,6 +196,7 @@ public sealed class BackupPlanWebTests
             VerifyTimeoutMinutes = 30,
             TransferTimeoutMinutes = 45,
             IsPaused = paused,
+            MutationId = Guid.NewGuid(),
         };
 
     private static async Task<string?> ReadCodeAsync(HttpResponseMessage response)

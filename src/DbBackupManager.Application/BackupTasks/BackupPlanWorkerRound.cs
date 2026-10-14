@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace DbBackupManager.Application.BackupTasks;
 
 public enum BackupPlanWorkerSelectionKind
@@ -39,8 +41,17 @@ public sealed class BackupPlanWorkerRound(
     IBackupPlanWorkerStore queue,
     IBackupPlanTaskRunner runner,
     IBackupPlanTaskReconciler reconciler,
-    TimeProvider clock)
+    TimeProvider clock,
+    ILogger<BackupPlanWorkerRound>? logger = null)
 {
+    private static readonly Action<ILogger, Guid, Exception> LogScheduleFailure =
+        LoggerMessage.Define<Guid>(LogLevel.Warning, new EventId(5810, "BackupPlanScheduleIsolated"), "计划 {PlanId} 本轮调度失败，已隔离并继续其他计划。");
+
+    private static readonly Action<ILogger, Guid, Exception> LogExecutionFailure =
+        LoggerMessage.Define<Guid>(LogLevel.Warning, new EventId(5811, "BackupPlanExecutionIsolated"), "计划任务 {TaskId} 本轮执行失败，已隔离。");
+
+    private static readonly Action<ILogger, Guid, Exception> LogReconciliationFailure =
+        LoggerMessage.Define<Guid>(LogLevel.Warning, new EventId(5812, "BackupPlanReconciliationIsolated"), "计划任务 {TaskId} 本轮核对失败，已隔离。");
     public async Task<BackupPlanWorkerRoundResult> RunOnceAsync(CancellationToken cancellationToken = default)
     {
         var now = clock.GetUtcNow().ToUniversalTime();
@@ -57,9 +68,13 @@ public sealed class BackupPlanWorkerRound(
             {
                 throw;
             }
-            catch
+            catch (Exception exception)
             {
                 failures++;
+                if (logger is not null)
+                {
+                    LogScheduleFailure(logger, id, exception);
+                }
             }
         }
 
@@ -87,8 +102,13 @@ public sealed class BackupPlanWorkerRound(
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            if (logger is not null)
+            {
+                LogExecutionFailure(logger, taskId, exception);
+            }
+
             return null;
         }
     }
@@ -103,8 +123,13 @@ public sealed class BackupPlanWorkerRound(
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            if (logger is not null)
+            {
+                LogReconciliationFailure(logger, taskId, exception);
+            }
+
             return null;
         }
     }

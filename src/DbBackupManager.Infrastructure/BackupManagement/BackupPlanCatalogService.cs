@@ -128,7 +128,7 @@ internal sealed class BackupPlanCatalogService(
         AdminSession actor, Guid? planId, string? version, BackupPlanInput input, CancellationToken cancellationToken) =>
         Guard(async () =>
         {
-            if (input.DatabaseId == Guid.Empty || planId == Guid.Empty)
+            if (input.DatabaseId == Guid.Empty || planId == Guid.Empty || input.MutationId == Guid.Empty)
             {
                 throw new Rejected(BackupPlanCatalogCode.Invalid);
             }
@@ -146,6 +146,7 @@ internal sealed class BackupPlanCatalogService(
                     await RequireTargetAsync(db, definition, input.IsPaused, cancellationToken);
                     BackupPlan plan;
                     var revised = false;
+                    var resumedFromPause = false;
                     Guid? previousVersionId = null;
                     Guid? newVersionId = null;
                     if (planId is null)
@@ -191,6 +192,7 @@ internal sealed class BackupPlanCatalogService(
                             throw new Rejected(BackupPlanCatalogCode.Invalid);
                         }
 
+                        var wasPaused = plan.IsPaused;
                         if (!string.Equals(plan.Name, input.Name, StringComparison.Ordinal))
                         {
                             plan.Rename(input.Name);
@@ -204,6 +206,8 @@ internal sealed class BackupPlanCatalogService(
                         {
                             plan.Resume();
                         }
+
+                        resumedFromPause = wasPaused && !plan.IsPaused;
 
                         previousVersionId = plan.CurrentVersionId;
                         var effective = LaterThan(clock.GetUtcNow().ToUniversalTime(), plan.CurrentVersion.EffectiveFromUtc);
@@ -227,8 +231,9 @@ internal sealed class BackupPlanCatalogService(
                         db,
                         plan,
                         actor,
-                        Guid.NewGuid(),
+                        input.MutationId,
                         clock.GetUtcNow().ToUniversalTime(),
+                        resumedFromPause,
                         cancellationToken);
                     if (supplement.Code == BackupPlanBaselineSupplementCode.Conflict)
                     {

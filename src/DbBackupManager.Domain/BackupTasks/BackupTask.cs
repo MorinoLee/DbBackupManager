@@ -544,6 +544,11 @@ public sealed class BackupTask : ConcurrentEntity
         {
             throw new ArgumentException("手动任务不能保存计划时隙。", nameof(scheduledSlotAtUtc));
         }
+
+        if (triggerType == BackupTaskTriggerType.BaselineSupplement && scheduledSlotAtUtc is not null)
+        {
+            throw new ArgumentException("补基线任务不能保存计划时隙。", nameof(scheduledSlotAtUtc));
+        }
     }
 
     private void SetLease(
@@ -633,14 +638,7 @@ public sealed class BackupTask : ConcurrentEntity
             ReconciliationAttemptCount++;
         }
 
-        var delay = ReconciliationAttemptCount switch
-        {
-            1 => TimeSpan.FromMinutes(1),
-            2 => TimeSpan.FromMinutes(5),
-            3 => TimeSpan.FromMinutes(15),
-            _ => TimeSpan.FromHours(1),
-        };
-        NextReconciliationAtUtc = utcNow + delay;
+        NextReconciliationAtUtc = utcNow + BackupReconciliationBackoff.DelayAfterAttempt(ReconciliationAttemptCount);
     }
 
     private void ClearReconciliationSchedule()

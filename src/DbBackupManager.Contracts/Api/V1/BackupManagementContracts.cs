@@ -62,6 +62,7 @@ public sealed class SaveBackupPlanRequest
     [JsonRequired, Range(1, 1440)] public int VerifyTimeoutMinutes { get; init; }
     [JsonRequired, Range(1, 1440)] public int TransferTimeoutMinutes { get; init; }
     [JsonRequired] public bool IsPaused { get; init; }
+    [JsonRequired] public Guid MutationId { get; init; }
 }
 
 public sealed record BackupPlanScheduleResponse(int ScheduleType, TimeOnly LocalTime, int DaysOfWeek);

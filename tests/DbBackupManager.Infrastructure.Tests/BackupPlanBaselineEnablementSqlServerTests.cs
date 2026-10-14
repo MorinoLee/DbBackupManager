@@ -256,6 +256,129 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
     }
 
     [Fact]
+    public async Task ResumeAfterPausedCreationAndAfterAddingDifferentialBothQueueOnceAndReplay()
+    {
+        var graph = await SeedAsync(database, recordConnection: true);
+        using var provider = database.CreateServiceProvider();
+        var catalog = new BackupPlanCatalogService(
+            provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>(), new FrozenTime());
+
+        var pausedDifferential = await catalog.CreateAsync(
+            graph.Actor, Input(graph.DatabaseId, "暂停创建", BackupPlanMode.FullAndDifferential, true));
+        Assert.Equal(BackupPlanCatalogCode.Succeeded, pausedDifferential.Code);
+        Assert.Equal(0, await CountPlanFullsAsync(database, graph.DatabaseId));
+        var resumePausedCreation = Guid.NewGuid();
+        var resumedCreation = await catalog.UpdateAsync(
+            graph.Actor,
+            pausedDifferential.Value!.Id,
+            pausedDifferential.Value.Version,
+            Input(graph.DatabaseId, "暂停创建", BackupPlanMode.FullAndDifferential, false, mutationId: resumePausedCreation));
+        Assert.Equal(BackupPlanCatalogCode.Succeeded, resumedCreation.Code);
+        await AssertSupplementedOnceAsync(database, graph.DatabaseId, pausedDifferential.Value.Id, resumePausedCreation, graph.Actor);
+
+        var fullGraph = await SeedAsync(database, recordConnection: true);
+        var pausedFull = await catalog.CreateAsync(
+            fullGraph.Actor, Input(fullGraph.DatabaseId, "暂停完整", BackupPlanMode.Full, true));
+        Assert.Equal(BackupPlanCatalogCode.Succeeded, pausedFull.Code);
+        var stillPaused = await catalog.UpdateAsync(
+            fullGraph.Actor,
+            pausedFull.Value!.Id,
+            pausedFull.Value.Version,
+            Input(fullGraph.DatabaseId, "暂停完整", BackupPlanMode.FullAndDifferential, true, fullHour: 4));
+        Assert.Equal(BackupPlanCatalogCode.Succeeded, stillPaused.Code);
+        Assert.Equal(0, await CountPlanFullsAsync(database, fullGraph.DatabaseId));
+        var resumeAddedDifferential = Guid.NewGuid();
+        var resumedDifferential = await catalog.UpdateAsync(
+            fullGraph.Actor,
+            pausedFull.Value.Id,
+            stillPaused.Value!.Version,
+            Input(fullGraph.DatabaseId, "暂停完整", BackupPlanMode.FullAndDifferential, false, 4, resumeAddedDifferential));
+        Assert.Equal(BackupPlanCatalogCode.Succeeded, resumedDifferential.Code);
+        await AssertSupplementedOnceAsync(database, fullGraph.DatabaseId, pausedFull.Value.Id, resumeAddedDifferential, fullGraph.Actor);
+    }
+
+    [Fact]
+    public async Task FullStillExecutesWhenMoreThanFiftyDifferentialsLackABaseline()
+    {
+        var isolated = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await isolated.InitializeAsync();
+            var graph = await SeedAsync(isolated);
+            var plan = await AddPlanAsync(isolated, graph, BackupPlanMode.FullAndDifferential, paused: false);
+            var differentialIds = new List<Guid>();
+            for (var index = 0; index < 51; index++)
+            {
+                differentialIds.Add(await InsertTaskAsync(
+                    isolated, plan.Id, BackupRunPurpose.PlanDifferential, BackupTaskTriggerType.Scheduled, Now.AddMinutes(-index - 1)));
+            }
+
+            var fullId = await InsertTaskAsync(isolated, plan.Id, BackupRunPurpose.PlanFull, BackupTaskTriggerType.Manual, null);
+            using var provider = isolated.CreateServiceProvider();
+            var selected = await provider.GetRequiredService<IBackupPlanWorkerStore>().SelectAsync(Now.AddHours(1));
+            Assert.Equal(BackupPlanWorkerSelectionKind.Execute, selected.Kind);
+            Assert.Equal(fullId, selected.TaskId);
+
+            await using var db = isolated.CreateContext();
+            var closed = await db.BackupTasks.Where(item => differentialIds.Contains(item.Id)).ToListAsync();
+            Assert.Equal(51, closed.Count);
+            Assert.All(closed, item => Assert.Equal(BackupTaskStatus.Failed, item.Status));
+            Assert.All(closed, item => Assert.Equal("baseline_required", item.ErrorCode));
+            Assert.Equal(BackupTaskStatus.Pending, (await db.BackupTasks.SingleAsync(item => item.Id == fullId)).Status);
+            Assert.Equal(1, await db.BackupTaskSnapshots.CountAsync(item => item.DatabaseId == graph.DatabaseId && item.Purpose == BackupRunPurpose.PlanFull));
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task UnknownReconciliationThatIsNotDueDoesNotOccupyTheRound()
+    {
+        var isolated = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await isolated.InitializeAsync();
+            var graph = await SeedAsync(isolated);
+            var plan = await AddPlanAsync(isolated, graph, BackupPlanMode.Full, paused: false);
+            var unknownId = await InsertTaskAsync(isolated, plan.Id, BackupRunPurpose.PlanFull, BackupTaskTriggerType.Manual, null);
+            var committedAt = Now.AddMinutes(1).AddSeconds(1);
+            await using (var db = isolated.CreateContext())
+            {
+                var task = await db.BackupTasks.SingleAsync(item => item.Id == unknownId);
+                var attemptId = Guid.NewGuid();
+                var lease = Guid.NewGuid();
+                db.BackupAttempts.Add(new BackupAttempt(attemptId, unknownId, 1, Now, new(
+                    $@"D:\Synthetic\Backup\{attemptId:N}.bak", $@"\\synthetic-host\synthetic-share\{attemptId:N}.bak", null, null, null)));
+                task.ClaimExecution(BackupStorageMode.LocalOnly, attemptId, lease, "合成执行", Now, Now.AddMinutes(5));
+                task.RecordIndeterminateResult(BackupStorageMode.LocalOnly, lease, Now.AddMinutes(1), "backup_result_unknown", "结果待核对");
+                var reconciliation = Guid.NewGuid();
+                task.AcquireReconciliationLease(reconciliation, "合成核对", Now.AddMinutes(1), Now.AddMinutes(4));
+                task.CompleteReconciliation(
+                    BackupStorageMode.LocalOnly, reconciliation, committedAt, BackupReconciliationOutcome.Inconclusive, "evidence_missing", "只读证据不足");
+                await db.SaveChangesAsync();
+            }
+
+            using var provider = isolated.CreateServiceProvider();
+            var queue = provider.GetRequiredService<IBackupPlanWorkerStore>();
+            Assert.Equal(BackupPlanWorkerSelectionKind.Idle, (await queue.SelectAsync(committedAt.AddSeconds(1))).Kind);
+            var fullId = await InsertTaskAsync(isolated, plan.Id, BackupRunPurpose.PlanFull, BackupTaskTriggerType.Manual, null);
+            var selected = await queue.SelectAsync(committedAt.AddSeconds(2));
+            Assert.Equal(BackupPlanWorkerSelectionKind.Execute, selected.Kind);
+            Assert.Equal(fullId, selected.TaskId);
+            await using var dbCheck = isolated.CreateContext();
+            var unknown = await dbCheck.BackupTasks.SingleAsync(item => item.Id == unknownId);
+            Assert.Equal(BackupTaskStatus.NeedsAttention, unknown.Status);
+            Assert.Equal(committedAt + TimeSpan.FromSeconds(15), unknown.NextReconciliationAtUtc);
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task EnablementMigrationDownRejectsExistingRowsAndKeepsHistory()
     {
         var isolated = new PlatformDatabaseSqlServerFixture();
@@ -271,6 +394,12 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
             Assert.Equal(BackupPlanBaselineSupplementCode.Queued, (await SupplementAsync(isolated, plan.Id, Guid.NewGuid(), graph.Actor)).Code);
 
             var migrator = db.Database.GetService<IMigrator>();
+            var historyAtLatest = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
+            var blocked = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(current));
+            Assert.Equal(51011, blocked.Number);
+            Assert.Equal(historyAtLatest, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
+            await db.Database.ExecuteSqlRawAsync(
+                "UPDATE [BackupTasks] SET [TriggerType] = N'Manual' WHERE [TriggerType] = N'BaselineSupplement';");
             await migrator.MigrateAsync(current);
             var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
@@ -324,6 +453,45 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
         using var provider = database.CreateServiceProvider();
         await new BackupPlanStore(provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>()).AddAsync(plan);
         return plan;
+    }
+
+    private static async Task AssertSupplementedOnceAsync(
+        PlatformDatabaseSqlServerFixture database, Guid databaseId, Guid planId, Guid mutationId, AdminSession actor)
+    {
+        Assert.Equal(1, await CountPlanFullsAsync(database, databaseId));
+        await using var db = database.CreateContext();
+        var enablement = await db.BackupPlanBaselineEnablements.SingleAsync(item => item.PlanId == planId && item.MutationId == mutationId);
+        Assert.Equal(BackupPlanBaselineEnablementDecision.Queued, enablement.Decision);
+        var task = await db.BackupTasks.SingleAsync(item => item.Id == enablement.TaskId);
+        Assert.Equal(BackupTaskTriggerType.BaselineSupplement, task.TriggerType);
+        Assert.Null(task.ScheduledSlotAtUtc);
+        var replay = await SupplementAsync(database, planId, mutationId, actor);
+        Assert.Equal(BackupPlanBaselineSupplementCode.AlreadyApplied, replay.Code);
+        Assert.Equal(task.Id, replay.TaskId);
+        Assert.Equal(1, await CountPlanFullsAsync(database, databaseId));
+    }
+
+    private static async Task<Guid> InsertTaskAsync(
+        PlatformDatabaseSqlServerFixture database, Guid planId, BackupRunPurpose purpose, BackupTaskTriggerType trigger, DateTimeOffset? slot)
+    {
+        await using var db = database.CreateContext();
+        var plan = await db.BackupPlans.Include(item => item.Versions).SingleAsync(item => item.Id == planId);
+        var managed = await db.ManagedDatabases.SingleAsync(item => item.Id == plan.DatabaseId);
+        var instance = await db.DatabaseInstances.SingleAsync(item => item.Id == managed.InstanceId);
+        var server = await db.DatabaseServers.SingleAsync(item => item.Id == instance.ServerId);
+        var task = BackupTask.ForPlan(Guid.NewGuid(), plan.Id, plan.CurrentVersionId, purpose, trigger, slot);
+        var snapshot = BackupTaskSnapshot.ForPlan(
+            task,
+            plan.CurrentVersion,
+            plan.Name,
+            purpose,
+            new(server.Id, server.Name, instance.Id, instance.Name, managed.Id, managed.DatabaseName),
+            new(instance.ConnectionAddress, instance.SqlCredentialReferenceId, instance.EncryptConnection, instance.TrustServerCertificate, instance.CertificateTrustReason, instance.ConnectionTimeoutSeconds),
+            new(server.LocalBackupRootPath, "v3", new(server.StagingAccessProtocol, server.StagingAccessHost, server.StagingAccessPort, server.StagingAccessBasePath, server.StagingCredentialReferenceId, server.StagingSftpHostKeyFingerprint)),
+            null);
+        db.AddRange(task, snapshot);
+        await db.SaveChangesAsync();
+        return task.Id;
     }
 
     private static async Task<BackupPlanBaselineSupplementResult> SupplementAsync(
@@ -395,10 +563,12 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
         mode == BackupPlanMode.Full ? null : new(BackupScheduleType.Daily, new TimeOnly(3, 0), BackupWeekdays.None),
         null, "UTC", BackupStorageMode.LocalOnly, null, 14, null, true, false, 120, 60, 90);
 
-    private static BackupPlanInput Input(Guid databaseId, string name, BackupPlanMode mode, bool paused, int fullHour = 1) => new(
+    private static BackupPlanInput Input(
+        Guid databaseId, string name, BackupPlanMode mode, bool paused, int fullHour = 1, Guid? mutationId = null) => new(
         databaseId, name, (int)mode, new(1, new TimeOnly(fullHour, 15), 0),
         mode == BackupPlanMode.Full ? null : new(1, new TimeOnly(2, 30), 0),
-        "UTC", (int)BackupStorageMode.LocalOnly, null, 7, null, true, false, 60, 30, 45, paused);
+        "UTC", (int)BackupStorageMode.LocalOnly, null, 7, null, true, false, 60, 30, 45, paused,
+        mutationId ?? Guid.NewGuid());
 
     private sealed record Graph(Guid DatabaseId, AdminSession Actor);
 

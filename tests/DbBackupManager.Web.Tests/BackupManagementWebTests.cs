@@ -108,6 +108,7 @@ public sealed class BackupManagementWebTests
             VerifyTimeoutMinutes = 30,
             TransferTimeoutMinutes = 45,
             IsPaused = true,
+            MutationId = Guid.NewGuid(),
         }, token);
         Assert.Equal(HttpStatusCode.OK, planResponse.StatusCode);
         var plan = (await planResponse.Content.ReadFromJsonAsync<BackupPlanResponse>())!;

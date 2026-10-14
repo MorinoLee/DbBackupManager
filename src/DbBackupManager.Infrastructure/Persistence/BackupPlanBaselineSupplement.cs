@@ -29,6 +29,7 @@ internal static class BackupPlanBaselineSupplementCore
         AdminSession actor,
         Guid mutationId,
         DateTimeOffset nowUtc,
+        bool resumedFromPause,
         CancellationToken cancellationToken)
     {
         if (mutationId == Guid.Empty)
@@ -49,13 +50,6 @@ internal static class BackupPlanBaselineSupplementCore
                 : new(BackupPlanBaselineSupplementCode.Conflict, null);
         }
 
-        var existing = await db.BackupPlanBaselineEnablements.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.PlanId == plan.Id && item.PlanVersionId == current.Id, cancellationToken);
-        if (existing is not null)
-        {
-            return new(BackupPlanBaselineSupplementCode.AlreadyApplied, existing.TaskId);
-        }
-
         var currentIncludes = BackupPlanRules.Includes(current.Mode, BackupType.Differential);
         var facts = await BackupPlanBaselineFacts.ReadAsync(db, plan.DatabaseId, cancellationToken);
         var decision = BackupPlanBaselineRules.Decide(
@@ -64,10 +58,23 @@ internal static class BackupPlanBaselineSupplementCore
             previousIncludes,
             facts.HasVerifiedManagedOrdinaryFull,
             facts.ActiveBaselineConclusion,
-            facts.HasOutstandingOrdinaryPlanFull);
+            facts.HasOutstandingOrdinaryPlanFull,
+            resumedFromPause);
         if (decision is null)
         {
             return new(BackupPlanBaselineSupplementCode.None, null);
+        }
+
+        if (!resumedFromPause)
+        {
+            var existing = await db.BackupPlanBaselineEnablements.AsNoTracking()
+                .Where(item => item.PlanId == plan.Id && item.PlanVersionId == current.Id)
+                .OrderByDescending(item => item.EnablementSequence)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (existing is not null)
+            {
+                return new(BackupPlanBaselineSupplementCode.AlreadyApplied, existing.TaskId);
+            }
         }
 
         Guid? taskId = null;
@@ -79,7 +86,7 @@ internal static class BackupPlanBaselineSupplementCore
                 plan,
                 new CreateBackupPlanTaskCommand(
                     new CreateBackupPlanTaskRequest(taskId.Value, mutationId, plan.Id, current.Id, BackupRunPurpose.PlanFull),
-                    BackupTaskTriggerType.Manual,
+                    BackupTaskTriggerType.BaselineSupplement,
                     nowUtc,
                     actor.AdminUserId,
                     actor.SecurityStamp),
@@ -96,8 +103,12 @@ internal static class BackupPlanBaselineSupplementCore
             taskId = created.Task.TaskId;
         }
 
+        var sequence = (await db.BackupPlanBaselineEnablements.AsNoTracking()
+            .Where(item => item.PlanId == plan.Id)
+            .Select(item => (int?)item.EnablementSequence)
+            .MaxAsync(cancellationToken) ?? 0) + 1;
         db.BackupPlanBaselineEnablements.Add(new BackupPlanBaselineEnablement(
-            Guid.NewGuid(), plan.Id, current.Id, mutationId, taskId, decision.Value));
+            Guid.NewGuid(), plan.Id, current.Id, sequence, mutationId, taskId, decision.Value));
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -142,7 +153,7 @@ internal sealed class BackupPlanBaselineSupplementStore(IDbContextFactory<Platfo
             }
 
             var result = await BackupPlanBaselineSupplementCore.ApplyAsync(
-                db, plan, actor, mutationId, clock.GetUtcNow().ToUniversalTime(), cancellationToken);
+                db, plan, actor, mutationId, clock.GetUtcNow().ToUniversalTime(), resumedFromPause: false, cancellationToken);
             if (result.Code == BackupPlanBaselineSupplementCode.Conflict)
             {
                 return result;

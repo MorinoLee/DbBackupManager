@@ -124,7 +124,8 @@ public sealed class BackupPlansController(IBackupPlanCatalogService service, IBa
             request.BackupTimeoutMinutes,
             request.VerifyTimeoutMinutes,
             request.TransferTimeoutMinutes,
-            request.IsPaused);
+            request.IsPaused,
+            request.MutationId);
         var result = id is null
             ? await service.CreateAsync(actor, input, token)
             : await service.UpdateAsync(actor, id.Value, request.Version, input, token);

@@ -38,6 +38,33 @@ internal sealed class BackupPlanManualExecutionStore(IDbContextFactory<PlatformD
                 return new BackupPlanTaskCreationResult(BackupPlanTaskCreationCode.NotFound);
             }
 
+            var current = new CreateBackupPlanTaskCommand(
+                request with { PlanVersionId = plan.CurrentVersionId },
+                BackupTaskTriggerType.Manual,
+                clock.GetUtcNow().ToUniversalTime(),
+                command.ActorAdminUserId,
+                command.ActorSecurityStamp);
+            var replay = await BackupPlanTaskCreationCore.FindReplayAsync(db, current, cancellationToken);
+            if (replay is not null)
+            {
+                if (replay.Code is BackupPlanTaskCreationCode.AlreadyApplied or BackupPlanTaskCreationCode.AlreadyExists)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
+
+                return replay;
+            }
+
+            if (await ReplayByTaskIdAsync(db, current.Request, cancellationToken) is { } taskReplay)
+            {
+                if (taskReplay.Code is BackupPlanTaskCreationCode.AlreadyApplied or BackupPlanTaskCreationCode.AlreadyExists)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
+
+                return taskReplay;
+            }
+
             if (request.Purpose == BackupRunPurpose.PlanDifferential)
             {
                 var facts = await BackupPlanBaselineFacts.ReadAsync(db, plan.DatabaseId, cancellationToken);
@@ -48,12 +75,6 @@ internal sealed class BackupPlanManualExecutionStore(IDbContextFactory<PlatformD
                 }
             }
 
-            var current = new CreateBackupPlanTaskCommand(
-                request with { PlanVersionId = plan.CurrentVersionId },
-                BackupTaskTriggerType.Manual,
-                clock.GetUtcNow().ToUniversalTime(),
-                command.ActorAdminUserId,
-                command.ActorSecurityStamp);
             var result = await BackupPlanTaskCreationCore.CreateAsync(db, plan, current, resolveOnly: false, cancellationToken);
             if (result.Code is BackupPlanTaskCreationCode.Created or BackupPlanTaskCreationCode.AlreadyApplied or BackupPlanTaskCreationCode.AlreadyExists)
             {
@@ -62,5 +83,36 @@ internal sealed class BackupPlanManualExecutionStore(IDbContextFactory<PlatformD
 
             return result;
         }, cancellationToken);
+    }
+
+    private static async Task<BackupPlanTaskCreationResult?> ReplayByTaskIdAsync(
+        PlatformDbContext db, CreateBackupPlanTaskRequest request, CancellationToken cancellationToken)
+    {
+        if (request.TaskId == Guid.Empty
+            || !await db.BackupTasks.AsNoTracking().AnyAsync(item => item.Id == request.TaskId, cancellationToken))
+        {
+            return null;
+        }
+
+        var snapshot = await db.BackupTaskSnapshots.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.TaskId == request.TaskId, cancellationToken);
+        var task = await db.BackupTasks.AsNoTracking().SingleAsync(item => item.Id == request.TaskId, cancellationToken);
+        if (snapshot?.Purpose != request.Purpose || task.PlanId != request.PlanId)
+        {
+            return new BackupPlanTaskCreationResult(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        return new BackupPlanTaskCreationResult(
+            BackupPlanTaskCreationCode.AlreadyApplied,
+            new CreatedBackupPlanTask(
+                task.Id,
+                task.PlanId!.Value,
+                task.PlanVersionId!.Value,
+                snapshot.DatabaseId,
+                snapshot.Purpose!.Value,
+                task.BackupType,
+                task.TriggerType,
+                task.ScheduledSlotAtUtc,
+                task.CoveredDifferentialSlotUtc));
     }
 }

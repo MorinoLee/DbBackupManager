@@ -35,7 +35,10 @@ public enum BackupAttemptHandling
 public enum BackupTaskTriggerType
 {
     Scheduled = 1,
-    Manual = 2
+    Manual = 2,
+
+    /// <summary>启用事件补齐的计划内普通 FULL，不是管理员手动执行。</summary>
+    BaselineSupplement = 3
 }
 
 public enum BackupLeasePurpose
