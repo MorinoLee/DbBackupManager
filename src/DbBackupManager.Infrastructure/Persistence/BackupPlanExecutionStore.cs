@@ -82,7 +82,7 @@ internal sealed partial class BackupPlanExecutionStore(
                     }
                 }
 
-                if (await AnotherBackupIsStillOpenAsync(db, now, cancellationToken))
+                if (await AnotherExecutionLeaseIsLiveAsync(db, now, cancellationToken))
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
                 if (!await ConfigurationEnabledAsync(db, snapshot, cancellationToken))
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
@@ -324,16 +324,10 @@ internal sealed partial class BackupPlanExecutionStore(
         return BackupExecutionContractCode.Succeeded;
     }
 
-    private static async Task<bool> AnotherBackupIsStillOpenAsync(
+    private static Task<bool> AnotherExecutionLeaseIsLiveAsync(
         PlatformDbContext db, DateTimeOffset now, CancellationToken cancellationToken) =>
-        await db.BackupTasks.AsNoTracking().AnyAsync(
-            task => task.Status == BackupTaskStatus.Running && task.LeaseExpiresAtUtc > now, cancellationToken)
-        || await db.BackupInvocationAuthorizations.AsNoTracking().AnyAsync(
-            item => item.TerminalObservedAtUtc == null, cancellationToken)
-        || await db.BackupAttempts.AsNoTracking().AnyAsync(
-            attempt => attempt.BackupInvocationStatus == BackupInvocationStatus.Running
-                || attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate,
-            cancellationToken);
+        db.BackupTasks.AsNoTracking().AnyAsync(
+            task => task.Status == BackupTaskStatus.Running && task.LeaseExpiresAtUtc > now, cancellationToken);
 
     private static bool IsOpen(BackupTask task, BackupTaskSnapshot snapshot) => task.PlanId is not null
         && snapshot.FileNameRuleVersion == "v3"

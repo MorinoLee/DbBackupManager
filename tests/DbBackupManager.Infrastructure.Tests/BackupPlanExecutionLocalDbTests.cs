@@ -176,42 +176,13 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
     }
 
     /// <summary>
-    /// 认领现在排除整个平台上仍未结束的调用。上一个场景留下的 Running 租约或未终止授权
-    /// 不能挡住这个新场景；只结束那些调用，不删除任务历史。
+    /// 认领会拒绝另一份尚未到期的执行租约。上一个场景留下的 Running 租约不能挡住这个新场景。
+    /// 未终止授权仍留给授权阶段按数据库拒绝，这里不改写。
     /// </summary>
     private static async Task ReleasePreviousOpenClaimsAsync(PlatformDatabaseSqlServerFixture platform)
     {
         await using var db = platform.CreateContext();
         var now = DateTimeOffset.UtcNow;
-        var attempts = await db.BackupAttempts
-            .Where(attempt => attempt.BackupInvocationStatus == BackupInvocationStatus.Running
-                || attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate)
-            .ToListAsync();
-        foreach (var attempt in attempts)
-        {
-            var finished = attempt.BackupStartedAtUtc is { } started && started > now ? started : now;
-            attempt.ReconcileBackupConfirmedFailed(finished, "test.previous_claim_released");
-        }
-
-        var authorizations = await db.BackupInvocationAuthorizations
-            .Where(authorization => authorization.TerminalObservedAtUtc == null)
-            .ToListAsync();
-        foreach (var authorization in authorizations)
-        {
-            authorization.RecordTermination(
-                Guid.NewGuid(),
-                Guid.NewGuid(),
-                BackupInvocationTerminationKind.PlatformConfirmedFailed,
-                now,
-                originalCallTerminated: true,
-                originalCallerCannotInvoke: true);
-        }
-
-        if (attempts.Count > 0 || authorizations.Count > 0)
-        {
-            await db.SaveChangesAsync();
-        }
-
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             UPDATE [BackupTasks]
             SET [LeaseExpiresAtUtc] = DATEADD(millisecond, 1, [LeaseAcquiredAtUtc])
