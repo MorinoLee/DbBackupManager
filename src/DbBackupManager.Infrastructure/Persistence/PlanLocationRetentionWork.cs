@@ -593,6 +593,7 @@ internal static class PlanLocationRetentionWork
 
     /// <summary>
     /// 窗口前最新的已证明完整备份不晚于真正的还原点锚。比它更早的已证明副本不会改变本页原因。
+    /// 只有已证明可用（Available）的副本能当锚点：缺失、待删或已删除的副本不能证明这一段窗口。
     /// </summary>
     private static async Task<DateTimeOffset?> AnchorFullAtAsync(
         PlatformDbContext db,
@@ -614,7 +615,7 @@ internal static class PlanLocationRetentionWork
                     && file.DatabaseId == key.DatabaseId
                     && file.Location == key.Location
                     && file.StorageTargetId == key.StorageTargetId
-                    && file.Status != BackupFileStatus.Deleted) == 1)
+                    && file.Status == BackupFileStatus.Available) == 1)
             .Select(set => set.Completion.CompletedAtUtc);
         return await completions.OrderByDescending(value => value).FirstOrDefaultAsync(cancellationToken);
     }
