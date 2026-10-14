@@ -80,7 +80,7 @@ internal sealed partial class BackupPlanExecutionStore(
                     }
                 }
 
-                if (await AnotherExecutionLeaseIsLiveAsync(db, now, cancellationToken))
+                if (await AnotherExecutionMayStillBeRunningAsync(db, snapshot.DatabaseId, now, cancellationToken))
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
                 if (!await ConfigurationEnabledAsync(db, snapshot, cancellationToken))
                     return new BackupExecutionContractResult<BackupPlanExecutionSession>(BackupExecutionContractCode.Conflict);
@@ -322,10 +322,23 @@ internal sealed partial class BackupPlanExecutionStore(
         return BackupExecutionContractCode.Succeeded;
     }
 
-    private static Task<bool> AnotherExecutionLeaseIsLiveAsync(
-        PlatformDbContext db, DateTimeOffset now, CancellationToken cancellationToken) =>
-        db.BackupTasks.AsNoTracking().AnyAsync(
-            task => task.Status == BackupTaskStatus.Running && task.LeaseExpiresAtUtc > now, cancellationToken);
+    /// <summary>
+    /// 在计划执行锁下判断是否还有别的执行可能在跑：任意未到期的 Running 租约，
+    /// 或其他数据库仍未终止的调用授权、仍为 Running/Indeterminate 的 Attempt。
+    /// 同库的未终止调用不在这里拒绝，交给授权阶段按数据库拒绝并记成 sql.database_blocked。
+    /// </summary>
+    private static async Task<bool> AnotherExecutionMayStillBeRunningAsync(
+        PlatformDbContext db, Guid databaseId, DateTimeOffset now, CancellationToken cancellationToken) =>
+        await db.BackupTasks.AsNoTracking().AnyAsync(
+            task => task.Status == BackupTaskStatus.Running && task.LeaseExpiresAtUtc > now, cancellationToken)
+        || await db.BackupInvocationAuthorizations.AsNoTracking().AnyAsync(
+            item => item.TerminalObservedAtUtc == null && item.DatabaseId != databaseId, cancellationToken)
+        || await (from attempt in db.BackupAttempts.AsNoTracking()
+                  join snapshot in db.BackupTaskSnapshots.AsNoTracking() on attempt.TaskId equals snapshot.TaskId
+                  where (attempt.BackupInvocationStatus == BackupInvocationStatus.Running
+                         || attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate)
+                        && snapshot.DatabaseId != databaseId
+                  select attempt.Id).AnyAsync(cancellationToken);
 
     private static bool IsOpen(BackupTask task, BackupTaskSnapshot snapshot) => task.PlanId is not null
         && snapshot.FileNameRuleVersion == "v3"

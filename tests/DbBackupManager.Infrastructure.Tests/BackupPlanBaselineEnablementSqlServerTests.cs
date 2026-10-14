@@ -417,6 +417,46 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
         }
     }
 
+    [Fact]
+    public async Task EnablementSequenceMigrationDownRejectsRepeatedEnablementOfOneVersion()
+    {
+        var isolated = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await isolated.InitializeAsync();
+            await using var db = isolated.CreateContext();
+            var migrations = db.Database.GetMigrations().ToArray();
+            var current = migrations.Single(name => name.EndsWith("_AddBackupPlanEnablementSequenceAndBaselineTrigger", StringComparison.Ordinal));
+            var previous = migrations[Array.IndexOf(migrations, current) - 1];
+            var graph = await SeedAsync(isolated);
+            var plan = await AddPlanAsync(isolated, graph, BackupPlanMode.FullAndDifferential, paused: false);
+            Assert.Equal(BackupPlanBaselineSupplementCode.Queued, (await SupplementAsync(isolated, plan.Id, Guid.NewGuid(), graph.Actor)).Code);
+            // 先排除 51011，单独验证同一计划版本多次启用时由 51010 拒绝回退。
+            await db.Database.ExecuteSqlRawAsync(
+                "UPDATE [BackupTasks] SET [TriggerType] = N'Manual' WHERE [TriggerType] = N'BaselineSupplement';");
+            var first = await db.BackupPlanBaselineEnablements.AsNoTracking().SingleAsync();
+            var repeatedId = Guid.NewGuid();
+            db.BackupPlanBaselineEnablements.Add(new BackupPlanBaselineEnablement(repeatedId, first.PlanId, first.PlanVersionId,
+                first.EnablementSequence + 1, Guid.NewGuid(), null, BackupPlanBaselineEnablementDecision.SkippedOutstandingFull));
+            await db.SaveChangesAsync();
+
+            var migrator = db.Database.GetService<IMigrator>();
+            var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
+            var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
+            Assert.Equal(51010, error.Number);
+            Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
+            Assert.Equal(2, await db.BackupPlanBaselineEnablements.CountAsync());
+            await db.Database.ExecuteSqlInterpolatedAsync($"DELETE FROM [BackupPlanBaselineEnablements] WHERE [Id] = {repeatedId};");
+            await migrator.MigrateAsync(previous);
+            await migrator.MigrateAsync();
+            Assert.Equal(1, await db.BackupPlanBaselineEnablements.CountAsync());
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+        }
+    }
+
     private static async Task<Graph> SeedAsync(PlatformDatabaseSqlServerFixture database, bool recordConnection = false)
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];

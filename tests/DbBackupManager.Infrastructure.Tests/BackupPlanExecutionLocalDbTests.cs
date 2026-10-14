@@ -127,6 +127,35 @@ public sealed class BackupPlanExecutionLocalDbTests(PlatformDatabaseSqlServerFix
             Assert.Equal(2, await db.BackupSets.CountAsync(x => x.DatabaseId == test.DatabaseId));
         }
     }
+
+    [Fact]
+    public async Task ExpiredLeaseWithUnterminatedInvocationInOtherDatabaseBlocksClaim()
+    {
+        await using var a = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalOnly);
+        await using var b = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalOnly);
+        var taskA = await a.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        var taskB = await b.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        BackupExecutionContractCode? claimB = null;
+        a.AfterBackupResponse = async () =>
+        {
+            // 库 A 的租约已到期，但调用授权仍未观察到终止：库 B 不能在数据库层被认领。
+            await a.ExpireLeaseAsync(taskA);
+            await using (var db = platform.CreateContext())
+            {
+                Assert.True(await db.BackupInvocationAuthorizations.AnyAsync(x => x.TaskId == taskA && x.TerminalObservedAtUtc == null));
+                Assert.False(await db.BackupTasks.AnyAsync(x => x.Status == BackupTaskStatus.Running && x.LeaseExpiresAtUtc > DateTimeOffset.UtcNow));
+            }
+            var now = DateTimeOffset.UtcNow;
+            claimB = (await b.Store.OpenAsync(taskB, Guid.NewGuid(), false, Guid.NewGuid(), "合成认领", now, now.AddMinutes(2))).Code;
+        };
+        await a.Runner.RunTaskOnceAsync(new(taskA, Guid.NewGuid()));
+        Assert.Equal(BackupExecutionContractCode.Conflict, claimB);
+        Assert.Equal(0, b.Invocations);
+        await using var check = platform.CreateContext();
+        var blocked = await check.BackupTasks.SingleAsync(x => x.Id == taskB);
+        Assert.Equal(BackupTaskStatus.Pending, blocked.Status);
+        Assert.Null(blocked.CurrentBackupAttemptId);
+    }
 }
 
 /// <summary>使用本机 LocalDB 和指向本次临时目录的回环 SMB；SQL、摘要、句柄和平台事务均为真实适配器。</summary>
@@ -176,27 +205,44 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
     }
 
     /// <summary>
-    /// 认领会拒绝另一份尚未到期的执行租约。上一个场景留下的 Running 租约不能挡住这个新场景。
-    /// 未终止授权仍留给授权阶段按数据库拒绝，这里不改写。
+    /// 场景结束时只处理本场景数据库的任务：让本场景留下的租约到期，再走真实只读核对，
+    /// 由终止探针观察并记录调用已终止。不伪造终止证据，核对不成的调用继续保留未终止。
     /// </summary>
-    private static async Task ReleasePreviousOpenClaimsAsync(PlatformDatabaseSqlServerFixture platform)
+    private async Task EndOwnOpenInvocationsAsync()
     {
-        await using var db = platform.CreateContext();
-        var now = DateTimeOffset.UtcNow;
-        await db.Database.ExecuteSqlInterpolatedAsync($"""
-            UPDATE [BackupTasks]
-            SET [LeaseExpiresAtUtc] = DATEADD(millisecond, 1, [LeaseAcquiredAtUtc])
-            WHERE [Status] = N'Running'
-              AND [LeaseExpiresAtUtc] > {now}
-              AND [LeaseAcquiredAtUtc] < {now}
-              AND DATEADD(millisecond, 1, [LeaseAcquiredAtUtc]) <= {now};
-            """);
+        if (Reconciler is null || _plan is null) return;
+        AfterFirstGate = BeforeDifferential = AfterDifferential = AfterBackupResponse = null;
+        MetadataUnavailable = false;
+        RestrictedTerminationProbe = null;
+        for (var round = 0; round < 3; round++)
+        {
+            Guid[] open;
+            await using (var db = _platform.CreateContext())
+            {
+                var databaseId = DatabaseId;
+                var taskIds = db.BackupTaskSnapshots.AsNoTracking().Where(x => x.DatabaseId == databaseId).Select(x => x.TaskId);
+                open = await db.BackupTasks.AsNoTracking()
+                    .Where(task => taskIds.Contains(task.Id)
+                        && (db.BackupInvocationAuthorizations.Any(item => item.TaskId == task.Id && item.TerminalObservedAtUtc == null)
+                            || db.BackupAttempts.Any(attempt => attempt.TaskId == task.Id
+                                && (attempt.BackupInvocationStatus == BackupInvocationStatus.Running
+                                    || attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate))
+                            || (task.Status == BackupTaskStatus.Running && task.LeaseExpiresAtUtc > DateTimeOffset.UtcNow)))
+                    .Select(task => task.Id).ToArrayAsync();
+            }
+            if (open.Length == 0) return;
+            foreach (var taskId in open)
+            {
+                await ExpireLeaseAsync(taskId);
+                try { await Reconciler.ReconcilePlanTaskOnceAsync(new(taskId, Guid.NewGuid())); }
+                catch (Exception) { /* 清理阶段核对失败时保留原状态，由下一轮或断言暴露。 */ }
+            }
+        }
     }
 
     public static async Task<PlanExecutionTestEnvironment> CreateAsync(PlatformDatabaseSqlServerFixture platform, BackupStorageMode mode,
         PlanExecutionCommitFault? fault = null, params IInterceptor[] interceptors)
     {
-        await ReleasePreviousOpenClaimsAsync(platform);
         var name = $"DbBPE_{Guid.NewGuid():N}";
         var root = Path.Combine(Path.GetTempPath(), $"DbBPE_{Guid.NewGuid():N}");
         Directory.CreateDirectory(Path.Combine(root, "source"));
@@ -407,7 +453,7 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
     }
     public async ValueTask DisposeAsync()
     {
-        try { await DropAsync(_master, _databaseName); }
+        try { await EndOwnOpenInvocationsAsync(); await DropAsync(_master, _databaseName); }
         finally
         {
             await _master.DisposeAsync();
