@@ -197,7 +197,10 @@ jobs:
     if: needs.changes.outputs.infrastructure == 'true'
     runs-on: windows-latest
     # 两组互补筛选，完整覆盖全部测试；隔离真实执行故障注入的累计耗时。
-    timeout-minutes: 20
+    # 该项目测试串行（共用本机 LocalDB，禁止并行），随审计与复审用例增加，remaining 组已超过
+    # 原 20 分钟上限：2026-10-14 分支 CI 中 execution 用时 18 分 16 秒完成，remaining 在 20 分 41 秒
+    # 被超时取消。此处放宽到 30 分钟；真正的挂起仍由 --blame-hang-timeout 5m 识别。
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
