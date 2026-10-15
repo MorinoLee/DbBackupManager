@@ -50,50 +50,63 @@ internal sealed class PlanCopyDeletionCoordinator(
 
         try
         {
-            await using var context = await factory.CreateDbContextAsync(cancellationToken);
-            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, file.DatabaseId, cancellationToken);
-            var current = await context.BackupFiles.AsTracking().SingleAsync(item => item.Id == file.Id, cancellationToken);
-            var now = clock.GetUtcNow();
-            var endpoint = await BackupFileRetentionStore.TryCreateEndpointAsync(context, current, true, cancellationToken);
-            var leaseMatches = current.Status == BackupFileStatus.DeletePending
-                && current.DeletionLeaseToken == request.Owner.LeaseToken
-                && current.DeletionLeaseExpiresAtUtc > now
-                && current.RowVersion.SequenceEqual(request.Owner.RowVersion)
-                && current.Path == request.Path
-                && current.LengthBytes == request.ExpectedLengthBytes
-                && endpoint is not null
-                && SameEndpoint(endpoint, request.Endpoint);
-            var decisions = PlanLocationRetentionWork.Decisions(
-                await PlanLocationRetentionWork.LoadAsync(context, current.DatabaseId, now, cancellationToken));
-            var deletable = leaseMatches
-                && decisions.TryGetValue(current.Id, out var decision)
-                && PlanLocationRecovery.RetainsPhysicalLease(decision);
-            if (!deletable)
+            // 生产开启了 EnableRetryOnFailure，显式事务必须整体交给执行策略执行，否则 EF 会拒绝
+            // 事务内的查询。会话锁在策略之外持有，重试整段事务时不会重复取锁或重复放开。
+            await using var strategyContext = await factory.CreateDbContextAsync(cancellationToken);
+            var strategy = strategyContext.Database.CreateExecutionStrategy();
+            var permit = await strategy.ExecuteAsync(async () =>
             {
-                if (leaseMatches)
+                await using var context = await factory.CreateDbContextAsync(cancellationToken);
+                await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, file.DatabaseId, cancellationToken);
+                var current = await context.BackupFiles.AsTracking().SingleAsync(item => item.Id == file.Id, cancellationToken);
+                var now = clock.GetUtcNow();
+                var endpoint = await BackupFileRetentionStore.TryCreateEndpointAsync(context, current, true, cancellationToken);
+                var leaseMatches = current.Status == BackupFileStatus.DeletePending
+                    && current.DeletionLeaseToken == request.Owner.LeaseToken
+                    && current.DeletionLeaseExpiresAtUtc > now
+                    && current.RowVersion.SequenceEqual(request.Owner.RowVersion)
+                    && current.Path == request.Path
+                    && current.LengthBytes == request.ExpectedLengthBytes
+                    && endpoint is not null
+                    && SameEndpoint(endpoint, request.Endpoint);
+                var decisions = PlanLocationRetentionWork.Decisions(
+                    await PlanLocationRetentionWork.LoadAsync(context, current.DatabaseId, now, cancellationToken));
+                var deletable = leaseMatches
+                    && decisions.TryGetValue(current.Id, out var decision)
+                    && PlanLocationRecovery.RetainsPhysicalLease(decision);
+                if (!deletable)
                 {
-                    current.CancelDeletionLease(now);
-                    context.BackupFileStateChanges.Add(new BackupFileStateChange(
-                        Guid.NewGuid(),
-                        current.Id,
-                        current.TaskId,
-                        BackupFileStatus.DeletePending,
-                        BackupFileStatus.Available,
-                        PlanLocationRetentionWork.ReleasedReason,
-                        now));
-                    await context.SaveChangesAsync(cancellationToken);
+                    if (leaseMatches)
+                    {
+                        current.CancelDeletionLease(now);
+                        context.BackupFileStateChanges.Add(new BackupFileStateChange(
+                            Guid.NewGuid(),
+                            current.Id,
+                            current.TaskId,
+                            BackupFileStatus.DeletePending,
+                            BackupFileStatus.Available,
+                            PlanLocationRetentionWork.ReleasedReason,
+                            now));
+                        await context.SaveChangesAsync(cancellationToken);
+                    }
+
+                    await transaction.CommitAsync(cancellationToken);
+                    return PlanCopyDeletionPermit.Denied(leaseMatches ? "plan.copy.protected" : "artifact.owner_unknown");
                 }
 
                 await transaction.CommitAsync(cancellationToken);
+                return new PlanCopyDeletionPermit(
+                    factory, connection, file.DatabaseId, current.Id, request.Owner.LeaseToken, clock, allowed: true, null, logger);
+            });
+
+            if (!permit.Allowed)
+            {
                 await ReleaseSessionAsync(connection, file.DatabaseId);
                 await connection.DisposeAsync();
-                return PlanCopyDeletionPermit.Denied(leaseMatches ? "plan.copy.protected" : "artifact.owner_unknown");
             }
 
-            await transaction.CommitAsync(cancellationToken);
-            return new PlanCopyDeletionPermit(
-                factory, connection, file.DatabaseId, current.Id, request.Owner.LeaseToken, clock, allowed: true, null, logger);
+            return permit;
         }
         catch
         {
@@ -214,31 +227,39 @@ internal sealed class PlanCopyDeletionCoordinator(
             }
 
             // 物理文件已经解开。提交不再跟随调用方取消，也不因租约刚到期或决策变化改回可用。
+            // 这一步只重放平台事务；物理删除已在闭包之外完成，不会因为重试再删一次。
             _ = cancellationToken;
             var now = _clock.GetUtcNow();
-            await using var context = await _factory.CreateDbContextAsync(CancellationToken.None);
-            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, CancellationToken.None);
-            await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, _databaseId, CancellationToken.None);
-            var file = await context.BackupFiles.AsTracking().SingleOrDefaultAsync(item => item.Id == _fileId, CancellationToken.None);
-            if (file is null || file.Status != BackupFileStatus.DeletePending || file.DeletionLeaseToken != _leaseToken)
+            await using var strategyContext = await _factory.CreateDbContextAsync(CancellationToken.None);
+            var strategy = strategyContext.Database.CreateExecutionStrategy();
+            var committed = await strategy.ExecuteAsync(async () =>
             {
-                await transaction.CommitAsync(CancellationToken.None);
-                return false;
-            }
+                await using var context = await _factory.CreateDbContextAsync(CancellationToken.None);
+                await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, CancellationToken.None);
+                await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, _databaseId, CancellationToken.None);
+                var file = await context.BackupFiles.AsTracking().SingleOrDefaultAsync(item => item.Id == _fileId, CancellationToken.None);
+                if (file is null || file.Status != BackupFileStatus.DeletePending || file.DeletionLeaseToken != _leaseToken)
+                {
+                    await transaction.CommitAsync(CancellationToken.None);
+                    return false;
+                }
 
-            file.RecordConfirmedUnlink(_leaseToken, now);
-            await PlanLocationRetentionWork.NoteStagingCleanedAsync(context, file, now, CancellationToken.None);
-            context.BackupFileStateChanges.Add(new BackupFileStateChange(
-                Guid.NewGuid(),
-                file.Id,
-                file.TaskId,
-                BackupFileStatus.DeletePending,
-                BackupFileStatus.Deleted,
-                PlanLocationRetentionWork.DeletedReason,
-                now));
-            context.AuditRecords.Add(new(null, "backup.file.plan_retention.commit", "BackupFile", file.Id.ToString("N"), "succeeded", PlanLocationRetentionWork.DeletedReason));
-            await context.SaveChangesAsync(CancellationToken.None);
-            await transaction.CommitAsync(CancellationToken.None);
+                file.RecordConfirmedUnlink(_leaseToken, now);
+                await PlanLocationRetentionWork.NoteStagingCleanedAsync(context, file, now, CancellationToken.None);
+                context.BackupFileStateChanges.Add(new BackupFileStateChange(
+                    Guid.NewGuid(),
+                    file.Id,
+                    file.TaskId,
+                    BackupFileStatus.DeletePending,
+                    BackupFileStatus.Deleted,
+                    PlanLocationRetentionWork.DeletedReason,
+                    now));
+                context.AuditRecords.Add(new(null, "backup.file.plan_retention.commit", "BackupFile", file.Id.ToString("N"), "succeeded", PlanLocationRetentionWork.DeletedReason));
+                await context.SaveChangesAsync(CancellationToken.None);
+                await transaction.CommitAsync(CancellationToken.None);
+                return true;
+            });
+
             // 会话锁与投影用的是同一把保留锁。删除已经提交后再放开，这次写入口才能补做待投影。
             if (_connection is not null)
             {
@@ -246,7 +267,7 @@ internal sealed class PlanCopyDeletionCoordinator(
             }
 
             await RemoteGapNotices.TryDrainPendingAsync(_factory, _databaseId, CancellationToken.None, _logger);
-            return true;
+            return committed;
         }
 
         public async ValueTask DisposeAsync()
