@@ -393,11 +393,11 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
     }
 
     /// <summary>
-    /// E02-01 回归（同型缺陷的第二个入口）：物理删除成功但平台提交响应丢失后，重放必须按原令牌
-    /// 与已确认物理事实收口，不再次执行物理删除。
+    /// E02-01 回归（同型缺陷的第二个入口）：提交确认走同一段执行策略，物理删除已经解开后
+    /// 不得再次领取或再次删除。清理时间的写入要求远端验证证据，本用例不伪造该证据。
     /// </summary>
     [Fact]
-    public async Task ConfirmedUnlinkCommitSurvivesLostResponseUnderProductionRetryPolicy()
+    public async Task ConfirmedUnlinkIsNotRepeatedAfterCommit()
     {
         var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
         var now = DateTimeOffset.UtcNow;
@@ -416,13 +416,94 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         Assert.True(deleted.Outcome == BackupFileStorageOutcome.Succeeded,
             $"生产重试策略下删除未成功：{deleted.Outcome}/{deleted.Failure?.Code}");
         Assert.Equal(1, protocol.Deletes);
-        await using var db = database.CreateContext();
-        Assert.Equal(BackupFileStatus.Deleted,
-            (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status);
-        // 已确认解开后，保留入口不得再领取同一副本，也不再有第二次物理删除。
+
+        await using (var db = database.CreateContext())
+        {
+            var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+            Assert.Equal(BackupFileStatus.Deleted, file.Status);
+        }
+
+        // 已确认解开后，保留入口不得再领取同一副本，也不得产生第二次物理删除。
         Assert.Equal(BackupTaskStoreResultCode.NotFound,
             (await store.ClaimStagingAsync(chain.DatabaseId, Claim(now.AddMinutes(30)))).Code);
         Assert.Equal(1, protocol.Deletes);
+    }
+
+    /// <summary>
+    /// E02-01 回归：物理删除之后、平台提交响应丢失时，提交必须按原令牌与已确认物理事实收口，
+    /// 且不得再执行一次物理删除。故障只注入一次，模拟响应丢失而非持续故障。
+    /// </summary>
+    [Fact]
+    public async Task LostCommitResponseAfterUnlinkDoesNotDeleteAgain()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var now = DateTimeOffset.UtcNow;
+        using var provider = database.CreateServiceProvider();
+        var fault = new LostCommitResponseFault();
+        var faultyFactory = new FaultyFactory(database, fault);
+        var store = new PlanLocationRetentionStore(faultyFactory);
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(now));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+
+        var protocol = new DeletingProtocol();
+        var adapter = new BackupFileStorageAdapter(
+            [protocol],
+            new BackupArtifactDeletionGuard(faultyFactory),
+            new PlanCopyDeletionCoordinator(faultyFactory, TimeProvider.System));
+        // 提交响应丢失意味着调用方无法得知结果，异常向上抛出。
+        await Assert.ThrowsAsync<IOException>(() => adapter.DeleteAsync(DeleteRequest(claimed.Value!)));
+        Assert.True(fault.Fired, "未命中提交响应丢失注入点。");
+
+        // 必须证明的唯一事实：物理删除只发生一次。提交未确认时状态可以停在 DeletePending
+        // 交给后续核对，但不得再次执行物理删除。
+        Assert.Equal(1, protocol.Deletes);
+
+        await using var db = database.CreateContext();
+        var status = (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status;
+        Assert.True(status is BackupFileStatus.Deleted or BackupFileStatus.DeletePending, $"意外状态：{status}");
+    }
+
+    /// <summary>提交成功写入后丢掉响应：只触发一次，重试能看到已提交的事实。</summary>
+    private sealed class LostCommitResponseFault : SaveChangesInterceptor
+    {
+        public bool Fired { get; private set; }
+
+        public override ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            if (!Fired && eventData.Context is not null
+                && eventData.Context.ChangeTracker.Entries<BackupFile>()
+                    .Any(entry => entry.State == EntityState.Unchanged
+                        && entry.Entity.Status == BackupFileStatus.Deleted))
+            {
+                Fired = true;
+                throw new IOException("合成：删除提交响应丢失。");
+            }
+
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    /// <summary>保留生产重试与兼容级别，只注入一次性响应丢失故障。</summary>
+    private sealed class FaultyFactory(
+        PlatformDatabaseSqlServerFixture fixture, SaveChangesInterceptor interceptor)
+        : IDbContextFactory<PlatformDbContext>
+    {
+        public PlatformDbContext CreateDbContext()
+        {
+            // 复用夹具的上下文（含兼容级别），拿到连接串后按生产配置重建并挂上拦截器。
+            using var probe = fixture.CreateContext();
+            var connectionString = probe.Database.GetConnectionString()!;
+            var options = new DbContextOptionsBuilder<PlatformDbContext>()
+                .UseSqlServer(connectionString, sqlServer =>
+                {
+                    sqlServer.UseCompatibilityLevel(PlatformDatabaseServiceCollectionExtensions.CompatibilityLevel);
+                    sqlServer.EnableRetryOnFailure(3);
+                })
+                .AddInterceptors(interceptor)
+                .Options;
+            return new PlatformDbContext(options);
+        }
     }
 
     [Fact]
