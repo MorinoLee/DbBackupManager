@@ -117,6 +117,7 @@ public sealed class BackupPlanHeartbeatTests
         public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained, string? outcomeReason = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<BackupExecutionContractCode> ReleaseDeferredCleanupForExecutionAsync(LeaseHandle lease, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }
 
@@ -282,6 +283,8 @@ public sealed class BackupPlanExecutionOutcomeTests
         public Task<BackupExecutionContractCode> CloseDeferredRemoteCleanupAsync(Guid taskId, CancellationToken cancellationToken = default) =>
             Task.FromResult(BackupExecutionContractCode.Succeeded);
         public Task<BackupExecutionContractCode> CloseReadyRemoteCleanupsAsync(Guid databaseId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(BackupExecutionContractCode.Succeeded);
+        public Task<BackupExecutionContractCode> ReleaseDeferredCleanupForExecutionAsync(LeaseHandle lease, CancellationToken cancellationToken = default) =>
             Task.FromResult(BackupExecutionContractCode.Succeeded);
     }
 }

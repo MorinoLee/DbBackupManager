@@ -16,6 +16,9 @@ internal static class BackupPresentation
     public static string HistoryReason(string value) => value switch
     {
         "task.created" => "任务已提交，等待 Worker 领取",
+        "task.plan.created" => "管理员已手动提交，等待 Worker 领取",
+        "task.plan.baseline_supplement" => "启用时补齐的计划内完整备份，等待 Worker 领取",
+        "plan.baseline_required" => "没有已核对的受管完整备份基线，差异时隙已结束",
         "execution.claimed" => "Worker 已领取任务",
         "execution.preparation_failed" => "备份路径无效，任务未开始执行",
         "task.cancellation_requested" => "已请求取消",
@@ -53,6 +56,7 @@ internal static class BackupPresentation
         null => null,
         "admin_confirmed_failed" => "管理员已核对证据并确认本阶段失败；处理原因后可单独提交重试。",
         "backup_path_invalid" => "完整备份路径或路径规则无效，任务未开始执行。请缩短目录或名称，并以修正后的配置创建新任务。",
+        "baseline_required" => "还没有已核对的受管完整备份基线，该差异备份已结束，不会改成完整备份，也不会当作未调用失败重试。",
         "smb_credential_unavailable" => "无法加载文件访问凭据，尚未进行 SMB 登录。请检查凭据启用状态及 Web、Worker 的共享业务密钥配置。",
         "smb_credential_reference_invalid" => "文件访问凭据不存在、已停用或类型不匹配，请检查凭据配置。",
         "smb_credential_version_unsupported" => "文件凭据保护格式不受支持，请通过凭据页面重新保存密码。",

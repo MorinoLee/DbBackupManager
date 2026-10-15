@@ -144,6 +144,7 @@ internal static class Preview
                 VerifyTimeoutMinutes = 60,
                 TransferTimeoutMinutes = 90,
                 IsPaused = true,
+                MutationId = Guid.NewGuid(),
             }, token);
         }
     }

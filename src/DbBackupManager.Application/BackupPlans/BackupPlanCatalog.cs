@@ -41,7 +41,8 @@ public sealed record BackupPlanInput(
     int BackupTimeoutMinutes,
     int VerifyTimeoutMinutes,
     int TransferTimeoutMinutes,
-    bool IsPaused);
+    bool IsPaused,
+    Guid MutationId);
 
 public sealed record BackupPlanView(
     Guid Id,
@@ -82,7 +83,8 @@ public sealed record BackupLocationRecovery(
 public sealed record BackupRecoverySummary(
     Guid DatabaseId,
     bool HasCurrentPlan,
-    IReadOnlyList<BackupLocationRecovery> Locations);
+    IReadOnlyList<BackupLocationRecovery> Locations,
+    string? BaselineNotice = null);
 
 public sealed record BackupPlanListItem(
     Guid Id,

@@ -23,6 +23,9 @@ public static class WorkerHost
         builder.Services.AddHostedService<WorkerStartupService>();
         builder.Services.AddPlatformDatabaseReadiness();
         builder.Services.AddHostedService<WorkerHeartbeatService>();
+        builder.Services.Configure<BackupPlanWorkerOptions>(
+            builder.Configuration.GetSection(BackupPlanWorkerOptions.SectionName));
+        builder.Services.AddHostedService<BackupPlanWorkerService>();
         builder.Services.AddHostedService<BackupRetentionWorkerService>();
         builder.Services.AddHostedService<BackupNotificationWorkerService>();
         return builder;

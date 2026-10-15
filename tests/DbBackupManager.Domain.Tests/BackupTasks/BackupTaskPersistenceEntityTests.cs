@@ -459,11 +459,15 @@ public sealed class BackupTaskPersistenceEntityTests
 
         var expectedDelays = new[]
         {
+            TimeSpan.FromSeconds(15),
+            TimeSpan.FromSeconds(30),
             TimeSpan.FromMinutes(1),
-            TimeSpan.FromMinutes(5),
-            TimeSpan.FromMinutes(15),
-            TimeSpan.FromHours(1),
-            TimeSpan.FromHours(1),
+            TimeSpan.FromMinutes(2),
+            TimeSpan.FromMinutes(4),
+            TimeSpan.FromMinutes(8),
+            TimeSpan.FromMinutes(16),
+            TimeSpan.FromMinutes(30),
+            TimeSpan.FromMinutes(30),
         };
         var eligibleAt = task.NextReconciliationAtUtc!.Value;
         for (var index = 0; index < expectedDelays.Length; index++)

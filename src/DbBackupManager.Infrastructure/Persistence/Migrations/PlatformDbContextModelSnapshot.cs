@@ -78,6 +78,72 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DbBackupManager.Domain.BackupPlans.BackupPlanBaselineEnablement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<string>("Decision")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<int>("EnablementSequence")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("MutationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("PlanVersionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid?>("TaskId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasPrecision(7)
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MutationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_BackupPlanBaselineEnablements_MutationId");
+
+                    b.HasIndex("TaskId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_BackupPlanBaselineEnablements_TaskId")
+                        .HasFilter("[TaskId] IS NOT NULL");
+
+                    b.HasIndex("PlanId", "EnablementSequence")
+                        .IsUnique()
+                        .HasDatabaseName("UX_BackupPlanBaselineEnablements_Sequence");
+
+                    b.HasIndex("PlanId", "PlanVersionId")
+                        .HasDatabaseName("IX_BackupPlanBaselineEnablements_PlanVersion");
+
+                    b.ToTable("BackupPlanBaselineEnablements", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_BackupPlanBaselineEnablements_Decision", "([Decision] = 'Queued' AND [TaskId] IS NOT NULL) OR ([Decision] IN ('SkippedManagedBaseline', 'SkippedUncertainBaseline', 'SkippedOutstandingFull') AND [TaskId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanBaselineEnablements_Sequence", "[EnablementSequence] >= 1");
+                        });
+                });
+
             modelBuilder.Entity("DbBackupManager.Domain.BackupPlans.BackupPlanVersion", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3011,7 +3077,7 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupTasks_StatusStage", "[Status] = 'Cancelled' OR [CurrentStage] IS NOT NULL");
 
-                            t.HasCheckConstraint("CK_BackupTasks_Trigger", "([TriggerType] = 'Scheduled' AND [ScheduledSlotAtUtc] IS NOT NULL) OR ([TriggerType] = 'Manual' AND [ScheduledSlotAtUtc] IS NULL)");
+                            t.HasCheckConstraint("CK_BackupTasks_Trigger", "([TriggerType] = 'Scheduled' AND [ScheduledSlotAtUtc] IS NOT NULL) OR ([TriggerType] IN ('Manual', 'BaselineSupplement') AND [ScheduledSlotAtUtc] IS NULL)");
                         });
                 });
 
@@ -4298,6 +4364,21 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .HasForeignKey("Id", "_currentVersionId")
                         .HasPrincipalKey("PlanId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("DbBackupManager.Domain.BackupPlans.BackupPlanBaselineEnablement", b =>
+                {
+                    b.HasOne("DbBackupManager.Domain.BackupTasks.BackupTask", null)
+                        .WithMany()
+                        .HasForeignKey("TaskId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("DbBackupManager.Domain.BackupPlans.BackupPlanVersion", null)
+                        .WithMany()
+                        .HasForeignKey("PlanId", "PlanVersionId")
+                        .HasPrincipalKey("PlanId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("DbBackupManager.Domain.BackupPlans.BackupPlanVersion", b =>

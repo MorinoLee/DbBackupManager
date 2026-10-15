@@ -12,9 +12,7 @@ public sealed class BackupPlanExplicitClaimLocalDbTests(PlatformDatabaseSqlServe
 {
     [Theory]
     [InlineData(BackupRunPurpose.PlanLog, BackupStorageMode.LocalOnly)]
-    [InlineData(BackupRunPurpose.AdHocCopyOnlyFull, BackupStorageMode.LocalOnly)]
     [InlineData(BackupRunPurpose.PlanLog, BackupStorageMode.RemoteOnly)]
-    [InlineData(BackupRunPurpose.AdHocCopyOnlyFull, BackupStorageMode.RemoteOnly)]
     public async Task ClosedPurposeAndModeAreRejectedBeforeClaimAndAttempt(BackupRunPurpose purpose, BackupStorageMode mode)
     {
         await using var test = await PlanExecutionTestEnvironment.CreateAsync(platform, mode);
@@ -56,6 +54,28 @@ public sealed class BackupPlanExplicitClaimLocalDbTests(PlatformDatabaseSqlServe
         Assert.Equal(1, await finalDb.BackupTaskStateChanges.CountAsync(x => x.TaskId == taskId));
         Assert.False(await finalDb.BackupAttempts.AnyAsync(x => x.TaskId == other));
         Assert.Equal(winner.Work.Attempt.Id, (await finalDb.BackupAttempts.SingleAsync(x => x.TaskId == taskId)).Id);
+    }
+
+    [Fact]
+    public async Task TwoScopesCannotBothClaimWhileAnotherRunningLeaseOrInvocationIsOpen()
+    {
+        await using var first = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalOnly);
+        await using var second = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalOnly);
+        var left = await first.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        var right = await second.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        var factory = new BackupExecutionContractSqlServerTests.Factory(platform);
+        var now = DateTimeOffset.UtcNow;
+        var storeA = new BackupPlanExecutionStore(factory, TimeProvider.System);
+        var storeB = new BackupPlanExecutionStore(factory, TimeProvider.System);
+        var decisions = await Task.WhenAll(
+            storeA.OpenAsync(left, Guid.NewGuid(), false, Guid.NewGuid(), "合成协调器甲", now, now.AddMinutes(2)),
+            storeB.OpenAsync(right, Guid.NewGuid(), false, Guid.NewGuid(), "合成协调器乙", now, now.AddMinutes(2)));
+
+        Assert.Single(decisions, item => item.Code == BackupExecutionContractCode.Succeeded);
+        Assert.Single(decisions, item => item.Code == BackupExecutionContractCode.Conflict);
+        await using var db = platform.CreateContext();
+        Assert.Equal(1, await db.BackupTasks.CountAsync(item =>
+            (item.Id == left || item.Id == right) && item.Status == BackupTaskStatus.Running && item.LeaseExpiresAtUtc > now));
     }
 
     [Fact]

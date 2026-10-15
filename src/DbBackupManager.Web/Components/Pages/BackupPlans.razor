@@ -1,6 +1,6 @@
 @*
     统一备份计划：每个已纳管的非系统数据库只有一个当前计划。
-    本页只保存完整备份，或完整备份加差异备份；保存不启动自动调度，也不开始定时删除。
+    本页保存完整备份，或完整备份加差异备份。使用中的计划会自动调度；定时删除仍关闭。
 *@
 @page "/backup-plans"
 @attribute [Authorize(Policy = AdminAuthenticationDefaults.AuthorizationPolicy)]
@@ -19,6 +19,7 @@
 @using DbBackupManager.Web.SqlCredentials
 @using Microsoft.AspNetCore.Authorization
 @inject IBackupPlanCatalogService Plans
+@inject IBackupPlanManualExecution Runs
 @inject IServerManagementService Servers
 @inject IStorageTargetManagementService StorageTargets
 @inject AuthenticationStateProvider Authentication
@@ -29,7 +30,7 @@
     <Authorized>
         <MudStack Spacing="3">
             <PageHeader Title="备份计划"
-                        Description="每个已纳管的非系统数据库只有一个当前计划，暂停后仍占用该位置。本阶段保存完整备份，或完整备份加差异备份。保存不会启动自动调度，也不会开始定时删除。">
+                        Description="每个已纳管的非系统数据库只有一个当前计划，暂停后仍占用该位置。可保存完整备份，或完整备份加差异备份。使用中的计划会按时间规则排队；定时删除仍未启用。暂停后仍可手动执行。">
                 <Actions>
                     @if (!_login)
                     {
@@ -92,6 +93,12 @@
                             else
                             {
                                 <MudButton Size="Size.Small" OnClick="@(() => OpenEditorAsync(row.Database.Id, true))" Disabled="_busy" data-testid="edit-plan">编辑</MudButton>
+                                <MudButton Size="Size.Small" OnClick="@(() => RunPlanAsync(row.Plan.Id, BackupRunPurpose.PlanFull))" Disabled="_busy" data-testid="run-plan-full">立即完整备份</MudButton>
+                                @if (row.Plan.Mode == 2)
+                                {
+                                    <MudButton Size="Size.Small" OnClick="@(() => RunPlanAsync(row.Plan.Id, BackupRunPurpose.PlanDifferential))" Disabled="_busy" data-testid="run-plan-diff">立即差异备份</MudButton>
+                                }
+                                <MudButton Size="Size.Small" OnClick="@(() => RunPlanAsync(row.Plan.Id, BackupRunPurpose.AdHocCopyOnlyFull))" Disabled="_busy" data-testid="run-plan-copy">临时完整备份</MudButton>
                             }
                         </MudTd>
                     </RowTemplate>
@@ -112,37 +119,46 @@
                                             Description="没有当前计划时不显示恢复窗口，也不会根据旧配置给出恢复结论。" />
                             </div>
                         }
-                        else if (_recovery.Locations.Count == 0)
-                        {
-                            <MudText Typo="Typo.body2">当前计划还没有可展示的存储位置。</MudText>
-                        }
                         else
                         {
-                            @foreach (var location in _recovery.Locations)
+                            @if (!string.IsNullOrEmpty(_recovery.BaselineNotice))
                             {
-                                <MudStack Spacing="1" Class="mt-3">
-                                    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Wrap="Wrap.Wrap">
-                                        <MudText Typo="Typo.subtitle2">@LocationName(location.Location)</MudText>
-                                        <MudChip T="string" Size="Size.Small" data-testid="recovery-health"
-                                                 Color="@HealthColor(location)" Variant="Variant.Filled">
-                                            @Health(location)
-                                        </MudChip>
-                                        @if (location.RemoteUnrecoverable)
-                                        {
-                                            <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined" data-testid="recovery-remote-gap">
-                                                远端暂时无法恢复
+                                <MudAlert Severity="Severity.Warning" Class="mt-2" data-testid="baseline-notice">
+                                    @BackupPlanPresentation.BaselineNotice(_recovery.BaselineNotice)
+                                </MudAlert>
+                            }
+                            @if (_recovery.Locations.Count == 0)
+                            {
+                                <MudText Typo="Typo.body2">当前计划还没有可展示的存储位置。</MudText>
+                            }
+                            else
+                            {
+                                @foreach (var location in _recovery.Locations)
+                                {
+                                    <MudStack Spacing="1" Class="mt-3">
+                                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Wrap="Wrap.Wrap">
+                                            <MudText Typo="Typo.subtitle2">@LocationName(location.Location)</MudText>
+                                            <MudChip T="string" Size="Size.Small" data-testid="recovery-health"
+                                                     Color="@HealthColor(location)" Variant="Variant.Filled">
+                                                @Health(location)
                                             </MudChip>
+                                            @if (location.RemoteUnrecoverable)
+                                            {
+                                                <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined" data-testid="recovery-remote-gap">
+                                                    远端暂时无法恢复
+                                                </MudChip>
+                                            }
+                                        </MudStack>
+                                        <MudText Typo="Typo.body2">
+                                            恢复窗口：@(location.WindowDays is int days ? $"{days} 天" : "—")
+                                            · 基线：@BackupPlanPresentation.Baseline(location.Baseline)
+                                        </MudText>
+                                        @foreach (var reason in location.GapReasonCodes.Concat(location.UnknownReasonCodes).Distinct())
+                                        {
+                                            <MudText Typo="Typo.caption">@BackupPlanPresentation.RetentionReason(reason)</MudText>
                                         }
                                     </MudStack>
-                                    <MudText Typo="Typo.body2">
-                                        恢复窗口：@(location.WindowDays is int days ? $"{days} 天" : "—")
-                                        · 基线：@BackupPlanPresentation.Baseline(location.Baseline)
-                                    </MudText>
-                                    @foreach (var reason in location.GapReasonCodes.Concat(location.UnknownReasonCodes).Distinct())
-                                    {
-                                        <MudText Typo="Typo.caption">@BackupPlanPresentation.RetentionReason(reason)</MudText>
-                                    }
-                                </MudStack>
+                                }
                             }
                         }
                     </MudPaper>
@@ -276,6 +292,28 @@
 
     private Task ShowRecoveryAsync(Guid databaseId) => RunAsync(actor => LoadRecoveryAsync(actor, databaseId));
 
+    private Task RunPlanAsync(Guid planId, BackupRunPurpose purpose) => RunAsync(async actor =>
+    {
+        var result = await Runs.RunAsync(actor, planId, Guid.NewGuid(), Guid.NewGuid(), purpose, _lifetime.Token);
+        if (_disposed) return;
+        if (result.Code is BackupPlanTaskCreationCode.Created or BackupPlanTaskCreationCode.AlreadyApplied or BackupPlanTaskCreationCode.AlreadyExists)
+        {
+            _message = purpose switch
+            {
+                BackupRunPurpose.AdHocCopyOnlyFull => "已排队临时完整备份。它使用 COPY_ONLY，不会替换受管基线。",
+                BackupRunPurpose.PlanDifferential => "已排队计划内差异备份。",
+                _ => "已排队计划内完整备份。它会作为受管基线更新。",
+            };
+            return;
+        }
+
+        _error = BackupPlanPresentation.RunError(result.Code).Message;
+        if (result.Code == BackupPlanTaskCreationCode.AuthenticationRequired)
+        {
+            _login = true;
+        }
+    });
+
     private async Task LoadRecoveryAsync(AdminSession actor, Guid databaseId)
     {
         var result = await Plans.RecoveryAsync(actor, databaseId, _lifetime.Token);
@@ -372,7 +410,7 @@
             return BackupPlanPresentation.Error(result.Code).Message;
         }
 
-        _message = "备份计划已保存。自动调度和定时删除尚未启用。";
+        _message = "备份计划已保存。使用中的计划会按时间规则排队；定时删除仍未启用。";
         await LoadAsync(actor);
         return null;
     }

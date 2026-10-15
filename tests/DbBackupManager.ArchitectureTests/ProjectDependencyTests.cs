@@ -19,7 +19,7 @@ public sealed class ProjectDependencyTests
             ["DbBackupManager.Application"] = new(
                 ["Microsoft.NET.Sdk"],
                 ["DbBackupManager.Domain"],
-                [],
+                ["Microsoft.Extensions.Logging.Abstractions"],
                 ["Microsoft.NETCore.App"]),
             ["DbBackupManager.Infrastructure"] = new(
                 ["Microsoft.NET.Sdk"],

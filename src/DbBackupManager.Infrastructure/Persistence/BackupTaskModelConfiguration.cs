@@ -23,7 +23,7 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
             table.HasCheckConstraint(
                 "CK_BackupTasks_Trigger",
                 "([TriggerType] = 'Scheduled' AND [ScheduledSlotAtUtc] IS NOT NULL) OR "
-                + "([TriggerType] = 'Manual' AND [ScheduledSlotAtUtc] IS NULL)");
+                + "([TriggerType] IN ('Manual', 'BaselineSupplement') AND [ScheduledSlotAtUtc] IS NULL)");
             table.HasCheckConstraint(
                 "CK_BackupTasks_Status",
                 "[Status] IN ('Pending', 'Running', 'NeedsAttention', 'Succeeded', 'Failed', 'Cancelled')");

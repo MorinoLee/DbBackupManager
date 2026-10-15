@@ -43,6 +43,8 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
 
     public DbSet<BackupPlan> BackupPlans => Set<BackupPlan>();
 
+    public DbSet<BackupPlanBaselineEnablement> BackupPlanBaselineEnablements => Set<BackupPlanBaselineEnablement>();
+
     public DbSet<BackupPlanVersion> BackupPlanVersions => Set<BackupPlanVersion>();
 
     public DbSet<BackupTask> BackupTasks => Set<BackupTask>();
@@ -153,6 +155,14 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
             if (entry.State is EntityState.Modified or EntityState.Deleted)
             {
                 throw new InvalidOperationException("备份计划版本只能追加，不能修改或删除。");
+            }
+        }
+
+        foreach (var entry in ChangeTracker.Entries<BackupPlanBaselineEnablement>())
+        {
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+            {
+                throw new InvalidOperationException("启用事件只能追加，不能修改或删除。");
             }
         }
 

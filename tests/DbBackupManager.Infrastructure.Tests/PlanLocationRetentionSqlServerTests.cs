@@ -74,6 +74,26 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
     }
 
     [Fact]
+    public async Task AuditPageReasonWithMissingWindowAnchorMatchesFullSurface()
+    {
+        var chain = await SeedChainAsync(ages: [400, 40, 10, 1]);
+        var now = DateTimeOffset.UtcNow;
+        await using var db = database.CreateContext();
+        var missingAnchor = chain.LocalFileId(10);
+        var missing = await db.BackupFiles.AsTracking().SingleAsync(x => x.Id == missingAnchor);
+        missing.RecordExternalMissing(now);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var surface = await PlanLocationRetentionWork.LoadAsync(db, chain.DatabaseId, now, CancellationToken.None);
+        var local = surface.Single(item => item.Location == BackupFileLocation.Local);
+        var fileId = chain.LocalFileId(400);
+        var expected = Reason(local, fileId);
+        Assert.Equal(RecoveryProtectionReason.OutsideWindowUnneeded, expected);
+        var page = await PlanLocationRetentionWork.ReasonsForFilesAsync(db, [fileId], now, CancellationToken.None);
+        Assert.Equal(expected, Assert.Contains(fileId, page));
+    }
+
+    [Fact]
     public async Task PageStagingFileWithHistoryKeepsTheFullSurfaceReason()
     {
         var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly);

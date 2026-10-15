@@ -86,7 +86,20 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
         }
         if (recovery && session.Work.Lease.Stage is BackupTaskStage.Transfer or BackupTaskStage.ValidateCopy)
             return await RecoverCopyAsync(session, token);
+        // RemoteOnly 的 Cleanup 也要有只读收口：暂存已经解开就补齐终态，否则释放租约交给执行路径，
+        // 不能让任务带着核对租约停在 Cleanup，也不能在核对里删除文件。
+        if (recovery && session.Work.Lease.Stage == BackupTaskStage.Cleanup
+            && session.Work.Snapshot.Policy.StorageMode == BackupStorageMode.RemoteOnly)
+            return await RecoverCleanupAsync(session, token);
         return BackupExecutionContractCode.Succeeded;
+    }
+
+    private async Task<BackupExecutionContractCode> RecoverCleanupAsync(BackupPlanExecutionSession session, CancellationToken token)
+    {
+        // 只读核对只拿核对租约：暂存记录已经解开时补齐终态，仍在时释放租约交给执行路径，
+        // 由执行路径按原 Attempt 继续 Cleanup，核对不代删文件。
+        return await _flow.CommitAsync(session,
+            next => store.ReleaseDeferredCleanupForExecutionAsync(next.Work.Lease, token), x => x, token);
     }
 
     private async Task<BackupExecutionContractCode> RecoverSqlAsync(BackupPlanExecutionSession session, CancellationToken token)
@@ -266,7 +279,8 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
         Guid? baseId, TargetSqlBackupMetadataEvidence? evidence, bool requireManagedDependency = true) => evidence is not null
         && evidence.Header.Status == BaselineEvidenceStatus.Complete && evidence.History.Status == BaselineEvidenceStatus.Complete
         && evidence.Header.Issues.Count == 0 && evidence.History.Issues.Count == 0
-        && BackupPlanExecutionFactRules.CompleteBackup(m, work.Snapshot.BackupType)
+        && BackupPlanExecutionFactRules.CompleteBackup(m, work.Snapshot.BackupType,
+            BackupPlanExecutionFactRules.ExpectedCopyOnly(work.Snapshot.BackupType, work.Snapshot.Purpose!.Value))
         && m.DatabaseGuid.Value == work.Attempt.ExpectedDatabaseGuid && m.FamilyGuid.Value == work.Attempt.ExpectedFamilyGuid
         && m.HasBackupChecksums.Value == work.Snapshot.Policy.UseChecksum && m.IsCompressed.Value == work.Snapshot.Policy.UseCompression
         && (!requireManagedDependency || (work.Snapshot.BackupType == BackupType.Full ? assessment == BackupSetAssessment.NotApplicable

@@ -255,13 +255,14 @@ public sealed class PlatformDatabaseSqlServerFixture : IAsyncLifetime
         }
     }
 
+    // 并行执行时 LocalDB 登录可能超过默认 15 秒。放宽只作用于测试连接。
     private const string LocalDbMasterConnectionString =
-        "Server=(localdb)\\MSSQLLocalDB;Database=master;Integrated Security=true;Encrypt=true;TrustServerCertificate=true;Pooling=false";
+        "Server=(localdb)\\MSSQLLocalDB;Database=master;Integrated Security=true;Encrypt=true;TrustServerCertificate=true;Pooling=false;Connect Timeout=60";
 
     private static string BuildLocalDbConnectionString(string databaseName)
     {
         return
-            $"Server=(localdb)\\MSSQLLocalDB;Database={databaseName};Integrated Security=true;Encrypt=true;TrustServerCertificate=true;Pooling=false";
+            $"Server=(localdb)\\MSSQLLocalDB;Database={databaseName};Integrated Security=true;Encrypt=true;TrustServerCertificate=true;Pooling=false;Connect Timeout=60";
     }
 
     private string CreateConnectionString()

@@ -110,7 +110,8 @@ public sealed class BackupPlanFormModel : IValidatableObject
             BackupMinutes,
             VerifyMinutes,
             TransferMinutes,
-            IsPaused);
+            IsPaused,
+            Guid.NewGuid());
     }
 
     public static BackupPlanFormModel FromView(BackupPlanView plan)

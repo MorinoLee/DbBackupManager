@@ -19,12 +19,14 @@ namespace DbBackupManager.Web.Tests.Components;
 public sealed class BackupPlansTests : MudBlazorComponentTest
 {
     private readonly FakeCatalog _catalog = new();
+    private readonly FakeRuns _runs = new();
     private readonly FakeServers _servers = new();
     private readonly FakeTargets _targets = new();
 
     public BackupPlansTests()
     {
         Services.AddSingleton<IBackupPlanCatalogService>(_catalog);
+        Services.AddSingleton<IBackupPlanManualExecution>(_runs);
         Services.AddSingleton<IServerManagementService>(_servers);
         Services.AddSingleton<IStorageTargetManagementService>(_targets);
     }
@@ -70,7 +72,7 @@ public sealed class BackupPlansTests : MudBlazorComponentTest
         Assert.Null(_catalog.Created.StorageTargetId);
         Assert.Equal(7, _catalog.Created.LocalRecoveryWindowDays);
         Assert.Null(_catalog.Created.RemoteRecoveryWindowDays);
-        Assert.Contains("自动调度和定时删除尚未启用", page.Markup, StringComparison.Ordinal);
+        Assert.Contains("定时删除仍未启用", page.Markup, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -209,6 +211,62 @@ public sealed class BackupPlansTests : MudBlazorComponentTest
         Assert.Contains("远端暂时无法恢复", page.Find("[data-testid='recovery-remote-gap']").TextContent, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ExistingPlanCanQueueFullDifferentialAndCopyOnly()
+    {
+        Authenticate();
+        _catalog.Plans =
+        [
+            new(FakeCatalog.PlanId, FakeCatalog.DatabaseId, "差异计划", true, FakeCatalog.Version, 2, 2, 1, true),
+        ];
+        var page = Render<Page>();
+        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='run-plan-diff']")));
+        Assert.NotNull(page.Find("[data-testid='run-plan-full']"));
+        Assert.NotNull(page.Find("[data-testid='run-plan-copy']"));
+
+        page.Find("[data-testid='run-plan-full']").Click();
+        page.WaitForAssertion(() => Assert.Equal(BackupRunPurpose.PlanFull, _runs.Purpose));
+        Assert.Contains("受管基线", page.Markup, StringComparison.Ordinal);
+
+        page.Find("[data-testid='run-plan-diff']").Click();
+        page.WaitForAssertion(() => Assert.Equal(BackupRunPurpose.PlanDifferential, _runs.Purpose));
+
+        page.Find("[data-testid='run-plan-copy']").Click();
+        page.WaitForAssertion(() => Assert.Equal(BackupRunPurpose.AdHocCopyOnlyFull, _runs.Purpose));
+        Assert.Contains("COPY_ONLY", page.Markup, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FullOnlyPlanDoesNotOfferDifferential()
+    {
+        Authenticate();
+        _catalog.Plans =
+        [
+            new(FakeCatalog.PlanId, FakeCatalog.DatabaseId, "完整计划", false, FakeCatalog.Version, 1, 1, 1, true),
+        ];
+        var page = Render<Page>();
+        page.WaitForAssertion(() => Assert.NotNull(page.Find("[data-testid='run-plan-full']")));
+        Assert.Empty(page.FindAll("[data-testid='run-plan-diff']"));
+    }
+
+    [Fact]
+    public void UnknownBaselineIsExplainedOnTheRecoverySummary()
+    {
+        Authenticate();
+        _catalog.Plans =
+        [
+            new(FakeCatalog.PlanId, FakeCatalog.DatabaseId, "差异计划", false, FakeCatalog.Version, 1, 2, 1, true),
+        ];
+        _catalog.Recovery = new BackupRecoverySummary(
+            FakeCatalog.DatabaseId, true, [], BackupPlanBaselineObservation.BaselineUnknown);
+        Services.GetRequiredService<NavigationManager>().NavigateTo($"/backup-plans?database={FakeCatalog.DatabaseId}");
+        var page = Render<Page>();
+
+        page.WaitForAssertion(() => Assert.Contains(
+            "活动基线未知", page.Find("[data-testid='baseline-notice']").TextContent, StringComparison.Ordinal));
+        Assert.Contains("不会自动补完整备份", page.Find("[data-testid='baseline-notice']").TextContent, StringComparison.Ordinal);
+    }
+
     private void Authenticate()
     {
         SignIn("管理员");
@@ -273,6 +331,22 @@ public sealed class BackupPlansTests : MudBlazorComponentTest
             "UTC", (BackupStorageMode)plan.StorageMode, null,
             plan.StorageMode == 3 ? null : 7, plan.StorageMode == 1 ? null : 30,
             plan.UseChecksum, false, 120, 60, 60, DateTimeOffset.UtcNow, []);
+    }
+
+    private sealed class FakeRuns : IBackupPlanManualExecution
+    {
+        public BackupRunPurpose? Purpose { get; private set; }
+
+        public BackupPlanTaskCreationCode Code { get; set; } = BackupPlanTaskCreationCode.Created;
+
+        public Task<BackupPlanTaskCreationResult> RunAsync(
+            AdminSession actor, Guid planId, Guid taskId, Guid mutationId, BackupRunPurpose purpose, CancellationToken cancellationToken = default)
+        {
+            Purpose = purpose;
+            return Task.FromResult(new BackupPlanTaskCreationResult(Code, Code == BackupPlanTaskCreationCode.Created
+                ? new CreatedBackupPlanTask(taskId, planId, Guid.NewGuid(), FakeCatalog.DatabaseId, purpose, BackupType.Full, BackupTaskTriggerType.Manual, null, null)
+                : null));
+        }
     }
 
     private sealed class FakeServers : IServerManagementService

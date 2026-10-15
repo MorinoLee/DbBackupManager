@@ -19,6 +19,21 @@ public static class BackupPlanTaskCreationRules
         if (request.CoveredDifferentialSlotUtc is { } covered
             && (request.Purpose != BackupRunPurpose.PlanFull || covered.Offset != TimeSpan.Zero))
             return BackupPlanTaskCreationCode.InvalidSlot;
+        if (command.TriggerType == BackupTaskTriggerType.BaselineSupplement)
+        {
+            if (request.Purpose != BackupRunPurpose.PlanFull || request.ScheduledSlotAtUtc is not null)
+            {
+                return BackupPlanTaskCreationCode.InvalidRequest;
+            }
+
+            if (plan.CurrentVersionId != version.Id)
+            {
+                return BackupPlanTaskCreationCode.VersionConflict;
+            }
+
+            return plan.IsPaused ? BackupPlanTaskCreationCode.PlanPaused : null;
+        }
+
         if (command.TriggerType == BackupTaskTriggerType.Manual)
             return request.ScheduledSlotAtUtc is null ? null : BackupPlanTaskCreationCode.InvalidSlot;
         if (request.Purpose == BackupRunPurpose.AdHocCopyOnlyFull) return BackupPlanTaskCreationCode.InvalidRequest;

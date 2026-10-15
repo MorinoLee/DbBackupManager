@@ -54,6 +54,10 @@ public static class PlatformDatabaseServiceCollectionExtensions
         services.TryAddScoped<BackupPlanTaskCreationService>();
         services.TryAddScoped<IBackupPlanSchedulingStore, BackupPlanSchedulingStore>();
         services.TryAddScoped<BackupPlanScheduler>();
+        services.TryAddScoped<IBackupPlanManualExecutionStore, BackupPlanManualExecutionStore>();
+        services.TryAddScoped<IBackupPlanManualExecution, BackupPlanManualExecutionService>();
+        services.TryAddScoped<IBackupPlanWorkerStore, BackupPlanWorkerStore>();
+        services.TryAddScoped<BackupPlanWorkerRound>();
         services.TryAddScoped<IBackupSetRegistrationStore, BackupSetRegistrationStore>();
         services.TryAddScoped<IPlanLocationRetentionStore, PlanLocationRetentionStore>();
         services.TryAddScoped<IPlanCopyDeletionCoordinator, PlanCopyDeletionCoordinator>();

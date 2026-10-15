@@ -36,6 +36,16 @@ public sealed class BackupPlanExecutionRecoveryLocalDbTests(PlatformDatabaseSqlS
     [InlineData("RenameAndVerifyAsync", null)]
     public async Task LostCommitResponseUsesOriginalAttemptAndReadOnlyRecovery(string point, string? kind)
     {
+        // 授权响应丢失时 BACKUP 从未发出，原调用绑定未知，授权会一直保持未终止并按设计挡住其他库的认领。
+        // 这个场景用独立平台库，避免它留下的未终止授权影响同一夹具里的后续场景。
+        if (point != "AuthorizeAsync") { await RunLostCommitResponseAsync(platform, point, kind); return; }
+        var isolated = new PlatformDatabaseSqlServerFixture();
+        try { await isolated.InitializeAsync(); await RunLostCommitResponseAsync(isolated, point, kind); }
+        finally { await isolated.DisposeAsync(); }
+    }
+
+    private static async Task RunLostCommitResponseAsync(PlatformDatabaseSqlServerFixture platform, string point, string? kind)
+    {
         var fault = new PlanExecutionCommitFault(point, kind);
         await using var test = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalAndRemote, fault);
         var taskId = await test.CreateTaskAsync(BackupRunPurpose.PlanFull);

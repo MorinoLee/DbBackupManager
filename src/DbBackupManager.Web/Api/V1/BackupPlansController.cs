@@ -1,6 +1,8 @@
 using DbBackupManager.Application.BackupPlans;
+using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Identity;
 using DbBackupManager.Contracts.Api.V1;
+using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Web.Authentication;
 using DbBackupManager.Web.BackupPlans;
 using DbBackupManager.Web.SqlCredentials;
@@ -18,7 +20,7 @@ namespace DbBackupManager.Web.Api.V1;
 [ProducesResponseType<ProblemDetails>(404, "application/problem+json")]
 [ProducesResponseType<ProblemDetails>(409, "application/problem+json")]
 [ProducesResponseType<ProblemDetails>(503, "application/problem+json")]
-public sealed class BackupPlansController(IBackupPlanCatalogService service) : ControllerBase
+public sealed class BackupPlansController(IBackupPlanCatalogService service, IBackupPlanManualExecution runs) : ControllerBase
 {
     [HttpGet("databases/{databaseId:guid}/backup-plan")]
     [ProducesResponseType<BackupPlanResponse>(200, "application/json")]
@@ -70,7 +72,36 @@ public sealed class BackupPlansController(IBackupPlanCatalogService service) : C
                 item.Unknown,
                 item.RemoteUnrecoverable,
                 item.GapReasonCodes,
-                item.UnknownReasonCodes)).ToArray()));
+                item.UnknownReasonCodes)).ToArray(),
+            value.BaselineNotice));
+    });
+
+    [HttpPost("backup-plans/{id:guid}/runs")]
+    [ProducesResponseType<RunBackupPlanResponse>(200, "application/json")]
+    public Task<IActionResult> Run(Guid id, RunBackupPlanRequest request, CancellationToken token) => Execute(async actor =>
+    {
+        if (request.TaskId == Guid.Empty || request.MutationId == Guid.Empty
+            || !Enum.TryParse<BackupRunPurpose>(request.Purpose, out var purpose)
+            || !Enum.IsDefined(purpose))
+        {
+            return Failure(new BackupPlanCatalogResult<object>(BackupPlanCatalogCode.Invalid));
+        }
+
+        var result = await runs.RunAsync(actor, id, request.TaskId, request.MutationId, purpose, token);
+        if (result.Code is BackupPlanTaskCreationCode.Created or BackupPlanTaskCreationCode.AlreadyApplied or BackupPlanTaskCreationCode.AlreadyExists
+            && result.Task is { } task)
+        {
+            return Ok(new RunBackupPlanResponse(
+                task.TaskId,
+                task.PlanId,
+                task.PlanVersionId,
+                task.Purpose.ToString(),
+                task.BackupType.ToString(),
+                BackupPlanRules.UseCopyOnly(task.Purpose)));
+        }
+
+        var error = BackupPlanPresentation.RunError(result.Code);
+        return StatusCode(error.Status, ApiProblemDetails.Create(HttpContext, error.Status, error.Code, error.Message));
     });
 
     private Task<IActionResult> Save(Guid? id, SaveBackupPlanRequest request, CancellationToken token) => Execute(async actor =>
@@ -93,7 +124,8 @@ public sealed class BackupPlansController(IBackupPlanCatalogService service) : C
             request.BackupTimeoutMinutes,
             request.VerifyTimeoutMinutes,
             request.TransferTimeoutMinutes,
-            request.IsPaused);
+            request.IsPaused,
+            request.MutationId);
         var result = id is null
             ? await service.CreateAsync(actor, input, token)
             : await service.UpdateAsync(actor, id.Value, request.Version, input, token);

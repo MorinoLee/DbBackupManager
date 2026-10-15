@@ -13,27 +13,23 @@ namespace DbBackupManager.Infrastructure.Persistence;
 internal static class BackupPlanTaskCreationCore
 {
     private const string CreatedReason = "task.plan.created";
+    private const string SupplementReason = "task.plan.baseline_supplement";
     private const string ReusedReason = "task.plan.creation_reused";
 
     internal static async Task<BackupPlanTaskCreationResult> CreateAsync(PlatformDbContext context,
         BackupPlan? plan, CreateBackupPlanTaskCommand command, bool resolveOnly, CancellationToken token)
     {
         var request = command.Request;
-        if (command.TriggerType == BackupTaskTriggerType.Manual
+        if (command.TriggerType is BackupTaskTriggerType.Manual or BackupTaskTriggerType.BaselineSupplement
                 && (command.ActorAdminUserId is null || command.ActorAdminUserId == Guid.Empty)
             || command.TriggerType == BackupTaskTriggerType.Scheduled && command.ActorAdminUserId is not null
             || !await IsActorValidAsync(context, command.ActorAdminUserId, command.ActorSecurityStamp, token))
             return new(BackupPlanTaskCreationCode.AuthenticationRequired);
 
-        var receipt = await context.BackupTaskStateChanges.SingleOrDefaultAsync(x => x.MutationId == request.MutationId, token);
-        if (receipt is not null)
+        var replay = await FindReplayAsync(context, command, token);
+        if (replay is not null)
         {
-            if (receipt.ReasonCode is not (CreatedReason or ReusedReason)
-                || !string.Equals(receipt.Message, RequestIdentity(command), StringComparison.Ordinal))
-                return new(BackupPlanTaskCreationCode.RequestConflict);
-            var original = await ReadIdentityAsync(context, receipt.TaskId, token);
-            return original is null ? new(BackupPlanTaskCreationCode.RequestConflict)
-                : new(BackupPlanTaskCreationCode.AlreadyApplied, original);
+            return replay;
         }
         if (request.TaskId == Guid.Empty || request.PlanId == Guid.Empty || request.PlanVersionId == Guid.Empty
             || !Enum.IsDefined(request.Purpose) || !Enum.IsDefined(command.TriggerType))
@@ -99,11 +95,114 @@ internal static class BackupPlanTaskCreationCore
 
     private static void AddReceipt(PlatformDbContext context, CreateBackupPlanTaskCommand command, BackupTask task, bool reused)
     {
+        var reason = reused ? ReusedReason : command.TriggerType == BackupTaskTriggerType.BaselineSupplement ? SupplementReason : CreatedReason;
         context.AddRange(CreateStateChange(command.Request.MutationId, task,
                 reused ? task.Status : null, reused ? task.CurrentStage : null,
-                reused ? ReusedReason : CreatedReason, RequestIdentity(command), command.NowUtc),
+                reason, RequestIdentity(command), command.NowUtc),
             CreateAudit(command.ActorAdminUserId, task.Id, "backup.plan.task.create",
-                reused ? "reused" : "succeeded", reused ? ReusedReason : CreatedReason));
+                reused ? "reused" : "succeeded", reason));
+    }
+
+    internal static async Task<BackupPlanTaskCreationResult?> FindReplayAsync(
+        PlatformDbContext context, CreateBackupPlanTaskCommand command, CancellationToken token)
+    {
+        var request = command.Request;
+        var receipt = await context.BackupTaskStateChanges.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.MutationId == request.MutationId, token);
+        if (receipt is not null)
+        {
+            if (receipt.ReasonCode is not (CreatedReason or ReusedReason or SupplementReason)
+                || !string.Equals(receipt.Message, RequestIdentity(command), StringComparison.Ordinal))
+            {
+                return new(BackupPlanTaskCreationCode.RequestConflict);
+            }
+
+            var original = await ReadIdentityAsync(context, receipt.TaskId, token);
+            return original is null
+                ? new(BackupPlanTaskCreationCode.RequestConflict)
+                : new(BackupPlanTaskCreationCode.AlreadyApplied, original);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 手动请求按 MutationId 重放：用原任务版本还原规范身份再比对，使计划改版后同一请求仍返回原任务，
+    /// 而逻辑身份变化仍返回冲突；不把当前计划版本写进重放身份。
+    /// </summary>
+    internal static async Task<BackupPlanTaskCreationResult?> FindReplayForManualAsync(
+        PlatformDbContext context, CreateBackupPlanTaskCommand command, CancellationToken token)
+    {
+        var request = command.Request;
+        var receipt = await context.BackupTaskStateChanges.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.MutationId == request.MutationId, token);
+        if (receipt is null)
+        {
+            return null;
+        }
+
+        if (receipt.ReasonCode is not (CreatedReason or ReusedReason or SupplementReason))
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        var original = await ReadIdentityAsync(context, receipt.TaskId, token);
+        if (original is null)
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        var expected = RequestIdentity(command with { Request = request with { PlanVersionId = original.PlanVersionId } });
+        return string.Equals(receipt.Message, expected, StringComparison.Ordinal)
+            ? new(BackupPlanTaskCreationCode.AlreadyApplied, original)
+            : new(BackupPlanTaskCreationCode.RequestConflict);
+    }
+
+    /// <summary>
+    /// 手动请求按 TaskId 命中已有任务时，用原请求身份复核并原子绑定本次 MutationId，
+    /// 使不同 MutationId 不能再指向另一个任务。
+    /// </summary>
+    internal static async Task<BackupPlanTaskCreationResult?> ReplayManualByTaskIdAsync(
+        PlatformDbContext context, CreateBackupPlanTaskCommand command, CancellationToken token)
+    {
+        var request = command.Request;
+        if (request.TaskId == Guid.Empty)
+        {
+            return null;
+        }
+
+        var task = await context.BackupTasks.AsTracking().SingleOrDefaultAsync(x => x.Id == request.TaskId, token);
+        if (task is null)
+        {
+            return null;
+        }
+
+        if (task.PlanId is null || task.PlanVersionId is null)
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        var snapshot = await context.BackupTaskSnapshots.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.TaskId == request.TaskId, token);
+        if (snapshot?.Purpose is null)
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        var canonical = command with { Request = request with { PlanVersionId = task.PlanVersionId.Value } };
+        var expected = RequestIdentity(canonical);
+        var matches = await context.BackupTaskStateChanges.AsNoTracking().AnyAsync(
+            item => item.TaskId == request.TaskId
+                && (item.ReasonCode == CreatedReason || item.ReasonCode == ReusedReason || item.ReasonCode == SupplementReason)
+                && item.Message == expected, token);
+        if (!matches)
+        {
+            return new(BackupPlanTaskCreationCode.RequestConflict);
+        }
+
+        AddReceipt(context, canonical, task, reused: true);
+        await context.SaveChangesAsync(token);
+        return new(BackupPlanTaskCreationCode.AlreadyApplied, Identity(task, snapshot));
     }
 
     // 有版本的规范化请求只含身份及时隙；不保存安全戳、当前时钟或任何连接配置。

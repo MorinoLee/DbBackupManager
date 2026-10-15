@@ -62,6 +62,7 @@ public sealed class SaveBackupPlanRequest
     [JsonRequired, Range(1, 1440)] public int VerifyTimeoutMinutes { get; init; }
     [JsonRequired, Range(1, 1440)] public int TransferTimeoutMinutes { get; init; }
     [JsonRequired] public bool IsPaused { get; init; }
+    [JsonRequired] public Guid MutationId { get; init; }
 }
 
 public sealed record BackupPlanScheduleResponse(int ScheduleType, TimeOnly LocalTime, int DaysOfWeek);
@@ -79,4 +80,15 @@ public sealed record BackupLocationRecoveryResponse(
     IReadOnlyList<string> GapReasonCodes, IReadOnlyList<string> UnknownReasonCodes);
 
 public sealed record BackupRecoverySummaryResponse(
-    Guid DatabaseId, bool HasCurrentPlan, IReadOnlyList<BackupLocationRecoveryResponse> Locations);
+    Guid DatabaseId, bool HasCurrentPlan, IReadOnlyList<BackupLocationRecoveryResponse> Locations,
+    string? BaselineNotice = null);
+
+public sealed class RunBackupPlanRequest
+{
+    [JsonRequired] public Guid TaskId { get; init; }
+    [JsonRequired] public Guid MutationId { get; init; }
+    [JsonRequired, Required, StringLength(40)] public string Purpose { get; init; } = "";
+}
+
+public sealed record RunBackupPlanResponse(
+    Guid TaskId, Guid PlanId, Guid PlanVersionId, string Purpose, string BackupType, bool UseCopyOnly);

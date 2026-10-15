@@ -1,4 +1,5 @@
 using DbBackupManager.Application.BackupPlans;
+using DbBackupManager.Application.BackupTasks;
 
 namespace DbBackupManager.Web.BackupPlans;
 
@@ -14,6 +15,26 @@ internal static class BackupPlanPresentation
         BackupPlanCatalogCode.LogUnsupported => (400, "backup_plan_log_unsupported", "首版不接受包含日志备份的计划，也不会修改数据库恢复模式。"),
         BackupPlanCatalogCode.Conflict => (409, "backup_plan_conflict", "备份计划保存冲突，请刷新后重试。"),
         _ => (503, "backup_plan_unavailable", "备份计划暂不可用，请稍后重试。"),
+    };
+
+    public static (int Status, string Code, string Message) RunError(BackupPlanTaskCreationCode code) => code switch
+    {
+        BackupPlanTaskCreationCode.AuthenticationRequired => (401, "authentication_required", "登录状态已失效，请重新登录。"),
+        BackupPlanTaskCreationCode.NotFound => (404, "backup_plan_not_found", "当前数据库还没有备份计划，或数据库不存在。"),
+        BackupPlanTaskCreationCode.StageNotOpen => (400, "backup_plan_stage_not_open", "日志备份尚未开放。"),
+        BackupPlanTaskCreationCode.BaselineRequired => (409, "backup_plan_baseline_required", "还没有已核对的受管完整备份基线，不能执行差异备份，也不会改成完整备份。"),
+        BackupPlanTaskCreationCode.PurposeNotInMode => (400, "backup_plan_invalid", "当前计划模式不包含这种备份。"),
+        BackupPlanTaskCreationCode.VersionConflict => (409, "backup_plan_version_conflict", "备份计划已被其他人修改，请刷新后重试。"),
+        BackupPlanTaskCreationCode.ConfigurationUnavailable => (503, "backup_plan_unavailable", "备份计划暂不可用，请稍后重试。"),
+        _ => (400, "backup_plan_invalid", "请检查要执行的备份类型后再提交。"),
+    };
+
+    public static string BaselineNotice(string? notice) => notice switch
+    {
+        "baseline_unknown" => "活动基线未知。不会自动补完整备份，也不能把差异备份改成完整备份。请核对后再手动执行计划内完整备份。",
+        "baseline_unmanaged" => "活动基线未受管。不会自动补完整备份，也不能把差异备份改成完整备份。请确认后再手动执行计划内完整备份。",
+        "baseline_mismatch" => "活动基线不一致。不会自动补完整备份，也不能把差异备份改成完整备份。请核对后再手动执行计划内完整备份。",
+        _ => "",
     };
 
     public static string Mode(int mode) => mode switch
