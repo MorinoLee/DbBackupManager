@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using System.Threading.RateLimiting;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Identity;
@@ -24,6 +25,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Authorization;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.Logging.EventLog;
 using MudBlazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -32,6 +34,12 @@ var cookieSecurePolicy = CookieSecurePolicy.SameAsRequest;
 
 builder.Services.AddWindowsService(options =>
     options.ServiceName = DbBackupManagerWebHostDefaults.WindowsServiceName);
+// 显式配置 EventLog provider 的事件源与阈值：事件源用部署脚本注册的服务名，阈值必须给出，
+// 否则恢复事件 6002（Information）会被 EventLog 默认阈值过滤掉。
+if (OperatingSystem.IsWindows())
+{
+    WebEventLogConfiguration.Configure(builder.Services, builder.Logging, DbBackupManagerWebHostDefaults.WindowsServiceName);
+}
 builder.WebHost.ConfigureKestrel(WebConnectionShutdown.Configure);
 
 builder.Services
@@ -235,3 +243,30 @@ app.MapRazorComponents<App>()
 app.Run();
 
 public partial class Program;
+
+/// <summary>
+/// 显式配置 EventLog provider 的事件源与过滤阈值。
+/// 事件源固定为部署脚本注册的服务名，使事件日志中的归属确定、不依赖框架回退。
+/// 阈值必须显式给出：EventLog provider 的默认阈值不继承 Logging:LogLevel:Default，
+/// 沿用默认值时恢复事件 6002（Information）会被过滤，只剩故障事件 6001。
+/// </summary>
+internal static class WebEventLogConfiguration
+{
+    /// <summary>平台连接监测的日志类别：故障记 6001（Warning），恢复记 6002（Information）。</summary>
+    internal const string PlatformDatabaseMonitorCategory = "DbBackupManager.Infrastructure.Hosting.PlatformDatabaseMonitor";
+
+    [SupportedOSPlatform("windows")]
+    internal static void Configure(IServiceCollection services, ILoggingBuilder logging, string sourceName)
+    {
+        services.Configure<EventLogSettings>(settings =>
+        {
+            settings.SourceName ??= sourceName;
+            settings.LogName ??= "Application";
+        });
+        logging.AddFilter<EventLogLoggerProvider>(static (_, level) => level >= LogLevel.Warning);
+        logging.AddFilter<EventLogLoggerProvider>(PlatformDatabaseMonitorCategory, LogLevel.Information);
+    }
+}
+
+
+
