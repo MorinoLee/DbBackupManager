@@ -11,6 +11,7 @@ using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace DbBackupManager.Infrastructure.Tests;
 
@@ -359,6 +360,306 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         Assert.Equal(BackupFileStatus.Deleted, (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status);
         Assert.Equal(BackupFileStatus.Available, (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.RemoteFileId(40))).Status);
         Assert.Equal(BackupTaskStoreResultCode.NotFound, (await store.ClaimNextAsync(chain.DatabaseId, Claim(now))).Code);
+    }
+
+    /// <summary>
+    /// E02-01 回归：生产注册开启了 EnableRetryOnFailure，删除协调器的平台短事务必须通过执行策略运行。
+    /// 上面的用例走裸工厂（不启用重试），因此不能证明生产 DI 下的这条路径。
+    /// </summary>
+    [Fact]
+    public async Task StagingDeletionSucceedsUnderProductionRetryPolicy()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var now = DateTimeOffset.UtcNow;
+        using var provider = database.CreateServiceProvider();
+        var productionFactory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var store = new PlanLocationRetentionStore(productionFactory);
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(now));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        Assert.Equal(chain.LocalFileId(40), claimed.Value!.FileId);
+
+        var protocol = new DeletingProtocol();
+        var adapter = new BackupFileStorageAdapter(
+            [protocol],
+            new BackupArtifactDeletionGuard(productionFactory),
+            provider.GetRequiredService<IPlanCopyDeletionCoordinator>());
+        var deleted = await adapter.DeleteAsync(DeleteRequest(claimed.Value!));
+        Assert.True(deleted.Outcome == BackupFileStorageOutcome.Succeeded,
+            $"生产重试策略下删除未成功：{deleted.Outcome}/{deleted.Failure?.Code}/{deleted.Failure?.Phase}");
+        Assert.Equal(1, protocol.Deletes);
+
+        await using var db = database.CreateContext();
+        Assert.Equal(BackupFileStatus.Deleted,
+            (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status);
+    }
+
+    /// <summary>
+    /// E02-01 回归（同型缺陷的第二个入口）：提交确认走同一段执行策略，物理删除已经解开后
+    /// 不得再次领取或再次删除。清理时间的写入要求远端验证证据，本用例不伪造该证据。
+    /// </summary>
+    [Fact]
+    public async Task ConfirmedUnlinkIsNotRepeatedAfterCommit()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var now = DateTimeOffset.UtcNow;
+        using var provider = database.CreateServiceProvider();
+        var productionFactory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var store = new PlanLocationRetentionStore(productionFactory);
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(now));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+
+        var protocol = new DeletingProtocol();
+        var adapter = new BackupFileStorageAdapter(
+            [protocol],
+            new BackupArtifactDeletionGuard(productionFactory),
+            provider.GetRequiredService<IPlanCopyDeletionCoordinator>());
+        var deleted = await adapter.DeleteAsync(DeleteRequest(claimed.Value!));
+        Assert.True(deleted.Outcome == BackupFileStorageOutcome.Succeeded,
+            $"生产重试策略下删除未成功：{deleted.Outcome}/{deleted.Failure?.Code}");
+        Assert.Equal(1, protocol.Deletes);
+
+        await using (var db = database.CreateContext())
+        {
+            var file = await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40));
+            Assert.Equal(BackupFileStatus.Deleted, file.Status);
+        }
+
+        // 已确认解开后，保留入口不得再领取同一副本，也不得产生第二次物理删除。
+        Assert.Equal(BackupTaskStoreResultCode.NotFound,
+            (await store.ClaimStagingAsync(chain.DatabaseId, Claim(now.AddMinutes(30)))).Code);
+        Assert.Equal(1, protocol.Deletes);
+    }
+
+    /// <summary>
+    /// E02-01 回归：物理删除之后、平台提交响应丢失时，提交必须按原令牌与已确认物理事实收口，
+    /// 且不得再执行一次物理删除。故障只注入一次，模拟响应丢失而非持续故障。
+    /// </summary>
+    [Fact]
+    public async Task LostCommitResponseAfterUnlinkDoesNotDeleteAgain()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var now = DateTimeOffset.UtcNow;
+        using var provider = database.CreateServiceProvider();
+        var fault = new LostCommitResponseFault();
+        var faultyFactory = new FaultyFactory(database, fault);
+        var store = new PlanLocationRetentionStore(faultyFactory);
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(now));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+
+        var protocol = new DeletingProtocol();
+        var adapter = new BackupFileStorageAdapter(
+            [protocol],
+            new BackupArtifactDeletionGuard(faultyFactory),
+            new PlanCopyDeletionCoordinator(faultyFactory, TimeProvider.System));
+        // 提交响应丢失意味着调用方无法得知结果，异常向上抛出。
+        await Assert.ThrowsAsync<IOException>(() => adapter.DeleteAsync(DeleteRequest(claimed.Value!)));
+        Assert.True(fault.Fired, "未命中提交响应丢失注入点。");
+
+        // 必须证明的唯一事实：物理删除只发生一次。提交未确认时状态可以停在 DeletePending
+        // 交给后续核对，但不得再次执行物理删除。
+        Assert.Equal(1, protocol.Deletes);
+
+        await using var db = database.CreateContext();
+        var status = (await db.BackupFiles.AsNoTracking().SingleAsync(item => item.Id == chain.LocalFileId(40))).Status;
+        Assert.True(status is BackupFileStatus.Deleted or BackupFileStatus.DeletePending, $"意外状态：{status}");
+    }
+
+    /// <summary>
+    /// E02-01 R01 复审反例：平台事务**真正 COMMIT 之后**响应丢失，生产 SQL 重试策略重放平台事务。
+    /// 重放时必须按本次操作的稳定回执身份识别"已应用"，返回成功；不得把刚提交的删除报成结果未知。
+    /// </summary>
+    [Fact]
+    public async Task CommittedDeletionReplaysAsSuccessAfterResponseLoss()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var protocol = new DeletingProtocol();
+        var fault = new CommittedDeletionResponseLoss();
+        var factory = new RetryFactoryWithInterceptor(database, fault);
+        var store = new PlanLocationRetentionStore(factory);
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        var adapter = new BackupFileStorageAdapter(
+            [protocol],
+            new BackupArtifactDeletionGuard(factory),
+            new PlanCopyDeletionCoordinator(factory, TimeProvider.System));
+
+        var result = await adapter.DeleteAsync(DeleteRequest(claimed.Value!));
+
+        Assert.True(fault.Fired, "没有命中真正的事务提交后响应丢失。");
+        Assert.Equal(1, protocol.Deletes);
+        await using var db = database.CreateContext();
+        var fileId = chain.LocalFileId(40);
+        Assert.Equal(BackupFileStatus.Deleted, (await db.BackupFiles.AsNoTracking().SingleAsync(x => x.Id == fileId)).Status);
+        Assert.Equal(1, await db.BackupFileStateChanges.AsNoTracking()
+            .CountAsync(x => x.FileId == fileId && x.ToStatus == BackupFileStatus.Deleted));
+        Assert.True(result.Outcome == BackupFileStorageOutcome.Succeeded,
+            $"事务已确认提交且策略重放完成，删除却报告 {result.Outcome}/{result.Failure?.Code}/{result.Failure?.Phase}。");
+    }
+
+    /// <summary>在真正的事务提交之后注入一次超时；生产 SQL 重试策略会识别并重放平台事务。</summary>
+    private sealed class CommittedDeletionResponseLoss : DbTransactionInterceptor
+    {
+        public bool Fired { get; private set; }
+
+        public override Task TransactionCommittedAsync(
+            DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
+        {
+            if (!Fired && eventData.Context is not null
+                && eventData.Context.ChangeTracker.Entries<BackupFile>()
+                    .Any(entry => entry.Entity.Status == BackupFileStatus.Deleted))
+            {
+                Fired = true;
+                throw new TimeoutException("合成：实际删除事务 COMMIT 之后响应丢失。");
+            }
+
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>保留生产重试与兼容级别，只注入一次性提交后故障。</summary>
+    private sealed class RetryFactoryWithInterceptor(
+        PlatformDatabaseSqlServerFixture fixture, IInterceptor interceptor)
+        : IDbContextFactory<PlatformDbContext>
+    {
+        public PlatformDbContext CreateDbContext()
+        {
+            using var probe = fixture.CreateContext();
+            var options = new DbContextOptionsBuilder<PlatformDbContext>()
+                .UseSqlServer(probe.Database.GetConnectionString(), sqlServer =>
+                {
+                    sqlServer.UseCompatibilityLevel(PlatformDatabaseServiceCollectionExtensions.CompatibilityLevel);
+                    sqlServer.EnableRetryOnFailure(3);
+                })
+                .AddInterceptors(interceptor)
+                .Options;
+            return new PlatformDbContext(options);
+        }
+    }
+
+    /// <summary>提交成功写入后丢掉响应：只触发一次，重试能看到已提交的事实。</summary>
+    private sealed class LostCommitResponseFault : SaveChangesInterceptor
+    {
+        public bool Fired { get; private set; }
+
+        public override ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            if (!Fired && eventData.Context is not null
+                && eventData.Context.ChangeTracker.Entries<BackupFile>()
+                    .Any(entry => entry.State == EntityState.Unchanged
+                        && entry.Entity.Status == BackupFileStatus.Deleted))
+            {
+                Fired = true;
+                throw new IOException("合成：删除提交响应丢失。");
+            }
+
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    /// <summary>保留生产重试与兼容级别，只注入一次性响应丢失故障。</summary>
+    private sealed class FaultyFactory(
+        PlatformDatabaseSqlServerFixture fixture, SaveChangesInterceptor interceptor)
+        : IDbContextFactory<PlatformDbContext>
+    {
+        public PlatformDbContext CreateDbContext()
+        {
+            // 复用夹具的上下文（含兼容级别），拿到连接串后按生产配置重建并挂上拦截器。
+            using var probe = fixture.CreateContext();
+            var connectionString = probe.Database.GetConnectionString()!;
+            var options = new DbContextOptionsBuilder<PlatformDbContext>()
+                .UseSqlServer(connectionString, sqlServer =>
+                {
+                    sqlServer.UseCompatibilityLevel(PlatformDatabaseServiceCollectionExtensions.CompatibilityLevel);
+                    sqlServer.EnableRetryOnFailure(3);
+                })
+                .AddInterceptors(interceptor)
+                .Options;
+            return new PlatformDbContext(options);
+        }
+    }
+
+    /// <summary>先打开有效许可，再注入状态，直接验证提交回执分支；不操作任何真实备份文件。</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReviewDeletedWithoutThisOperationsReceiptRemainsUnknown(bool earlierReceipt)
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var fileId = chain.LocalFileId(40);
+        using var provider = database.CreateServiceProvider();
+        var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var store = new PlanLocationRetentionStore(factory);
+        var coordinator = new PlanCopyDeletionCoordinator(factory, TimeProvider.System);
+        if (earlierReceipt)
+        {
+            var previous = await store.ClaimStagingAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow));
+            Assert.Equal(BackupTaskStoreResultCode.Succeeded, previous.Code);
+            await using (var previousPermit = await coordinator.OpenAsync(DeleteRequest(previous.Value!)))
+            {
+                Assert.True(previousPermit.Allowed);
+                Assert.True(await previousPermit.CommitDeletedAsync());
+            }
+            // 仅在随机测试库构造旧回执与新操作共存的边界，不把此注入当作生产合法状态转换。
+            await using var reset = database.CreateContext();
+            await reset.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE [BackupFiles] SET [Status]='Available', [DeletionAttemptCount]=0, [DeletedAtUtc]=NULL WHERE [Id]={fileId}");
+        }
+
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        await using var permit = await coordinator.OpenAsync(DeleteRequest(claimed.Value!));
+        Assert.True(permit.Allowed);
+        await using (var changed = database.CreateContext())
+        {
+            var file = await changed.BackupFiles.AsTracking().SingleAsync(x => x.Id == fileId);
+            // 副本已 Deleted，但没有当前租约对应的回执。变化发生在 OpenAsync 通过之后。
+            file.RecordConfirmedUnlink(claimed.Value!.LeaseToken, DateTimeOffset.UtcNow);
+            await changed.SaveChangesAsync();
+        }
+
+        Assert.False(await permit.CommitDeletedAsync());
+        await using var db = database.CreateContext();
+        Assert.Equal(BackupFileStatus.Deleted, (await db.BackupFiles.SingleAsync(x => x.Id == fileId)).Status);
+        Assert.Equal(earlierReceipt ? 1 : 0,
+            await db.BackupFileStateChanges.CountAsync(x => x.FileId == fileId && x.ToStatus == BackupFileStatus.Deleted));
+    }
+
+    [Fact]
+    public async Task ReviewOwnReceiptWithContradictoryStatusRemainsUnknownAndWarns()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var fileId = chain.LocalFileId(40);
+        using var provider = database.CreateServiceProvider();
+        var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var store = new PlanLocationRetentionStore(factory);
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        var logger = new ReviewReceiptLogger();
+        var coordinator = new PlanCopyDeletionCoordinator(factory, TimeProvider.System, logger);
+        await using var permit = await coordinator.OpenAsync(DeleteRequest(claimed.Value!));
+        Assert.True(permit.Allowed);
+        Assert.True(await permit.CommitDeletedAsync());
+        await using (var changed = database.CreateContext())
+        {
+            await changed.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE [BackupFiles] SET [Status]='Available', [DeletionAttemptCount]=0, [DeletedAtUtc]=NULL WHERE [Id]={fileId}");
+        }
+
+        Assert.False(await permit.CommitDeletedAsync());
+        Assert.Single(logger.EventIds, id => id == 6403);
+        await using var db = database.CreateContext();
+        Assert.Equal(BackupFileStatus.Available, (await db.BackupFiles.SingleAsync(x => x.Id == fileId)).Status);
+        Assert.Equal(1, await db.BackupFileStateChanges.CountAsync(x => x.FileId == fileId && x.ToStatus == BackupFileStatus.Deleted));
+    }
+
+    private sealed class ReviewReceiptLogger : ILogger<PlanCopyDeletionCoordinator>
+    {
+        public List<int> EventIds { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => EventIds.Add(eventId.Id);
     }
 
     [Fact]
