@@ -1,4 +1,5 @@
 using System.Data;
+using System.Security.Cryptography;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
 using DbBackupManager.Domain.BackupPlans;
@@ -15,6 +16,11 @@ internal sealed class PlanCopyDeletionCoordinator(
     ILogger<PlanCopyDeletionCoordinator>? logger = null)
     : IPlanCopyDeletionCoordinator
 {
+    private static readonly Action<ILogger, Guid, string, Exception?> ReceiptStatusMismatch = LoggerMessage.Define<Guid, string>(
+        LogLevel.Warning,
+        new EventId(6403, "PlanCopyDeletionReceiptStatusMismatch"),
+        "删除回执与副本状态不一致，已按未知处理。副本：{FileId} 状态：{Status}");
+
     public async Task<IPlanCopyDeletionPermit> OpenAsync(
         BackupFileDeleteRequest request,
         CancellationToken cancellationToken = default)
@@ -114,6 +120,18 @@ internal sealed class PlanCopyDeletionCoordinator(
             await connection.DisposeAsync();
             throw;
         }
+    }
+
+    /// <summary>
+    /// 本次删除操作的确定性回执身份。由文件与删除租约推导，同一操作的每次重放得到同一标识；
+    /// 不同操作（不同文件或不同租约）不会碰撞，因此不能把别的 Deleted 副本当成本次成功。
+    /// </summary>
+    private static Guid ConfirmedUnlinkReceipt(Guid fileId, Guid leaseToken)
+    {
+        var bytes = new byte[32];
+        fileId.TryWriteBytes(bytes.AsSpan(0, 16));
+        leaseToken.TryWriteBytes(bytes.AsSpan(16, 16));
+        return new Guid(SHA256.HashData(bytes).AsSpan(0, 16));
     }
 
     private static bool SameEndpoint(BackupFileEndpointInput left, BackupFileEndpointInput right) =>
@@ -238,7 +256,38 @@ internal sealed class PlanCopyDeletionCoordinator(
                 await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, CancellationToken.None);
                 await BackupInvocationAuthorizationStore.LockDatabaseAsync(context, _databaseId, CancellationToken.None);
                 var file = await context.BackupFiles.AsTracking().SingleOrDefaultAsync(item => item.Id == _fileId, CancellationToken.None);
-                if (file is null || file.Status != BackupFileStatus.DeletePending || file.DeletionLeaseToken != _leaseToken)
+                if (file is null)
+                {
+                    await transaction.CommitAsync(CancellationToken.None);
+                    return false;
+                }
+
+                // 幂等收口：COMMIT 实际成功后响应可能丢失，执行策略会重放这段平台事务。此时副本已是
+                // Deleted、删除租约也已清空，不能把本次已提交的成功判成状态不匹配。用本次删除操作的
+                // 确定性 MutationId 作为稳定回执身份：回执存在即本次已应用，直接返回成功。
+                // 只有"回执存在且副本已 Deleted"才算本次成功；任意 Deleted 副本或缺回执都不算。
+                var receiptId = ConfirmedUnlinkReceipt(file.Id, _leaseToken);
+                var applied = await context.BackupFileStateChanges.AsNoTracking()
+                    .AnyAsync(item => item.MutationId == receiptId, CancellationToken.None);
+                if (applied)
+                {
+                    if (file.Status != BackupFileStatus.Deleted)
+                    {
+                        // 回执声称已确认解开，副本却不是 Deleted：状态不一致，交回调用方按未知处理。
+                        if (_logger is not null)
+                        {
+                            ReceiptStatusMismatch(_logger, file.Id, file.Status.ToString(), null);
+                        }
+
+                        await transaction.CommitAsync(CancellationToken.None);
+                        return false;
+                    }
+
+                    await transaction.CommitAsync(CancellationToken.None);
+                    return true;
+                }
+
+                if (file.Status != BackupFileStatus.DeletePending || file.DeletionLeaseToken != _leaseToken)
                 {
                     await transaction.CommitAsync(CancellationToken.None);
                     return false;
@@ -247,7 +296,7 @@ internal sealed class PlanCopyDeletionCoordinator(
                 file.RecordConfirmedUnlink(_leaseToken, now);
                 await PlanLocationRetentionWork.NoteStagingCleanedAsync(context, file, now, CancellationToken.None);
                 context.BackupFileStateChanges.Add(new BackupFileStateChange(
-                    Guid.NewGuid(),
+                    receiptId,
                     file.Id,
                     file.TaskId,
                     BackupFileStatus.DeletePending,
@@ -287,3 +336,4 @@ internal sealed class PlanCopyDeletionCoordinator(
         }
     }
 }
+
