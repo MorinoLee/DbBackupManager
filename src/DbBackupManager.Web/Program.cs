@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using System.Threading.RateLimiting;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Identity;
@@ -24,6 +25,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Authorization;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.Logging.EventLog;
 using MudBlazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -32,6 +34,13 @@ var cookieSecurePolicy = CookieSecurePolicy.SameAsRequest;
 
 builder.Services.AddWindowsService(options =>
     options.ServiceName = DbBackupManagerWebHostDefaults.WindowsServiceName);
+// AddWindowsService 只挂 EventLog provider，并不填充 SourceName。空源名会让 EventLogLogger
+// 写入失败，6001/6002 等应用日志因此进不了 Windows Application 日志。这里显式指定部署脚本
+// 已注册的服务名作为事件源，保证服务身份下的运维日志能够持久留存。
+if (OperatingSystem.IsWindows())
+{
+    WebEventLogConfiguration.ConfigureSourceName(builder.Services, DbBackupManagerWebHostDefaults.WindowsServiceName);
+}
 builder.WebHost.ConfigureKestrel(WebConnectionShutdown.Configure);
 
 builder.Services
@@ -235,3 +244,20 @@ app.MapRazorComponents<App>()
 app.Run();
 
 public partial class Program;
+
+/// <summary>
+/// 为 EventLog provider 指定已由部署脚本注册的服务名作为事件源。AddWindowsService 只挂
+/// provider 而不填 SourceName，空源名会让 EventLogLogger 写入失败，6001/6002 等应用日志
+/// 因此进不了 Windows Application 日志。
+/// </summary>
+internal static class WebEventLogConfiguration
+{
+    [SupportedOSPlatform("windows")]
+    internal static void ConfigureSourceName(IServiceCollection services, string sourceName) =>
+        services.Configure<EventLogSettings>(settings =>
+        {
+            settings.SourceName ??= sourceName;
+            settings.LogName ??= "Application";
+        });
+}
+

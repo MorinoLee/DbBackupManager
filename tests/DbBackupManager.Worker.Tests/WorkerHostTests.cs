@@ -6,6 +6,8 @@ using DbBackupManager.Worker;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.EventLog;
+using Microsoft.Extensions.Options;
 
 namespace DbBackupManager.Worker.Tests;
 
@@ -90,6 +92,30 @@ public sealed class WorkerHostTests
         }
     }
 
+    /// <summary>
+    /// E03-01 回归：AddWindowsService 只挂 EventLog provider 而不填 SourceName，空源名会让
+    /// EventLogLogger 写入失败，6001/6002/6101 等应用日志因此进不了 Windows Application 日志。
+    /// 宿主必须显式把已注册的服务名指定为事件源。
+    /// </summary>
+    [Fact]
+    public void WorkerHostConfiguresWindowsEventLogSourceName()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var builder = WorkerHost.CreateBuilder([]);
+        builder.Configuration[$"ConnectionStrings:{PlatformDatabaseServiceCollectionExtensions.ConnectionStringName}"] =
+            "Server=localhost;Database=DbBackupManagerWorkerHostOnly;Integrated Security=true;Encrypt=true";
+        using var host = builder.Build();
+
+        var settings = host.Services.GetRequiredService<IOptions<EventLogSettings>>().Value;
+
+        Assert.Equal(WorkerHost.WindowsServiceName, settings.SourceName);
+        Assert.Equal("Application", settings.LogName);
+    }
+
     private static string FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -102,3 +128,4 @@ public sealed class WorkerHostTests
         return directory.FullName;
     }
 }
+
