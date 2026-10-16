@@ -18,9 +18,8 @@ public static class WorkerHost
         ExternalJsonConfiguration.AddIfConfigured(builder.Configuration, AppContext.BaseDirectory);
         builder.Services.AddWindowsService(options =>
             options.ServiceName = WindowsServiceName);
-        // AddWindowsService 只挂 EventLog provider，并不填充 SourceName。空源名会让 EventLogLogger
-        // 写入失败，6001/6002/6101 等应用日志因此进不了 Windows Application 日志。这里显式指定
-        // 部署脚本已注册的服务名作为事件源，保证服务身份下的运维日志能够持久留存。
+        // 显式配置 EventLog provider 的事件源与阈值：事件源用部署脚本注册的服务名，阈值必须给出，
+        // 否则恢复事件 6002（Information）会被 EventLog 默认阈值过滤掉。
         if (OperatingSystem.IsWindows())
         {
             ConfigureEventLog(builder, WindowsServiceName);
