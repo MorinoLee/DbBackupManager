@@ -23,7 +23,7 @@ public static class WorkerHost
         // 部署脚本已注册的服务名作为事件源，保证服务身份下的运维日志能够持久留存。
         if (OperatingSystem.IsWindows())
         {
-            ConfigureEventLogSource(builder, WindowsServiceName);
+            ConfigureEventLog(builder, WindowsServiceName);
         }
         builder.Services.AddPlatformDatabase(builder.Configuration);
         builder.Services.AddTargetSqlAdapter(builder.Configuration);
@@ -40,17 +40,27 @@ public static class WorkerHost
         return builder;
     }
 
+    /// <summary>平台连接监测的日志类别：故障记 6001（Warning），恢复记 6002（Information）。</summary>
+    internal const string PlatformDatabaseMonitorCategory = "DbBackupManager.Infrastructure.Hosting.PlatformDatabaseMonitor";
+
     /// <summary>
-    /// 为 EventLog provider 指定已由部署脚本注册的服务名作为事件源。AddWindowsService 只挂
-    /// provider 而不填 SourceName，空源名会让 EventLogLogger 写入失败，6001/6002/6101 等应用
-    /// 日志因此进不了 Windows Application 日志。
+    /// 显式配置 EventLog provider 的事件源与过滤阈值。
+    /// 事件源固定为部署脚本注册的服务名，使事件日志中的归属确定、不依赖框架回退。
+    /// 阈值必须显式给出：EventLog provider 的默认阈值不继承 Logging:LogLevel:Default，
+    /// 沿用默认值时恢复事件 6002（Information）会被过滤，只剩故障事件 6001。
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static void ConfigureEventLogSource(HostApplicationBuilder builder, string sourceName) =>
+    private static void ConfigureEventLog(HostApplicationBuilder builder, string sourceName)
+    {
         builder.Services.Configure<EventLogSettings>(settings =>
         {
             settings.SourceName ??= sourceName;
             settings.LogName ??= "Application";
         });
+        builder.Logging.AddFilter<EventLogLoggerProvider>(static (_, level) => level >= LogLevel.Warning);
+        builder.Logging.AddFilter<EventLogLoggerProvider>(PlatformDatabaseMonitorCategory, LogLevel.Information);
+    }
 }
+
+
 

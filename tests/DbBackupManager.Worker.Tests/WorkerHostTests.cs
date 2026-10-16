@@ -6,6 +6,7 @@ using DbBackupManager.Worker;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.EventLog;
 using Microsoft.Extensions.Options;
 
@@ -93,9 +94,8 @@ public sealed class WorkerHostTests
     }
 
     /// <summary>
-    /// E03-01 回归：AddWindowsService 只挂 EventLog provider 而不填 SourceName，空源名会让
-    /// EventLogLogger 写入失败，6001/6002/6101 等应用日志因此进不了 Windows Application 日志。
-    /// 宿主必须显式把已注册的服务名指定为事件源。
+    /// E03-01 回归：宿主必须把部署脚本注册的服务名固定为 EventLog 事件源，使事件归属确定、
+    /// 不依赖框架回退到 .NET Runtime。
     /// </summary>
     [Fact]
     public void WorkerHostConfiguresWindowsEventLogSourceName()
@@ -116,6 +116,60 @@ public sealed class WorkerHostTests
         Assert.Equal("Application", settings.LogName);
     }
 
+    /// <summary>
+    /// E03-01 R01 回归：EventLog provider 的默认阈值不继承 Logging:LogLevel:Default。
+    /// 平台连接监测用 Warning 记 6001、用 Information 记恢复事件 6002；只设置事件源而不设阈值时
+    /// 6002 会被过滤掉。这里用框架自身的 LoggerRuleSelector 走真实过滤规则验证两个级别都放行，
+    /// 不以 IOptions 的 SourceName 断言代替。
+    /// </summary>
+    [Fact]
+    public void WorkerHostEventLogRulesAdmitBothPlatformDatabaseMonitorLevels()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var builder = WorkerHost.CreateBuilder([]);
+        builder.Configuration[$"ConnectionStrings:{PlatformDatabaseServiceCollectionExtensions.ConnectionStringName}"] =
+            "Server=localhost;Database=DbBackupManagerWorkerHostOnly;Integrated Security=true;Encrypt=true";
+        using var host = builder.Build();
+        var options = host.Services.GetRequiredService<IOptions<LoggerFilterOptions>>().Value;
+        var providerName = typeof(EventLogLoggerProvider).FullName!;
+
+        Assert.True(
+            Allows(options, typeof(EventLogLoggerProvider), WorkerHost.PlatformDatabaseMonitorCategory, LogLevel.Warning),
+            "EventLog 应放行平台连接监测的 6001（Warning）。");
+        Assert.True(
+            Allows(options, typeof(EventLogLoggerProvider), WorkerHost.PlatformDatabaseMonitorCategory, LogLevel.Information),
+            "EventLog 应放行平台连接监测的 6002（Information），否则恢复事件不可见。");
+        Assert.False(
+            Allows(options, typeof(EventLogLoggerProvider), "DbBackupManager.Infrastructure.Persistence.BackupPlanWorkerStore", LogLevel.Information),
+            "其他类别应保持 EventLog 的 Warning 阈值，不被放宽到 Information。");
+    }
+
+    /// <summary>用框架自身的规则选择器判定某个提供程序/类别/级别是否放行。</summary>
+    private static bool Allows(LoggerFilterOptions options, Type providerType, string category, LogLevel level)
+    {
+        var selectorType = typeof(LoggerFilterOptions).Assembly
+            .GetType("Microsoft.Extensions.Logging.LoggerRuleSelector")
+            ?? throw new InvalidOperationException("未找到 LoggerRuleSelector。");
+        var select = selectorType.GetMethod("Select", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            ?? throw new InvalidOperationException("未找到 LoggerRuleSelector.Select。");
+        object?[] arguments = [options, providerType, category, null, null];
+        select.Invoke(null, arguments);
+        var minLevel = arguments[3] as LogLevel?;
+        if (arguments[4] is Delegate filter)
+        {
+            var count = filter.Method.GetParameters().Length;
+            return count == 3
+                ? (bool)filter.DynamicInvoke(providerType.FullName, category, level)!
+                : (bool)filter.DynamicInvoke(category, level)!;
+        }
+
+        return minLevel is null || level >= minLevel;
+    }
+
     private static string FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -128,4 +182,7 @@ public sealed class WorkerHostTests
         return directory.FullName;
     }
 }
+
+
+
 
