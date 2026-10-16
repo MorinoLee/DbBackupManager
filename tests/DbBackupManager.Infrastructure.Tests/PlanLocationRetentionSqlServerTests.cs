@@ -11,6 +11,7 @@ using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace DbBackupManager.Infrastructure.Tests;
 
@@ -576,6 +577,89 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
                 .Options;
             return new PlatformDbContext(options);
         }
+    }
+
+    /// <summary>先打开有效许可，再注入状态，直接验证提交回执分支；不操作任何真实备份文件。</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReviewDeletedWithoutThisOperationsReceiptRemainsUnknown(bool earlierReceipt)
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var fileId = chain.LocalFileId(40);
+        using var provider = database.CreateServiceProvider();
+        var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var store = new PlanLocationRetentionStore(factory);
+        var coordinator = new PlanCopyDeletionCoordinator(factory, TimeProvider.System);
+        if (earlierReceipt)
+        {
+            var previous = await store.ClaimStagingAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow));
+            Assert.Equal(BackupTaskStoreResultCode.Succeeded, previous.Code);
+            await using (var previousPermit = await coordinator.OpenAsync(DeleteRequest(previous.Value!)))
+            {
+                Assert.True(previousPermit.Allowed);
+                Assert.True(await previousPermit.CommitDeletedAsync());
+            }
+            // 仅在随机测试库构造旧回执与新操作共存的边界，不把此注入当作生产合法状态转换。
+            await using var reset = database.CreateContext();
+            await reset.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE [BackupFiles] SET [Status]='Available', [DeletionAttemptCount]=0, [DeletedAtUtc]=NULL WHERE [Id]={fileId}");
+        }
+
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        await using var permit = await coordinator.OpenAsync(DeleteRequest(claimed.Value!));
+        Assert.True(permit.Allowed);
+        await using (var changed = database.CreateContext())
+        {
+            var file = await changed.BackupFiles.AsTracking().SingleAsync(x => x.Id == fileId);
+            // 副本已 Deleted，但没有当前租约对应的回执。变化发生在 OpenAsync 通过之后。
+            file.RecordConfirmedUnlink(claimed.Value!.LeaseToken, DateTimeOffset.UtcNow);
+            await changed.SaveChangesAsync();
+        }
+
+        Assert.False(await permit.CommitDeletedAsync());
+        await using var db = database.CreateContext();
+        Assert.Equal(BackupFileStatus.Deleted, (await db.BackupFiles.SingleAsync(x => x.Id == fileId)).Status);
+        Assert.Equal(earlierReceipt ? 1 : 0,
+            await db.BackupFileStateChanges.CountAsync(x => x.FileId == fileId && x.ToStatus == BackupFileStatus.Deleted));
+    }
+
+    [Fact]
+    public async Task ReviewOwnReceiptWithContradictoryStatusRemainsUnknownAndWarns()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var fileId = chain.LocalFileId(40);
+        using var provider = database.CreateServiceProvider();
+        var factory = provider.GetRequiredService<IDbContextFactory<PlatformDbContext>>();
+        var store = new PlanLocationRetentionStore(factory);
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        var logger = new ReviewReceiptLogger();
+        var coordinator = new PlanCopyDeletionCoordinator(factory, TimeProvider.System, logger);
+        await using var permit = await coordinator.OpenAsync(DeleteRequest(claimed.Value!));
+        Assert.True(permit.Allowed);
+        Assert.True(await permit.CommitDeletedAsync());
+        await using (var changed = database.CreateContext())
+        {
+            await changed.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE [BackupFiles] SET [Status]='Available', [DeletionAttemptCount]=0, [DeletedAtUtc]=NULL WHERE [Id]={fileId}");
+        }
+
+        Assert.False(await permit.CommitDeletedAsync());
+        Assert.Single(logger.EventIds, id => id == 6403);
+        await using var db = database.CreateContext();
+        Assert.Equal(BackupFileStatus.Available, (await db.BackupFiles.SingleAsync(x => x.Id == fileId)).Status);
+        Assert.Equal(1, await db.BackupFileStateChanges.CountAsync(x => x.FileId == fileId && x.ToStatus == BackupFileStatus.Deleted));
+    }
+
+    private sealed class ReviewReceiptLogger : ILogger<PlanCopyDeletionCoordinator>
+    {
+        public List<int> EventIds { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => EventIds.Add(eventId.Id);
     }
 
     [Fact]
