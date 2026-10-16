@@ -463,6 +463,78 @@ public sealed class PlanLocationRetentionSqlServerTests(PlatformDatabaseSqlServe
         Assert.True(status is BackupFileStatus.Deleted or BackupFileStatus.DeletePending, $"意外状态：{status}");
     }
 
+    /// <summary>
+    /// E02-01 R01 复审反例：平台事务**真正 COMMIT 之后**响应丢失，生产 SQL 重试策略重放平台事务。
+    /// 重放时必须按本次操作的稳定回执身份识别"已应用"，返回成功；不得把刚提交的删除报成结果未知。
+    /// </summary>
+    [Fact]
+    public async Task CommittedDeletionReplaysAsSuccessAfterResponseLoss()
+    {
+        var chain = await SeedChainAsync(storageMode: BackupStorageMode.RemoteOnly, ages: [40]);
+        var protocol = new DeletingProtocol();
+        var fault = new CommittedDeletionResponseLoss();
+        var factory = new RetryFactoryWithInterceptor(database, fault);
+        var store = new PlanLocationRetentionStore(factory);
+        var claimed = await store.ClaimStagingAsync(chain.DatabaseId, Claim(DateTimeOffset.UtcNow));
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, claimed.Code);
+        var adapter = new BackupFileStorageAdapter(
+            [protocol],
+            new BackupArtifactDeletionGuard(factory),
+            new PlanCopyDeletionCoordinator(factory, TimeProvider.System));
+
+        var result = await adapter.DeleteAsync(DeleteRequest(claimed.Value!));
+
+        Assert.True(fault.Fired, "没有命中真正的事务提交后响应丢失。");
+        Assert.Equal(1, protocol.Deletes);
+        await using var db = database.CreateContext();
+        var fileId = chain.LocalFileId(40);
+        Assert.Equal(BackupFileStatus.Deleted, (await db.BackupFiles.AsNoTracking().SingleAsync(x => x.Id == fileId)).Status);
+        Assert.Equal(1, await db.BackupFileStateChanges.AsNoTracking()
+            .CountAsync(x => x.FileId == fileId && x.ToStatus == BackupFileStatus.Deleted));
+        Assert.True(result.Outcome == BackupFileStorageOutcome.Succeeded,
+            $"事务已确认提交且策略重放完成，删除却报告 {result.Outcome}/{result.Failure?.Code}/{result.Failure?.Phase}。");
+    }
+
+    /// <summary>在真正的事务提交之后注入一次超时；生产 SQL 重试策略会识别并重放平台事务。</summary>
+    private sealed class CommittedDeletionResponseLoss : DbTransactionInterceptor
+    {
+        public bool Fired { get; private set; }
+
+        public override Task TransactionCommittedAsync(
+            DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
+        {
+            if (!Fired && eventData.Context is not null
+                && eventData.Context.ChangeTracker.Entries<BackupFile>()
+                    .Any(entry => entry.Entity.Status == BackupFileStatus.Deleted))
+            {
+                Fired = true;
+                throw new TimeoutException("合成：实际删除事务 COMMIT 之后响应丢失。");
+            }
+
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>保留生产重试与兼容级别，只注入一次性提交后故障。</summary>
+    private sealed class RetryFactoryWithInterceptor(
+        PlatformDatabaseSqlServerFixture fixture, IInterceptor interceptor)
+        : IDbContextFactory<PlatformDbContext>
+    {
+        public PlatformDbContext CreateDbContext()
+        {
+            using var probe = fixture.CreateContext();
+            var options = new DbContextOptionsBuilder<PlatformDbContext>()
+                .UseSqlServer(probe.Database.GetConnectionString(), sqlServer =>
+                {
+                    sqlServer.UseCompatibilityLevel(PlatformDatabaseServiceCollectionExtensions.CompatibilityLevel);
+                    sqlServer.EnableRetryOnFailure(3);
+                })
+                .AddInterceptors(interceptor)
+                .Options;
+            return new PlatformDbContext(options);
+        }
+    }
+
     /// <summary>提交成功写入后丢掉响应：只触发一次，重试能看到已提交的事实。</summary>
     private sealed class LostCommitResponseFault : SaveChangesInterceptor
     {
