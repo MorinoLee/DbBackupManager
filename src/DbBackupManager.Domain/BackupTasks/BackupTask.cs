@@ -488,6 +488,34 @@ public sealed class BackupTask : ConcurrentEntity
         return attemptHandling;
     }
 
+    /// <summary>
+    /// 原调用已独立证明终止，但备份结果不足、缺失或矛盾。执行已结束，结果未知；
+    /// 保留原 Attempt、证据与文件，不登记成功基线，也不触发旧 Attempt 重跑。
+    /// </summary>
+    public void CloseUnknownResult(
+        BackupStorageMode storageMode,
+        Guid leaseToken,
+        DateTimeOffset utcNow,
+        string errorCode,
+        string errorMessage)
+    {
+        var now = BackupTaskValues.RequireUtc(utcNow, nameof(utcNow));
+        EnsureLease(leaseToken, BackupLeasePurpose.Reconciliation, now);
+        if (PlanId is null || Status != BackupTaskStatus.NeedsAttention
+            || CurrentStage != BackupTaskStage.Backup || CurrentBackupAttemptId is null)
+        {
+            throw new InvalidOperationException("只有 Backup 阶段的结果未知可以独立收口。");
+        }
+
+        var error = ValidateError(errorCode, errorMessage);
+        SetState(BackupTaskStateMachine.CloseUnknownResult(State(), storageMode));
+        ErrorCode = error.Code;
+        ErrorMessage = error.Message;
+        CompletedAtUtc = now;
+        ClearReconciliationSchedule();
+        ClearLease();
+    }
+
     private void ConfirmTerminal(
         BackupStorageMode storageMode,
         DateTimeOffset utcNow,

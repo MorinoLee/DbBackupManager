@@ -14,7 +14,10 @@ public enum BackupTaskStatus
     NeedsAttention = 3,
     Succeeded = 4,
     Failed = 5,
-    Cancelled = 6
+    Cancelled = 6,
+
+    /// <summary>执行已结束，但无法证明备份结果；不是明确失败，也不是未调用。</summary>
+    ClosedUnknown = 7
 }
 
 public enum BackupTaskStage

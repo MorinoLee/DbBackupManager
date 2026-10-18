@@ -26,7 +26,7 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
                 + "([TriggerType] IN ('Manual', 'BaselineSupplement') AND [ScheduledSlotAtUtc] IS NULL)");
             table.HasCheckConstraint(
                 "CK_BackupTasks_Status",
-                "[Status] IN ('Pending', 'Running', 'NeedsAttention', 'Succeeded', 'Failed', 'Cancelled')");
+                "[Status] IN ('Pending', 'Running', 'NeedsAttention', 'Succeeded', 'Failed', 'Cancelled', 'ClosedUnknown')");
             table.HasCheckConstraint(
                 "CK_BackupTasks_CurrentStage",
                 "[CurrentStage] IS NULL OR [CurrentStage] IN "
@@ -48,19 +48,19 @@ internal sealed class BackupTaskConfiguration : IEntityTypeConfiguration<BackupT
                 + "[CurrentBackupAttemptId] IS NOT NULL");
             table.HasCheckConstraint(
                 "CK_BackupTasks_Error",
-                "([Status] IN ('Failed', 'NeedsAttention') AND LEN([ErrorCode]) > 0 "
+                "([Status] IN ('Failed', 'NeedsAttention', 'ClosedUnknown') AND LEN([ErrorCode]) > 0 "
                 + "AND LEN([ErrorMessage]) > 0) OR "
-                + "([Status] NOT IN ('Failed', 'NeedsAttention') AND [ErrorCode] IS NULL "
+                + "([Status] NOT IN ('Failed', 'NeedsAttention', 'ClosedUnknown') AND [ErrorCode] IS NULL "
                 + "AND [ErrorMessage] IS NULL)");
             table.HasCheckConstraint(
                 "CK_BackupTasks_StartedAt",
-                "[Status] NOT IN ('Running', 'NeedsAttention', 'Succeeded', 'Failed') "
+                "[Status] NOT IN ('Running', 'NeedsAttention', 'Succeeded', 'Failed', 'ClosedUnknown') "
                 + "OR [StartedAtUtc] IS NOT NULL OR ([Status] = 'Failed' AND [CurrentStage] = 'Backup' "
                 + "AND [CurrentBackupAttemptId] IS NULL)");
             table.HasCheckConstraint(
                 "CK_BackupTasks_CompletedAt",
-                "([Status] IN ('Succeeded', 'Failed', 'Cancelled') AND [CompletedAtUtc] IS NOT NULL) OR "
-                + "([Status] NOT IN ('Succeeded', 'Failed', 'Cancelled') AND [CompletedAtUtc] IS NULL)");
+                "([Status] IN ('Succeeded', 'Failed', 'Cancelled', 'ClosedUnknown') AND [CompletedAtUtc] IS NOT NULL) OR "
+                + "([Status] NOT IN ('Succeeded', 'Failed', 'Cancelled', 'ClosedUnknown') AND [CompletedAtUtc] IS NULL)");
             table.HasCheckConstraint(
                 "CK_BackupTasks_CancelledRequest",
                 "[Status] <> 'Cancelled' OR [CancellationRequestedAtUtc] IS NOT NULL");
@@ -392,11 +392,11 @@ internal sealed class BackupTaskStateChangeConfiguration
             table.HasCheckConstraint(
                 "CK_BackupTaskStateChanges_FromState",
                 "([FromStatus] IS NULL AND [FromStage] IS NULL) OR "
-                + "([FromStatus] IN ('Pending', 'Running', 'NeedsAttention', 'Succeeded', 'Failed', 'Cancelled') "
+                + "([FromStatus] IN ('Pending', 'Running', 'NeedsAttention', 'Succeeded', 'Failed', 'Cancelled', 'ClosedUnknown') "
                 + "AND ([FromStatus] = 'Cancelled' OR [FromStage] IS NOT NULL))");
             table.HasCheckConstraint(
                 "CK_BackupTaskStateChanges_ToState",
-                "[ToStatus] IN ('Pending', 'Running', 'NeedsAttention', 'Succeeded', 'Failed', 'Cancelled') "
+                "[ToStatus] IN ('Pending', 'Running', 'NeedsAttention', 'Succeeded', 'Failed', 'Cancelled', 'ClosedUnknown') "
                 + "AND ([ToStatus] = 'Cancelled' OR [ToStage] IS NOT NULL)");
             table.HasCheckConstraint(
                 "CK_BackupTaskStateChanges_Stages",

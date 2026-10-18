@@ -40,6 +40,7 @@ public sealed class TaskStatusChipTests : MudBlazorComponentTest
     [InlineData("Succeeded", "成功")]
     [InlineData("Failed", "失败")]
     [InlineData("Cancelled", "已取消")]
+    [InlineData("ClosedUnknown", "结果未知已结束")]
     public void TaskStatusChipAlwaysShowsChineseTextLabel(string status, string expected)
     {
         var component = Render<TaskStatusChip>(parameters => parameters.Add(chip => chip.Status, status));

@@ -47,6 +47,8 @@ public static class PlanNotificationRules
     {
         BackupTaskStatus.Failed => NotificationType.TaskFailed,
         BackupTaskStatus.NeedsAttention => NotificationType.TaskIndeterminate,
+        // 执行已结束但备份结果未知：仍按结果未知通知，不伪装成明确失败。
+        BackupTaskStatus.ClosedUnknown => NotificationType.TaskIndeterminate,
         _ => null,
     };
 

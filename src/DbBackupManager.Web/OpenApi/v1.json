@@ -6285,7 +6285,8 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "任务运行状态。取值：Pending、Running、NeedsAttention、Succeeded、Failed、Cancelled、ClosedUnknown。ClosedUnknown 表示原调用已独立证明终止，但成功证据不足、缺失或矛盾：执行已结束、备份结果未知，不是明确失败，也不是未调用；系统保留原 Attempt、证据与文件，并继续保守保留恢复与 Retention 资格。"
           },
           "stage": {
             "type": [

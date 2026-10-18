@@ -49,10 +49,7 @@ internal sealed class BackupPlanWorkerStore(IDbContextFactory<PlatformDbContext>
 
         var blocked = await db.BackupInvocationAuthorizations.AsNoTracking()
                 .AnyAsync(item => item.TerminalObservedAtUtc == null, cancellationToken)
-            || await db.BackupAttempts.AsNoTracking().AnyAsync(
-                attempt => attempt.BackupInvocationStatus == BackupInvocationStatus.Running
-                    || attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate,
-                cancellationToken);
+            || await BackupInvocationLiveness.StillPossiblyRunning(db).AnyAsync(cancellationToken);
         if (blocked)
         {
             return new(BackupPlanWorkerSelectionKind.Wait, null);

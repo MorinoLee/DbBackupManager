@@ -88,7 +88,7 @@ internal sealed partial class BackupPlanExecutionStore
                         var authorization = await db.BackupInvocationAuthorizations.SingleOrDefaultAsync(x => x.TaskId == task.Id && x.AttemptId == attempt.Id, cancellationToken);
                         if (authorization is null) return BackupExecutionContractCode.Conflict;
                         if (authorization.TerminalObservedAtUtc is null)
-                            Unknown(task, snapshot, lease, now, "sql.original_call_unterminated");
+                            Unknown(task, snapshot, lease, now, facts.ReasonCode ?? "sql.original_call_unterminated");
                         else Advance(task, snapshot, lease, now);
                     }
                     else Advance(task, snapshot, lease, now);

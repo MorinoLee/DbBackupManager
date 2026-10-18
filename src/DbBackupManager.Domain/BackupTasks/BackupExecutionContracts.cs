@@ -163,6 +163,19 @@ public sealed class BackupPlanExecutionObservation
 
 public enum BackupInvocationBindingState { Unknown, Known }
 public enum BackupInvocationTerminationKind { PlatformCompleted, PlatformConfirmedFailed, RecoveredTerminated }
+
+/// <summary>
+/// 恢复终止探测只有在该原因下才是正向终止。权限不足、可见性不足、读取失败和取消都不能
+/// 被当成原调用已终止，因此也不能解除执行阻塞。
+/// </summary>
+public static class BackupInvocationTerminationEvidenceRules
+{
+    public const string OriginalConnectionClosed = "termination.original_connection_closed";
+
+    public static bool IsPositiveTerminationReason(string? reasonCode) =>
+        string.Equals(reasonCode, OriginalConnectionClosed, StringComparison.Ordinal);
+}
+
 public sealed record BackupInvocationBinding
 {
     public BackupInvocationBindingState State { get; init; }
@@ -214,7 +227,9 @@ public sealed class BackupInvocationAuthorization : ConcurrentEntity
         BackupTaskValues.RequireId(evidenceId, nameof(evidenceId));
         BackupTaskValues.RequireUtc(observedAtUtc, nameof(observedAtUtc));
         if (!Enum.IsDefined(kind) || !originalCallTerminated || !originalCallerCannotInvoke
-            || kind == BackupInvocationTerminationKind.RecoveredTerminated && Binding.State != BackupInvocationBindingState.Known)
+            || kind == BackupInvocationTerminationKind.RecoveredTerminated
+                && (Binding.State != BackupInvocationBindingState.Known || Binding.ConnectionId is null
+                    || Binding.SessionId is not > 0 || Binding.SessionEstablishedLocal is null))
             throw new ArgumentException("缺少原调用终止及旧调用者不可重发的证据。");
         if (TerminalObservedAtUtc is not null)
         {

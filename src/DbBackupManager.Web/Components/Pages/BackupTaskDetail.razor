@@ -100,6 +100,10 @@
                                 </MudStack>
                             </section>
                         }
+                        @if (_detail.Task.Status == "ClosedUnknown")
+                        {
+                            <MudAlert Severity="Severity.Info">执行已结束，但无法证明备份成功，备份结果未知。系统保留原 Attempt、证据与文件，不会重发 BACKUP，也不会把未知结果记成明确失败或未调用。</MudAlert>
+                        }
                         @if (_detail.VerifiedSqlPath is not null)
                         {
                             <MudText Typo="Typo.body2">已验证本地副本：@_detail.VerifiedSqlPath</MudText>

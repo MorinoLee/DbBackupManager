@@ -20,6 +20,10 @@ internal sealed partial class BackupPlanExecutionStore(
 {
     private readonly BackupTaskPersistence _persistence = new(factory);
 
+    private static readonly Action<ILogger, Guid, Guid, string, Exception?> UnknownResultClosed =
+        LoggerMessage.Define<Guid, Guid, string>(LogLevel.Information, new EventId(4201, "PlanUnknownResultClosed"),
+            "计划任务以结果未知收口；任务={TaskId}，Attempt={AttemptId}，原因={ReasonCode}。");
+
     public Task<BackupExecutionContractResult<BackupPlanExecutionSession>> OpenAsync(Guid taskId, Guid requestMutationId,
         bool reconciliationOnly, Guid leaseToken, string owner, DateTimeOffset now, DateTimeOffset expires, CancellationToken cancellationToken = default)
     {
@@ -200,6 +204,77 @@ internal sealed partial class BackupPlanExecutionStore(
             await tx.CommitAsync(cancellationToken);
             return BackupExecutionContractCode.Succeeded;
         }, cancellationToken);
+
+    /// <summary>
+    /// 原调用已独立证明终止，但成功证据不足、缺失或矛盾时的收口：以 ClosedUnknown 结束任务，
+    /// 保留原 Attempt 与全部证据/文件。拒绝无终止授权、身份不完整、仍有任何成功证据的状态。
+    /// </summary>
+    public async Task<BackupExecutionContractCode> CloseUnknownAsync(LeaseHandle lease, Guid terminationMutationId,
+        string reasonCode, DateTimeOffset observedAtUtc, CancellationToken cancellationToken = default)
+    {
+        if (terminationMutationId == Guid.Empty || observedAtUtc.Offset != TimeSpan.Zero || string.IsNullOrWhiteSpace(reasonCode))
+            throw new ArgumentException("结果未知收口请求无效。");
+        return await _persistence.ExecuteWithStrategyAsync(async db =>
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            var snapshot = await db.BackupTaskSnapshots.SingleOrDefaultAsync(x => x.TaskId == lease.TaskId, cancellationToken);
+            if (snapshot is null) return BackupExecutionContractCode.NotFound;
+            await BackupInvocationAuthorizationStore.LockDatabaseAsync(db, snapshot.DatabaseId, cancellationToken);
+            var task = await LockAsync(db, lease.TaskId, cancellationToken);
+            if (task is null) return BackupExecutionContractCode.NotFound;
+            if (!IsOpen(task, snapshot)) return BackupExecutionContractCode.StageNotOpen;
+            var replay = await db.BackupTaskStateChanges.SingleOrDefaultAsync(x => x.MutationId == terminationMutationId, cancellationToken);
+            if (replay is not null)
+                return replay.TaskId == task.Id && replay.ReasonCode == "plan.recovery.close_unknown"
+                    && replay.ToStatus == BackupTaskStatus.ClosedUnknown
+                    ? BackupExecutionContractCode.AlreadyApplied : BackupExecutionContractCode.Conflict;
+            if (lease.Purpose != BackupLeasePurpose.Reconciliation || task.Status != BackupTaskStatus.NeedsAttention
+                || task.CurrentStage != BackupTaskStage.Backup || task.CurrentBackupAttemptId is null)
+                return BackupExecutionContractCode.Conflict;
+            var now = clock.GetUtcNow();
+            if (ValidateLease(task, lease, now) is not null) return BackupExecutionContractCode.LeaseLost;
+            var attempt = await db.BackupAttempts.AsTracking().SingleOrDefaultAsync(
+                x => x.Id == lease.BackupAttemptId && x.TaskId == task.Id, cancellationToken);
+            if (attempt is null || attempt.BackupInvocationStatus is not (BackupInvocationStatus.Running or BackupInvocationStatus.Indeterminate)
+                || attempt.ExpectedDatabaseGuid is null || attempt.ExpectedFamilyGuid is null)
+                return BackupExecutionContractCode.Conflict;
+            var authorization = await db.BackupInvocationAuthorizations.AsTracking().SingleOrDefaultAsync(
+                x => x.TaskId == task.Id && x.AttemptId == attempt.Id, cancellationToken);
+            if (authorization is null || authorization.TerminalObservedAtUtc != observedAtUtc
+                || authorization.TerminationMutationId != terminationMutationId
+                || authorization.TerminationEvidenceId != terminationMutationId
+                || authorization.TerminationKind != BackupInvocationTerminationKind.RecoveredTerminated
+                || authorization.Binding.State != BackupInvocationBindingState.Known
+                || authorization.Binding.ConnectionId is null || authorization.Binding.SessionId is not > 0
+                || authorization.Binding.SessionEstablishedLocal is null)
+                return BackupExecutionContractCode.Conflict;
+            var evidence = await db.BackupPlanExecutionOperations.SingleOrDefaultAsync(x => x.Id == terminationMutationId, cancellationToken);
+            if (evidence is null || evidence.TaskId != task.Id || evidence.AttemptId != attempt.Id
+                || evidence.Kind != BackupExecutionOperationKind.Recovery
+                || evidence.State is not (BackupExecutionOperationState.Frozen or BackupExecutionOperationState.Applied)
+                || evidence.Facts.EvidenceAtUtc != observedAtUtc
+                || !evidence.Facts.OriginalCallTerminated || !evidence.Facts.OriginalCallerCannotInvoke
+                || evidence.Facts.SqlSuccessObserved)
+                return BackupExecutionContractCode.Conflict;
+            // 任何成功证据存在时都不能以未知收口，避免把可恢复的成功覆盖成未知终态。
+            if (await db.BackupPlanExecutionOperations.AnyAsync(x => x.AttemptId == attempt.Id
+                    && x.Kind == BackupExecutionOperationKind.Recovery && x.Facts.SqlSuccessObserved, cancellationToken)
+                || await db.BackupSets.AnyAsync(x => x.AttemptId == attempt.Id, cancellationToken))
+                return BackupExecutionContractCode.Conflict;
+            var before = task.Status;
+            var stage = task.CurrentStage;
+            var evidenceReason = evidence.Facts.ReasonCode ?? reasonCode;
+            task.CloseUnknownResult(snapshot.StorageMode, lease.LeaseToken, now, reasonCode,
+                $"执行已结束，但无法证明备份成功（{evidenceReason}）；保留原 Attempt、证据与文件，不回退为明确失败或未调用。");
+            db.AddRange(CreateStateChange(terminationMutationId, task, before, stage, "plan.recovery.close_unknown", evidenceReason, now),
+                CreateAudit(null, task.Id, "plan.recovery.close_unknown", "unknown", evidenceReason));
+            NotificationOutboxWriter.EnqueuePlanOutcome(db, terminationMutationId, task.Id, stage, task.Status, now, reasonCode);
+            await db.SaveChangesAsync(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+            if (logger is not null) UnknownResultClosed(logger, task.Id, attempt.Id, reasonCode, null);
+            return BackupExecutionContractCode.Succeeded;
+        }, cancellationToken);
+    }
 
     public async Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
         string? outcomeReason = null, CancellationToken cancellationToken = default)
@@ -384,7 +459,8 @@ internal sealed partial class BackupPlanExecutionStore(
 
     /// <summary>
     /// 在计划执行锁下判断是否还有别的执行可能在跑：任意未到期的 Running 租约，
-    /// 或其他数据库仍未终止的调用授权、仍为 Running/Indeterminate 的 Attempt。
+    /// 或其他数据库仍未终止的调用授权、仍可能运行的 Attempt。已记录终止的调用即使 Attempt
+    /// 仍保留 Running/Indeterminate，也不再永久阻塞其他数据库；无授权的遗留调用继续阻塞。
     /// 同库的未终止调用不在这里拒绝，交给授权阶段按数据库拒绝并记成 sql.database_blocked。
     /// </summary>
     private static async Task<bool> AnotherExecutionMayStillBeRunningAsync(
@@ -393,11 +469,9 @@ internal sealed partial class BackupPlanExecutionStore(
             task => task.Status == BackupTaskStatus.Running && task.LeaseExpiresAtUtc > now, cancellationToken)
         || await db.BackupInvocationAuthorizations.AsNoTracking().AnyAsync(
             item => item.TerminalObservedAtUtc == null && item.DatabaseId != databaseId, cancellationToken)
-        || await (from attempt in db.BackupAttempts.AsNoTracking()
+        || await (from attempt in BackupInvocationLiveness.StillPossiblyRunning(db)
                   join snapshot in db.BackupTaskSnapshots.AsNoTracking() on attempt.TaskId equals snapshot.TaskId
-                  where (attempt.BackupInvocationStatus == BackupInvocationStatus.Running
-                         || attempt.BackupInvocationStatus == BackupInvocationStatus.Indeterminate)
-                        && snapshot.DatabaseId != databaseId
+                  where snapshot.DatabaseId != databaseId
                   select attempt.Id).AnyAsync(cancellationToken);
 
     private static bool IsOpen(BackupTask task, BackupTaskSnapshot snapshot) => task.PlanId is not null

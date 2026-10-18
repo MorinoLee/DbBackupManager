@@ -119,8 +119,36 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
                 }, [], token);
             return await _flow.ApplyAsync(session, uninvoked, null, token);
         }
-        if (session.Authorization is null || session.Work.Attempt.ExpectedDatabaseGuid is null || session.Work.Attempt.ExpectedFamilyGuid is null)
-            return await SuspendAsync(session, "sql.original_evidence_missing", token);
+        // 没有授权或没有调用前固定的 SQL 身份：没有可核对的原绑定，继续阻塞。
+        if (session.Authorization is null || session.Work.Attempt.ExpectedDatabaseGuid is null
+            || session.Work.Attempt.ExpectedFamilyGuid is null)
+            return await SuspendAsync(session, "sql.recovery_original_binding_missing", token);
+        // 终止身份必须完整；缺少原连接或会话时间时未知不能冒充终止。
+        if (session.Authorization.Binding.State != BackupInvocationBindingState.Known
+            || session.Authorization.Binding.ConnectionId is null
+            || session.Authorization.Binding.SessionId is not > 0
+            || session.Authorization.Binding.SessionEstablishedLocal is null)
+            return await SuspendAsync(session, "sql.recovery_original_binding_unknown", token);
+
+        var authorization = session.Authorization;
+        // 终止证据已经独立提交：只按原冻结观察继续或收口，不重新探测、不覆盖已确认的成功时间。
+        if (authorization.TerminalObservedAtUtc is { } terminatedAt)
+        {
+            if (authorization.TerminationKind != BackupInvocationTerminationKind.RecoveredTerminated)
+                return await SuspendAsync(session, "sql.recovery_termination_evidence_missing", token);
+            var saved = session.Operations
+                .Where(x => x.Identity.Kind == BackupExecutionOperationKind.Recovery
+                    && x.State is BackupExecutionOperationState.Frozen or BackupExecutionOperationState.Applied
+                    && x.Identity.MutationId == authorization.TerminationEvidenceId
+                    && x.Facts.EvidenceAtUtc == terminatedAt
+                    && x.Facts.OriginalCallTerminated && x.Facts.OriginalCallerCannotInvoke)
+                .OrderByDescending(x => x.Identity.Sequence)
+                .FirstOrDefault();
+            if (saved is null) return await SuspendAsync(session, "sql.recovery_termination_evidence_missing", token);
+            if (saved.Facts.SqlSuccessObserved) return await _flow.ApplyAsync(session, saved, null, token);
+            return await CloseUnknownResultAsync(session, terminatedAt, token);
+        }
+
         var operation = await _flow.ReserveAsync(session, BackupExecutionOperationKind.Recovery, true, token);
         if (operation.State == BackupExecutionOperationState.Reserved)
         {
@@ -129,6 +157,7 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
                 && x.State == BackupExecutionOperationState.Applied && x.Facts.SqlSuccessObserved
                 && x.Facts.SqlOutcomeSource == BackupSqlOutcomeSource.RecoveredEvidence).OrderByDescending(x => x.Identity.Sequence).FirstOrDefault();
             BackupExecutionFacts facts;
+            string? metadataReason = null;
             var observations = new List<BackupExecutionObservationInput>();
             if (previous is not null)
             {
@@ -138,55 +167,114 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
             }
             else
             {
+                // 成功元数据只是成功证据，不再是终止探测的前提；无论是否完整都必须独立探测终止。
                 var prepared = await metadata.PrepareAsync(new(work.Lease, original.Identity.IntendedBackupSetId, work.Snapshot.Identity.DatabaseId,
                     operation.Identity.MutationId, operation.Identity.ObservedAtUtc, ExpectedIdentity(work), Connection(work),
                     new(work.Attempt.Id, work.Snapshot.Identity.DatabaseName, work.Attempt.LocalSqlFilePath,
                         Math.Min(work.Snapshot.Policy.VerifyTimeoutMinutes * 60, 3600)), false, null), token);
                 var command = prepared.Command;
                 var complete = MetadataMatches(work, command.Metadata, command.Assessment, command.BaseBackupSetId, prepared.Evidence, false);
-                if (!complete) return await SuspendAsync(session, "sql.recovery_unknown", token);
-                facts = new()
+                if (complete)
                 {
-                    Outcome = BackupExecutionOutcome.Succeeded,
-                    SqlOutcomeSource = BackupSqlOutcomeSource.RecoveredEvidence,
-                    SqlSuccessObserved = true,
-                    Metadata = command.Metadata,
-                    Completion = command.Completion,
-                    Assessment = command.Assessment,
-                    ActualBaseBackupSetId = command.BaseBackupSetId,
-                    ActiveAssessment = prepared.ActiveBaseline,
-                    UsedCopyOnly = command.Metadata.IsCopyOnly.Value,
-                    UsedChecksum = command.Metadata.HasBackupChecksums.Value,
-                    UsedCompression = command.Metadata.IsCompressed.Value
-                };
+                    facts = new()
+                    {
+                        Outcome = BackupExecutionOutcome.Succeeded,
+                        SqlOutcomeSource = BackupSqlOutcomeSource.RecoveredEvidence,
+                        SqlSuccessObserved = true,
+                        Metadata = command.Metadata,
+                        Completion = command.Completion,
+                        Assessment = command.Assessment,
+                        ActualBaseBackupSetId = command.BaseBackupSetId,
+                        ActiveAssessment = prepared.ActiveBaseline,
+                        UsedCopyOnly = command.Metadata.IsCopyOnly.Value,
+                        UsedChecksum = command.Metadata.HasBackupChecksums.Value,
+                        UsedCompression = command.Metadata.IsCompressed.Value
+                    };
+                }
+                else
+                {
+                    // 证据不足、缺失或矛盾时只记录未知结果，不得反推 SQL 明确失败或未调用，也不制造成功。
+                    metadataReason = MetadataFailureReason(prepared.Evidence);
+                    facts = new()
+                    {
+                        Outcome = BackupExecutionOutcome.Unknown,
+                        SqlOutcomeSource = BackupSqlOutcomeSource.RecoveredEvidence,
+                        Metadata = command.Metadata,
+                        Completion = command.Completion,
+                        Assessment = command.Assessment,
+                        ActiveAssessment = prepared.ActiveBaseline,
+                        ActualBaseBackupSetId = command.BaseBackupSetId,
+                        ReasonCode = metadataReason
+                    };
+                }
                 observations.AddRange(command.Observations.Select((x, i) => new BackupExecutionObservationInput(i,
                     Enum.Parse<BackupExecutionObservationSource>(x.Source.ToString()), x.Kind,
-                    new() { Metadata = x.Metadata, Completion = x.Completion, Assessment = x.Assessment, SqlSuccessObserved = true })));
+                    new() { Metadata = x.Metadata, Completion = x.Completion, Assessment = x.Assessment, SqlSuccessObserved = complete })));
             }
-            var ended = await termination.ReadAsync(Connection(work), session.Authorization.PermitId, session.Authorization.Binding,
+            var ended = await termination.ReadAsync(Connection(work), authorization.PermitId, authorization.Binding,
                 Math.Min(work.Snapshot.Policy.VerifyTimeoutMinutes * 60, 3600), token);
-            var terminal = ended.State == TargetSqlInvocationTerminationState.Terminated;
+            var terminal = ended.State == TargetSqlInvocationTerminationState.Terminated
+                && BackupInvocationTerminationEvidenceRules.IsPositiveTerminationReason(ended.ReasonCode);
+            if (!terminal && !facts.SqlSuccessObserved)
+                return await SuspendAsync(session, TerminationBlockReason(ended), token);
             facts = facts with
             {
                 EvidenceAtUtc = clock.GetUtcNow(),
                 OriginalCallTerminated = terminal,
-                OriginalCallerCannotInvoke = terminal
+                OriginalCallerCannotInvoke = terminal,
+                ReasonCode = facts.SqlSuccessObserved ? terminal ? null : TerminationBlockReason(ended) : metadataReason
             };
             observations.Add(new(observations.Count, BackupExecutionObservationSource.Termination, BackupSetEvidenceKind.Backup,
                 new() { OriginalCallTerminated = terminal, OriginalCallerCannotInvoke = terminal, ReasonCode = ended.ReasonCode }));
             operation = await _flow.FreezeAsync(session, operation, facts, observations, token);
         }
-        if (operation.Facts.OriginalCallTerminated && operation.Facts.OriginalCallerCannotInvoke && session.Authorization.TerminalObservedAtUtc is null)
+        if (operation.Facts.OriginalCallTerminated && operation.Facts.OriginalCallerCannotInvoke)
         {
-            session = await _flow.FreshAsync(session, token);
-            var command = new TerminateBackupInvocation(session.Authorization!.PermitId,
-                operation.Identity.MutationId, operation.Identity.MutationId, BackupInvocationTerminationKind.RecoveredTerminated,
-                operation.Facts.EvidenceAtUtc!.Value, true, true);
-            var ended = await _flow.CommitAsync(session, next => authorizations.RecordTerminationAsync(next.Work.Lease, command, token), x => x.Code, token);
-            Require(ended.Code);
+            if (session.Authorization.TerminalObservedAtUtc is null)
+            {
+                session = await _flow.FreshAsync(session, token);
+                var command = new TerminateBackupInvocation(session.Authorization!.PermitId,
+                    operation.Identity.MutationId, operation.Identity.MutationId, BackupInvocationTerminationKind.RecoveredTerminated,
+                    operation.Facts.EvidenceAtUtc!.Value, true, true);
+                var recorded = await _flow.CommitAsync(session, next => authorizations.RecordTerminationAsync(next.Work.Lease, command, token), x => x.Code, token);
+                Require(recorded.Code);
+            }
+            // 原调用已终止，但没有可证明的成功证据：独立登记终止后以未知结果收口，不再走成功阶段。
+            if (!operation.Facts.SqlSuccessObserved)
+                return await CloseUnknownResultAsync(session, operation.Facts.EvidenceAtUtc!.Value, token);
         }
         return await _flow.ApplyAsync(session, operation, null, token);
     }
+
+    private async Task<BackupExecutionContractCode> CloseUnknownResultAsync(BackupPlanExecutionSession session,
+        DateTimeOffset observedAtUtc, CancellationToken token)
+    {
+        session = await _flow.FreshAsync(session, token);
+        // 关单身份使用已记录的终止 MutationId；同一证据的响应丢失或重复核对不产生第二次历史或通知。
+        var mutationId = session.Authorization?.TerminationMutationId
+            ?? throw new PlanExecutionConflictException(BackupExecutionContractCode.Conflict);
+        var code = await _flow.CommitAsync(session, next => store.CloseUnknownAsync(next.Work.Lease,
+            mutationId, "sql.recovery_result_unknown_closed", observedAtUtc, token), x => x, token);
+        Require(code);
+        return code;
+    }
+
+    private static string TerminationBlockReason(TargetSqlInvocationTerminationEvidence evidence) =>
+        evidence.State == TargetSqlInvocationTerminationState.Active
+            ? "sql.recovery_original_call_active"
+            : evidence.ReasonCode switch
+            {
+                "termination.permission_denied" => "sql.recovery_termination_permission_denied",
+                "termination.binding_unknown" => "sql.recovery_original_binding_unknown",
+                _ => "sql.recovery_termination_read_failed"
+            };
+
+    private static string MetadataFailureReason(TargetSqlBackupMetadataEvidence? evidence) =>
+        evidence is not null && evidence.Header.Status == BaselineEvidenceStatus.Complete
+            && evidence.History.Status == BaselineEvidenceStatus.Complete
+            && evidence.Header.Issues.Count == 0 && evidence.History.Issues.Count == 0
+            ? "sql.recovery_metadata_conflict"
+            : "sql.recovery_metadata_insufficient";
 
     private async Task<BackupExecutionContractCode> VerifyLocalAsync(BackupPlanExecutionSession session, CancellationToken token)
     {

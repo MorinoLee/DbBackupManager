@@ -26,6 +26,14 @@ public interface IBackupPlanExecutionStore
     Task<BackupExecutionContractCode> SuspendAsync(LeaseHandle lease, Guid mutationId, string reason,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 原调用已独立证明终止、但成功证据不足、缺失或矛盾时，以“执行已结束、备份结果未知”终态收口。
+    /// 要求终止证据已绑定原授权；保留原 Attempt、证据与文件，不登记成功基线，不重发 BACKUP。
+    /// MutationId 使用终止证据的稳定标识，重复提交与响应丢失按原事实重放。
+    /// </summary>
+    Task<BackupExecutionContractCode> CloseUnknownAsync(LeaseHandle lease, Guid terminationMutationId,
+        string reasonCode, DateTimeOffset observedAtUtc, CancellationToken cancellationToken = default);
+
     /// <summary>结束 RemoteOnly 的 Cleanup。保留暂存时不要求文件已删除，并记下具体保护原因；释放时必须已有清理证据。</summary>
     Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
         string? outcomeReason = null, CancellationToken cancellationToken = default);

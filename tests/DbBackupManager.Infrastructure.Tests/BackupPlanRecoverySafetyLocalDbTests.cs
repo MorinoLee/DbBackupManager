@@ -104,7 +104,8 @@ public sealed class BackupPlanRecoverySafetyLocalDbTests(PlatformDatabaseSqlServ
             Assert.Equal(BackupExecutionContractCode.Succeeded, await test.Reconciler.ReconcilePlanTaskOnceAsync(request));
             Assert.Equal(1, test.TerminationReads); // Frozen 回放不另取终止读数。
             sqlMetadataReads = test.MetadataReads;
-            var saved = await AssertWaitingAsync(taskId);
+            var saved = await AssertWaitingAsync(taskId, lackPermission
+                ? "sql.recovery_termination_permission_denied" : "sql.recovery_original_call_active");
             attemptId = saved.AttemptId;
             originalSuccessTime = saved.FinishedAtUtc;
             firstObservation = saved.Observation;
@@ -161,13 +162,14 @@ public sealed class BackupPlanRecoverySafetyLocalDbTests(PlatformDatabaseSqlServ
         Assert.Equal(0, test.PlanDeletions);
     }
 
-    private async Task<(Guid AttemptId, DateTimeOffset? FinishedAtUtc, FrozenBackupExecutionOperation Observation)> AssertWaitingAsync(Guid taskId)
+    private async Task<(Guid AttemptId, DateTimeOffset? FinishedAtUtc, FrozenBackupExecutionOperation Observation)> AssertWaitingAsync(
+        Guid taskId, string expectedReason)
     {
         await using var db = platform.CreateContext();
         var task = await db.BackupTasks.SingleAsync(x => x.Id == taskId);
         Assert.Equal(BackupTaskStatus.NeedsAttention, task.Status);
         Assert.Equal(BackupTaskStage.Backup, task.CurrentStage);
-        Assert.Equal("sql.original_call_unterminated", task.ErrorCode);
+        Assert.Equal(expectedReason, task.ErrorCode);
         var attempt = await db.BackupAttempts.SingleAsync(x => x.TaskId == taskId);
         Assert.Equal(BackupInvocationStatus.Succeeded, attempt.BackupInvocationStatus);
         Assert.Null((await db.BackupInvocationAuthorizations.SingleAsync(x => x.TaskId == taskId)).TerminalObservedAtUtc);

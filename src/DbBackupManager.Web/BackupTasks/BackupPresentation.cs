@@ -35,6 +35,7 @@ internal static class BackupPresentation
         "reconciliation.inconclusive" => "核对证据不足，继续等待",
         "admin_reconciliation_requested" => "管理员已请求重新核对",
         "admin.confirmed_failed" => "管理员核对证据后确认本阶段失败",
+        "plan.recovery.close_unknown" => "原调用已终止但备份结果未知，执行已结束",
         _ => "状态已更新",
     };
 
@@ -57,6 +58,15 @@ internal static class BackupPresentation
         "admin_confirmed_failed" => "管理员已核对证据并确认本阶段失败；处理原因后可单独提交重试。",
         "backup_path_invalid" => "完整备份路径或路径规则无效，任务未开始执行。请缩短目录或名称，并以修正后的配置创建新任务。",
         "baseline_required" => "还没有已核对的受管完整备份基线，该差异备份已结束，不会改成完整备份，也不会当作未调用失败重试。",
+        "sql.recovery_result_unknown_closed" => "原 SQL 调用已终止，但无法证明备份成功。执行已结束，备份结果未知；已保留原 Attempt、文件与证据，不会重发 BACKUP，也不记成明确失败或未调用。",
+        "sql.recovery_metadata_insufficient" => "备份头或 msdb 历史不足，无法证明备份成功。任务保持待核对，不会只凭缺失文件反推未执行或明确失败。",
+        "sql.recovery_metadata_conflict" => "备份头、msdb 历史或数据库身份互相矛盾，无法证明备份成功。任务保持待核对并保留执行阻塞。",
+        "sql.recovery_original_call_active" => "原 SQL 调用仍可能继续执行，任务保持待核对并保留执行阻塞；不会重发 BACKUP。",
+        "sql.recovery_termination_permission_denied" => "终止探测缺少 DMV 可见权限，无法证明原调用已终止。任务保持待核对，执行阻塞不会解除。",
+        "sql.recovery_termination_read_failed" => "终止探测读取失败、超时或取消，无法证明原调用已终止。任务保持待核对，执行阻塞不会解除。",
+        "sql.recovery_original_binding_missing" => "缺少原调用授权或调用前固定身份，无法核对终止。任务保持待核对并保留执行阻塞。",
+        "sql.recovery_original_binding_unknown" => "原调用会话身份不完整，无法可靠识别原连接。任务保持待核对，未知不会冒充终止。",
+        "sql.recovery_termination_evidence_missing" => "授权已经记录终止，但找不到对应的冻结证据。任务保持待核对，不会重发 BACKUP。",
         "smb_credential_unavailable" => "无法加载文件访问凭据，尚未进行 SMB 登录。请检查凭据启用状态及 Web、Worker 的共享业务密钥配置。",
         "smb_credential_reference_invalid" => "文件访问凭据不存在、已停用或类型不匹配，请检查凭据配置。",
         "smb_credential_version_unsupported" => "文件凭据保护格式不受支持，请通过凭据页面重新保存密码。",
@@ -77,7 +87,7 @@ internal static class BackupPresentation
         _ => (503, "backup_unavailable", "备份管理暂不可用，请稍后重试。"),
     };
     public static string State(string value) => value switch
-    { "Pending" => "等待执行", "Running" => "执行中", "NeedsAttention" => "待核对", "Succeeded" => "成功", "Failed" => "失败", "Cancelled" => "已取消", _ => value };
+    { "Pending" => "等待执行", "Running" => "执行中", "NeedsAttention" => "待核对", "Succeeded" => "成功", "Failed" => "失败", "Cancelled" => "已取消", "ClosedUnknown" => "结果未知已结束", _ => value };
     public static string Stage(string? value) => value switch
     { "Backup" => "生成备份", "VerifyLocal" => "本地校验", "Transfer" => "传输", "ValidateCopy" => "副本校验", "Cleanup" => "清理", _ => "—" };
 }
