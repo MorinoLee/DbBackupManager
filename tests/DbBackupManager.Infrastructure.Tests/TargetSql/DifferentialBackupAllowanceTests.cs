@@ -9,12 +9,26 @@ namespace DbBackupManager.Infrastructure.Tests.TargetSql;
 public sealed class DifferentialBackupAllowanceTests
 {
     [Theory]
-    [InlineData("10.50.1600.1")]
-    [InlineData("15.0.2000.5")]
-    [InlineData("16.0.1000.6")]
-    public void BuiltInListStartsEmpty(string productVersion)
+    [InlineData("13.0.5026.0", true)]
+    [InlineData("13.0.9999.1", true)]
+    [InlineData("10.50.1600.1", false)]
+    [InlineData("14.0.1000.1", false)]
+    [InlineData("15.0.2000.5", false)]
+    [InlineData("16.0.1000.6", false)]
+    public void BuiltInAllowanceAcceptsOnlyRegisteredSqlServer2016(string productVersion, bool allowed)
     {
-        Assert.False(DifferentialBackupAllowance.None.Allows(Server(productVersion)));
+        Assert.Equal(allowed, DifferentialBackupAllowance.None.Allows(Server(productVersion)));
+    }
+
+    [Fact]
+    public void BuiltInAllowanceDoesNotRecordTemporaryConfigurationAllowance()
+    {
+        var logger = new RecordingLogger();
+        var allowance = new DifferentialBackupAllowance(new ConfigurationBuilder().Build(), logger);
+
+        Assert.True(allowance.Allows(Server("13.0.5026.0")));
+        Assert.Empty(logger.Messages);
+        Assert.Empty(logger.EventIds);
     }
 
     [Theory]

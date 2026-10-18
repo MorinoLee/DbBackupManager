@@ -28,6 +28,20 @@ public sealed class SqlClientTargetSqlBackupExecutorTests
         Assert.True(session.IsDisposed);
     }
 
+    [Fact]
+    public async Task BuiltInSqlServer2016DifferentialExecutesWithoutConfigurationOverride()
+    {
+        var session = new StubBackupSession(SqlServer2016());
+        var executor = new SqlClientTargetSqlBackupExecutor(
+            StubCredentialResolver.Succeeded(), new StubBackupSessionFactory(session));
+
+        var result = await executor.ExecuteBackupAsync(CreateConnection(), PlanRequest(BackupRunPurpose.PlanDifferential));
+
+        Assert.True(result.IsSucceeded, result.Failure?.ToString());
+        Assert.Equal(1, session.BackupInvocationCount);
+        Assert.Equal(1, session.ServerReadCount);
+    }
+
     [Theory]
     [InlineData(BackupRunPurpose.PlanFull, BackupType.Full, false)]
     [InlineData(BackupRunPurpose.AdHocCopyOnlyFull, BackupType.Full, true)]
@@ -302,6 +316,17 @@ public sealed class SqlClientTargetSqlBackupExecutorTests
             useChecksum: true,
             useCompression,
             commandTimeoutSeconds: 600);
+    }
+
+    private static TargetSqlServerInfo SqlServer2016()
+    {
+        return new TargetSqlServerInfo(
+            "13.0.5026.0",
+            "SP2",
+            "Synthetic Edition",
+            EngineEdition: 3,
+            MajorVersion: 13,
+            SupportsBackupCompression: true);
     }
 
     private static TargetSqlServerInfo SupportedServer(bool supportsCompression = true)
