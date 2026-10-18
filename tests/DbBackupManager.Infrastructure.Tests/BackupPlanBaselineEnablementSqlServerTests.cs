@@ -389,11 +389,13 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
             var migrations = db.Database.GetMigrations().ToArray();
             var current = migrations.Single(name => name.EndsWith("_AddBackupPlanBaselineEnablements", StringComparison.Ordinal));
             var previous = migrations[Array.IndexOf(migrations, current) - 1];
+            var migrator = db.Database.GetService<IMigrator>();
+            // 本任务在顶端新增了 ClosedUnknown 迁移；先安全回退它，隔离下面要验证的 Down 守卫。
+            await migrator.MigrateAsync(migrations[^2]);
             var graph = await SeedAsync(isolated);
             var plan = await AddPlanAsync(isolated, graph, BackupPlanMode.FullAndDifferential, paused: false);
             Assert.Equal(BackupPlanBaselineSupplementCode.Queued, (await SupplementAsync(isolated, plan.Id, Guid.NewGuid(), graph.Actor)).Code);
 
-            var migrator = db.Database.GetService<IMigrator>();
             var historyAtLatest = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var blocked = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(current));
             Assert.Equal(51011, blocked.Number);
@@ -428,6 +430,9 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
             var migrations = db.Database.GetMigrations().ToArray();
             var current = migrations.Single(name => name.EndsWith("_AddBackupPlanEnablementSequenceAndBaselineTrigger", StringComparison.Ordinal));
             var previous = migrations[Array.IndexOf(migrations, current) - 1];
+            var migrator = db.Database.GetService<IMigrator>();
+            // 本任务在顶端新增了 ClosedUnknown 迁移；先安全回退它，隔离下面要验证的 Down 守卫。
+            await migrator.MigrateAsync(current);
             var graph = await SeedAsync(isolated);
             var plan = await AddPlanAsync(isolated, graph, BackupPlanMode.FullAndDifferential, paused: false);
             Assert.Equal(BackupPlanBaselineSupplementCode.Queued, (await SupplementAsync(isolated, plan.Id, Guid.NewGuid(), graph.Actor)).Code);
@@ -440,7 +445,6 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
                 first.EnablementSequence + 1, Guid.NewGuid(), null, BackupPlanBaselineEnablementDecision.SkippedOutstandingFull));
             await db.SaveChangesAsync();
 
-            var migrator = db.Database.GetService<IMigrator>();
             var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
             Assert.Equal(51010, error.Number);

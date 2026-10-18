@@ -1,5 +1,6 @@
 using System.Data;
 using DbBackupManager.Application.BackupTasks;
+using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
 using Microsoft.EntityFrameworkCore;
 
@@ -81,11 +82,9 @@ internal sealed class BackupInvocationAuthorizationStore(IDbContextFactory<Platf
         if (attempt is null || attempt.BackupInvocationStatus != BackupInvocationStatus.Prepared
             || !attempt.RowVersion.SequenceEqual(command.AttemptRowVersion)) return new(BackupExecutionContractCode.Conflict);
         var blocked = await context.BackupInvocationAuthorizations.AnyAsync(x => x.DatabaseId == command.DatabaseId && x.TerminalObservedAtUtc == null, token)
-            || await (from prior in context.BackupAttempts
+            || await (from prior in BackupInvocationLiveness.StillPossiblyRunning(context)
                       join priorSnapshot in context.BackupTaskSnapshots on prior.TaskId equals priorSnapshot.TaskId
                       where priorSnapshot.DatabaseId == command.DatabaseId
-                          && (prior.BackupInvocationStatus == BackupInvocationStatus.Running || prior.BackupInvocationStatus == BackupInvocationStatus.Indeterminate)
-                          && !context.BackupInvocationAuthorizations.Any(x => x.TaskId == prior.TaskId && x.AttemptId == prior.Id)
                       select prior.Id).AnyAsync(token);
         if (blocked) return new(BackupExecutionContractCode.DatabaseBlocked);
         if (task.PlanId is not null && (attempt.ExpectedDatabaseGuid is null || attempt.ExpectedFamilyGuid is null
@@ -183,30 +182,8 @@ internal sealed class BackupInvocationAuthorizationStore(IDbContextFactory<Platf
                         || evidence.Facts.Outcome != BackupExecutionOutcome.ConfirmedFailed
                             && !(evidence.Facts.Outcome == BackupExecutionOutcome.Cancelled && evidence.Facts.SqlOutcomeSource == BackupSqlOutcomeSource.NotInvoked))
                 || command.Kind == BackupInvocationTerminationKind.RecoveredTerminated
-                    && (evidence.Kind != BackupExecutionOperationKind.Recovery || !evidence.Facts.SqlSuccessObserved
-                        || evidence.Facts.Metadata.BackupSetGuid.State != Domain.BackupSets.BackupMetadataState.Known))
+                    && !await RecoveredTerminationMatchesAsync(context, authorization, evidence, cancellationToken))
                 return new BackupExecutionContractResult<BackupInvocationAuthorizationModel>(BackupExecutionContractCode.Conflict);
-            if (command.Kind == BackupInvocationTerminationKind.RecoveredTerminated)
-            {
-                var original = await context.BackupAttempts.SingleAsync(x => x.Id == authorization.AttemptId, cancellationToken);
-                var observations = await context.BackupPlanExecutionObservations.Where(x => x.OperationId == evidence.Id).ToArrayAsync(cancellationToken);
-                var header = observations.Where(x => x.Source == BackupExecutionObservationSource.BackupHeader && x.Kind == Domain.BackupSets.BackupSetEvidenceKind.Backup).ToArray();
-                var history = observations.Where(x => x.Source == BackupExecutionObservationSource.Msdb && x.Kind == Domain.BackupSets.BackupSetEvidenceKind.Backup).ToArray();
-                if (evidence.Facts.SqlOutcomeSource != BackupSqlOutcomeSource.RecoveredEvidence
-                    || original.ExpectedDatabaseGuid is null || original.ExpectedFamilyGuid is null
-                    || evidence.Facts.Metadata.DatabaseGuid.Value != original.ExpectedDatabaseGuid
-                    || evidence.Facts.Metadata.FamilyGuid.Value != original.ExpectedFamilyGuid
-                    || header.Length != 1 || history.Length != 1
-                    || header[0].Facts.Metadata.BackupSetGuid != evidence.Facts.Metadata.BackupSetGuid
-                    || history[0].Facts.Metadata.BackupSetGuid != evidence.Facts.Metadata.BackupSetGuid
-                    || header[0].Facts.Metadata.DatabaseGuid != evidence.Facts.Metadata.DatabaseGuid
-                    || history[0].Facts.Metadata.DatabaseGuid != evidence.Facts.Metadata.DatabaseGuid
-                    || header[0].Facts.Metadata.FamilyGuid != evidence.Facts.Metadata.FamilyGuid
-                    || history[0].Facts.Metadata.FamilyGuid != evidence.Facts.Metadata.FamilyGuid
-                    || !observations.Any(x => x.Source == BackupExecutionObservationSource.Termination
-                        && x.Facts.OriginalCallTerminated && x.Facts.OriginalCallerCannotInvoke))
-                    return new BackupExecutionContractResult<BackupInvocationAuthorizationModel>(BackupExecutionContractCode.Conflict);
-            }
             try
             {
                 authorization.RecordTermination(command.MutationId, command.EvidenceId, command.Kind,
@@ -217,6 +194,47 @@ internal sealed class BackupInvocationAuthorizationStore(IDbContextFactory<Platf
             await transaction.CommitAsync(cancellationToken);
             return new BackupExecutionContractResult<BackupInvocationAuthorizationModel>(BackupExecutionContractCode.Succeeded, Model(authorization));
         });
+    }
+
+    /// <summary>
+    /// 恢复终止只接受正向终止观察，并要求原绑定身份完整。终止提交本身不要求成功备份头或 msdb：
+    /// 成功证据不足、缺失或矛盾同样可以独立记录终止，随后由结果未知终态收口。
+    /// 但一旦观察声称 SQL 成功，仍要求完整一致的头/历史与预期身份，避免用终止记录制造成功。
+    /// </summary>
+    private static async Task<bool> RecoveredTerminationMatchesAsync(PlatformDbContext context,
+        BackupInvocationAuthorization authorization, BackupPlanExecutionOperation evidence, CancellationToken token)
+    {
+        if (authorization.Binding.State != BackupInvocationBindingState.Known || authorization.Binding.ConnectionId is null
+            || authorization.Binding.SessionId is not > 0 || authorization.Binding.SessionEstablishedLocal is null
+            || evidence.Kind != BackupExecutionOperationKind.Recovery
+            || evidence.Facts.SqlOutcomeSource != BackupSqlOutcomeSource.RecoveredEvidence)
+            return false;
+        var observations = await context.BackupPlanExecutionObservations.Where(x => x.OperationId == evidence.Id).ToArrayAsync(token);
+        var termination = observations.Where(x => x.Source == BackupExecutionObservationSource.Termination).ToArray();
+        if (termination.Length != 1 || !termination[0].Facts.OriginalCallTerminated || !termination[0].Facts.OriginalCallerCannotInvoke
+            || !BackupInvocationTerminationEvidenceRules.IsPositiveTerminationReason(termination[0].Facts.ReasonCode))
+            return false;
+        if (!evidence.Facts.SqlSuccessObserved)
+        {
+            // 不制造成功，也不把未知改写成 SQL 明确失败或未调用。
+            return evidence.Facts.Outcome == BackupExecutionOutcome.Unknown;
+        }
+
+        var original = await context.BackupAttempts.SingleAsync(x => x.Id == authorization.AttemptId, token);
+        var header = observations.Where(x => x.Source == BackupExecutionObservationSource.BackupHeader && x.Kind == BackupSetEvidenceKind.Backup).ToArray();
+        var history = observations.Where(x => x.Source == BackupExecutionObservationSource.Msdb && x.Kind == BackupSetEvidenceKind.Backup).ToArray();
+        return evidence.Facts.Outcome == BackupExecutionOutcome.Succeeded
+            && evidence.Facts.Metadata.BackupSetGuid.State == BackupMetadataState.Known
+            && original.ExpectedDatabaseGuid is not null && original.ExpectedFamilyGuid is not null
+            && evidence.Facts.Metadata.DatabaseGuid.Value == original.ExpectedDatabaseGuid
+            && evidence.Facts.Metadata.FamilyGuid.Value == original.ExpectedFamilyGuid
+            && header.Length == 1 && history.Length == 1
+            && header[0].Facts.Metadata.BackupSetGuid == evidence.Facts.Metadata.BackupSetGuid
+            && history[0].Facts.Metadata.BackupSetGuid == evidence.Facts.Metadata.BackupSetGuid
+            && header[0].Facts.Metadata.DatabaseGuid == evidence.Facts.Metadata.DatabaseGuid
+            && history[0].Facts.Metadata.DatabaseGuid == evidence.Facts.Metadata.DatabaseGuid
+            && header[0].Facts.Metadata.FamilyGuid == evidence.Facts.Metadata.FamilyGuid
+            && history[0].Facts.Metadata.FamilyGuid == evidence.Facts.Metadata.FamilyGuid;
     }
 
     internal static bool Matches(BackupInvocationAuthorizationModel saved, LeaseHandle lease, AuthorizeBackupInvocation command) =>

@@ -66,7 +66,7 @@ internal sealed class BackupInvocationAuthorizationConfiguration : IEntityTypeCo
                 "([TerminalObservedAtUtc] IS NULL AND [TerminationKind] IS NULL AND [TerminationEvidenceId] IS NULL AND [TerminationMutationId] IS NULL) OR "
                 + "([TerminalObservedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[TerminalObservedAtUtc]) = 0 "
                 + "AND [TerminationKind] IS NOT NULL AND [TerminationKind] IN ('PlatformCompleted','PlatformConfirmedFailed','RecoveredTerminated') "
-                + "AND ([TerminationKind] <> 'RecoveredTerminated' OR [BindingState] = 'Known') "
+                + "AND ([TerminationKind] <> 'RecoveredTerminated' OR ([BindingState] = 'Known' AND [ConnectionId] IS NOT NULL)) "
                 + "AND [TerminationEvidenceId] IS NOT NULL AND [TerminationEvidenceId] <> '00000000-0000-0000-0000-000000000000' "
                 + "AND [TerminationMutationId] IS NOT NULL AND [TerminationMutationId] <> '00000000-0000-0000-0000-000000000000')");
         });

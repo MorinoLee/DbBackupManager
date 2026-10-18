@@ -226,6 +226,9 @@ public sealed class PlanRemoteStagingCleanerTests
         public Task<BackupExecutionContractCode> ReleaseDeferredCleanupForExecutionAsync(LeaseHandle lease, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        public Task<BackupExecutionContractCode> CloseUnknownAsync(LeaseHandle lease, Guid terminationMutationId, string reasonCode,
+            DateTimeOffset observedAtUtc, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
         public Task<BackupExecutionContractResult<BackupPlanExecutionSession>> OpenAsync(Guid taskId, Guid requestMutationId, bool reconciliationOnly, Guid leaseToken, string owner, DateTimeOffset now, DateTimeOffset expires, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<BackupPlanExecutionSession?> RefreshAsync(Guid taskId, Guid leaseToken, CancellationToken cancellationToken = default) =>
             Task.FromResult<BackupPlanExecutionSession?>(null);

@@ -88,6 +88,7 @@ builder.Services.AddOpenApi("v1", options =>
 {
     options.AddDocumentTransformer<AuthenticationOpenApiTransformer>();
     options.AddOperationTransformer<AuthenticationOpenApiTransformer>();
+    options.AddDocumentTransformer<DbBackupManager.Web.BackupTasks.BackupStatusOpenApiTransformer>();
 });
 builder.Services.AddPlatformDatabase(builder.Configuration);
 builder.Services.AddPlatformDatabaseReadiness();

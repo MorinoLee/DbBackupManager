@@ -205,6 +205,23 @@ public static class BackupTaskStateMachine
         return state;
     }
 
+    /// <summary>
+    /// 原调用已独立证明终止，但成功证据不足、缺失或矛盾：执行已结束、备份结果未知。
+    /// 这是独立终态，不借用明确失败或未调用。
+    /// </summary>
+    public static BackupTaskExecutionState CloseUnknownResult(
+        BackupTaskExecutionState state,
+        BackupStorageMode storageMode)
+    {
+        EnsureState(state, storageMode, BackupTaskStatus.NeedsAttention);
+        if (state.CurrentStage != BackupTaskStage.Backup)
+        {
+            throw new InvalidOperationException("只有 Backup 阶段的结果未知可以独立收口。");
+        }
+
+        return new BackupTaskExecutionState(BackupTaskStatus.ClosedUnknown, state.CurrentStage);
+    }
+
     public static BackupTaskRetryTransition RetryFailed(
         BackupTaskExecutionState state,
         BackupStorageMode storageMode)

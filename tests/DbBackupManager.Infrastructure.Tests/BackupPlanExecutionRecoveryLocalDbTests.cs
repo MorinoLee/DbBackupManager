@@ -36,8 +36,8 @@ public sealed class BackupPlanExecutionRecoveryLocalDbTests(PlatformDatabaseSqlS
     [InlineData("RenameAndVerifyAsync", null)]
     public async Task LostCommitResponseUsesOriginalAttemptAndReadOnlyRecovery(string point, string? kind)
     {
-        // 授权响应丢失时 BACKUP 从未发出，原调用绑定未知，授权会一直保持未终止并按设计挡住其他库的认领。
-        // 这个场景用独立平台库，避免它留下的未终止授权影响同一夹具里的后续场景。
+        // 授权响应丢失时 BACKUP 从未发出，原连接在异常展开时关闭。终止探测不依赖成功元数据：
+        // 任务以结果未知收口，不再永久保留未终止授权阻塞其他库的认领。
         if (point != "AuthorizeAsync") { await RunLostCommitResponseAsync(platform, point, kind); return; }
         var isolated = new PlatformDatabaseSqlServerFixture();
         try { await isolated.InitializeAsync(); await RunLostCommitResponseAsync(isolated, point, kind); }
@@ -82,8 +82,10 @@ public sealed class BackupPlanExecutionRecoveryLocalDbTests(PlatformDatabaseSqlS
             Assert.Equal(1, await db.BackupAttempts.CountAsync(x => x.TaskId == taskId));
             if (point == "AuthorizeAsync")
             {
-                Assert.Equal(BackupTaskStatus.NeedsAttention, task.Status);
-                Assert.Null((await db.BackupInvocationAuthorizations.SingleAsync(x => x.AttemptId == attemptId)).TerminalObservedAtUtc);
+                // 缺失文件/msdb 不能反推未调用；已证明终止但无成功证据时以 ClosedUnknown 收口。
+                Assert.Equal(BackupTaskStatus.ClosedUnknown, task.Status);
+                Assert.Equal("sql.recovery_result_unknown_closed", task.ErrorCode);
+                Assert.NotNull((await db.BackupInvocationAuthorizations.SingleAsync(x => x.AttemptId == attemptId)).TerminalObservedAtUtc);
                 Assert.Equal(0, originalCalls);
             }
             recoveryStatus = task.Status;

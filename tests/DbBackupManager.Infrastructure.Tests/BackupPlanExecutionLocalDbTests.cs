@@ -606,6 +606,9 @@ internal sealed class PlanExecutionTestEnvironment : IAsyncDisposable, ITargetSq
             CancellationToken cancellationToken = default) => inner.ApplyAsync(lease, identity, protectedFile, protectedDependency, cancellationToken);
         public Task<BackupExecutionContractCode> SuspendAsync(LeaseHandle lease, Guid mutationId, string reason,
             CancellationToken cancellationToken = default) => inner.SuspendAsync(lease, mutationId, reason, cancellationToken);
+        public Task<BackupExecutionContractCode> CloseUnknownAsync(LeaseHandle lease, Guid terminationMutationId,
+            string reasonCode, DateTimeOffset observedAtUtc, CancellationToken cancellationToken = default) =>
+            inner.CloseUnknownAsync(lease, terminationMutationId, reasonCode, observedAtUtc, cancellationToken);
         public Task<BackupExecutionContractCode> CompleteRemoteCleanupAsync(LeaseHandle lease, bool retained,
             string? outcomeReason = null, CancellationToken cancellationToken = default) =>
             inner.CompleteRemoteCleanupAsync(lease, retained, outcomeReason, cancellationToken);

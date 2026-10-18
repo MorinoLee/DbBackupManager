@@ -268,7 +268,8 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
             {
                 State = BackupInvocationBindingState.Known,
                 SessionId = 51,
-                SessionEstablishedLocal = new DateTime(2026, 10, 8, 0, 0, 0, DateTimeKind.Unspecified)
+                SessionEstablishedLocal = new DateTime(2026, 10, 8, 0, 0, 0, DateTimeKind.Unspecified),
+                ConnectionId = Guid.NewGuid()
             }
         };
         var grant = await coordinator.AuthorizeAsync(work.Lease, command);
@@ -285,9 +286,10 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
             OriginalCallTerminated = true,
             OriginalCallerCannotInvoke = true
         };
+        var termination = facts with { ReasonCode = BackupInvocationTerminationEvidenceRules.OriginalConnectionClosed };
         List<BackupExecutionObservationInput> observations = [new(0, BackupExecutionObservationSource.BackupHeader, BackupSetEvidenceKind.Backup, facts),
             new(1, BackupExecutionObservationSource.Msdb, BackupSetEvidenceKind.Backup, facts)];
-        if (terminalObservation) observations.Add(new(2, BackupExecutionObservationSource.Termination, BackupSetEvidenceKind.Backup, facts));
+        if (terminalObservation) observations.Add(new(2, BackupExecutionObservationSource.Termination, BackupSetEvidenceKind.Backup, termination));
         await store.FreezeAsync(grant.Value.Lease!, new(identity, facts, observations));
         var result = await coordinator.RecordTerminationAsync(grant.Value.Lease!, new(command.PermitId, Guid.NewGuid(), identity.MutationId,
             BackupInvocationTerminationKind.RecoveredTerminated, facts.EvidenceAtUtc!.Value, true, true));
