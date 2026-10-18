@@ -11,7 +11,12 @@ internal sealed class DifferentialBackupAllowance
     internal const string ConfigurationSection = "TargetSql:DifferentialBackupAcceptance:Overrides";
 
     // 卡 12 人工验收通过后，按产品主次版本号登记；默认不继承 FULL 的验收结论。
-    private static readonly HashSet<string> ValidatedVersions = new(StringComparer.Ordinal);
+    // 13.0 的实测边界为 SQL Server 2016 SP2 13.0.5026.0、Windows 服务身份与 SMB；
+    // 放行按主次版本匹配，其他 13.0 补丁未实测，其他版本仍须显式 Overrides 放行。
+    private static readonly HashSet<string> ValidatedVersions = new(StringComparer.Ordinal)
+    {
+        "13.0",
+    };
     internal static DifferentialBackupAllowance None { get; } = new(
         new ConfigurationBuilder().Build(), NullLogger<DifferentialBackupAllowance>.Instance);
 
