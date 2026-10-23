@@ -86,7 +86,7 @@ public sealed class LogCoverageRulesTests
     }
 
     [Fact]
-    public void A03MissingCopyAtTheLocationIsAProvenGap()
+    public void A03MissingCopyAloneDoesNotProvePathGap()
     {
         var result = LogCoverageRules.Evaluate(new LogCoverageRequest(
             LogTestData.AvailableStart(200),
@@ -97,20 +97,18 @@ public sealed class LogCoverageRulesTests
                     200,
                     300,
                     copy: LogLocationCopyState.Missing),
-            ],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+            ]));
 
-        Assert.Equal(LogCoverageConclusion.Gap, result.Conclusion);
+        Assert.Equal(LogCoverageConclusion.Unknown, result.Conclusion);
         Assert.Empty(result.UsedBackupSetIds);
+        Assert.Empty(result.KnownGaps);
+        Assert.NotEmpty(result.UnknownRanges);
         Assert.Contains(LogReason.CopyMissing, result.ReasonCodes);
-        var gap = Assert.Single(result.KnownGaps);
-        Assert.Equal(200m, gap.FromLsn!.Value.Value);
-        Assert.Equal(300m, gap.ToLsn!.Value.Value);
+        Assert.Equal(200m, result.FrontierLsn!.Value.Value);
     }
 
     [Fact]
-    public void A03UnresolvedCandidateAfterFrontierBoundsTheProvenGap()
+    public void A03UnresolvedCandidateAfterFrontierStaysUnknown()
     {
         var result = Evaluate(
             LogCandidate(
@@ -123,17 +121,13 @@ public sealed class LogCoverageRulesTests
                     status: LogEvidenceStatus.MissingFields)),
             LogCandidate(LogTestData.Id(135), 300, 400));
 
-        Assert.Equal(LogCoverageConclusion.Gap, result.Conclusion);
-        var gap = Assert.Single(result.KnownGaps);
-        Assert.Equal(200m, gap.FromLsn!.Value.Value);
-        Assert.Equal(210m, gap.ToLsn!.Value.Value);
-        var unknown = Assert.Single(result.UnknownRanges);
-        Assert.Equal(210m, unknown.FromLsn!.Value.Value);
-        Assert.Null(unknown.ToLsn);
+        Assert.Equal(LogCoverageConclusion.Unknown, result.Conclusion);
+        Assert.Empty(result.KnownGaps);
+        Assert.NotEmpty(result.UnknownRanges);
     }
 
     [Fact]
-    public void A03MissingCopyGapExtendsThroughTheUnavailableRun()
+    public void A03MissingCopyAndOtherCandidateDoNotInventGap()
     {
         var result = LogCoverageRules.Evaluate(new LogCoverageRequest(
             LogTestData.AvailableStart(200),
@@ -145,17 +139,12 @@ public sealed class LogCoverageRulesTests
                     400,
                     copy: LogLocationCopyState.Missing),
                 LogCandidate(LogTestData.Id(137), 300, 320),
-            ],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+            ]));
 
-        Assert.Equal(LogCoverageConclusion.Gap, result.Conclusion);
+        Assert.Equal(LogCoverageConclusion.Unknown, result.Conclusion);
         Assert.Empty(result.UsedBackupSetIds);
-        var gap = Assert.Single(result.KnownGaps);
-        Assert.Equal(200m, gap.FromLsn!.Value.Value);
-        Assert.Equal(400m, gap.ToLsn!.Value.Value);
-        var unknown = Assert.Single(result.UnknownRanges);
-        Assert.Equal(400m, unknown.FromLsn!.Value.Value);
+        Assert.Empty(result.KnownGaps);
+        Assert.Contains(LogReason.CopyMissing, result.ReasonCodes);
     }
 
     [Fact]
@@ -175,7 +164,7 @@ public sealed class LogCoverageRulesTests
     }
 
     [Fact]
-    public void A03KnownGapAndUnknownEvidenceAreBothPreserved()
+    public void A03MissingCopyAndUnresolvedEvidenceDoNotInventGap()
     {
         var result = LogCoverageRules.Evaluate(new LogCoverageRequest(
             LogTestData.AvailableStart(200),
@@ -194,14 +183,10 @@ public sealed class LogCoverageRulesTests
                         first: null,
                         last: null,
                         status: LogEvidenceStatus.MissingFields)),
-            ],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+            ]));
 
         Assert.Equal(LogCoverageConclusion.Unknown, result.Conclusion);
-        var gap = Assert.Single(result.KnownGaps);
-        Assert.Equal(200m, gap.FromLsn!.Value.Value);
-        Assert.Equal(300m, gap.ToLsn!.Value.Value);
+        Assert.Empty(result.KnownGaps);
         Assert.NotEmpty(result.UnknownRanges);
         Assert.Contains(LogReason.CopyMissing, result.ReasonCodes);
         Assert.Contains(LogReason.CoverageUnknown, result.ReasonCodes);
@@ -421,7 +406,7 @@ public sealed class LogCoverageRulesTests
             },
         };
         var start = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [full]));
 
         Assert.Equal(LogDataStartAvailability.Available, start.Availability);
@@ -432,9 +417,7 @@ public sealed class LogCoverageRulesTests
         var coverage = LogCoverageRules.Evaluate(new LogCoverageRequest(
             start,
             enumerationComplete: true,
-            [LogCandidate(LogTestData.Id(170), 200, 300)],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+            [LogCandidate(LogTestData.Id(170), 200, 300)]));
 
         Assert.Equal(LogCoverageConclusion.Continuous, coverage.Conclusion);
         Assert.Equal(300m, coverage.FrontierLsn!.Value.Value);
@@ -445,7 +428,7 @@ public sealed class LogCoverageRulesTests
     {
         var differentialId = LogTestData.Id(171);
         var start = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [
                 LogTestData.FullCandidate(last: 250),
                 LogTestData.DifferentialCandidate(differentialId, LogTestData.FullId, last: 280),
@@ -458,9 +441,7 @@ public sealed class LogCoverageRulesTests
         var coverage = LogCoverageRules.Evaluate(new LogCoverageRequest(
             start,
             enumerationComplete: true,
-            [LogCandidate(LogTestData.Id(172), 200, 300)],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+            [LogCandidate(LogTestData.Id(172), 200, 300)]));
 
         Assert.Equal(LogCoverageConclusion.Continuous, coverage.Conclusion);
         Assert.Equal(300m, coverage.FrontierLsn!.Value.Value);
@@ -487,10 +468,10 @@ public sealed class LogCoverageRulesTests
         };
 
         var damagedStart = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [damaged]));
         var unknownStart = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [unknown]));
 
         Assert.Equal(LogDataStartAvailability.Missing, damagedStart.Availability);
@@ -511,7 +492,7 @@ public sealed class LogCoverageRulesTests
                 copyOnly: null),
         };
         var start = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [full],
             preferredFullBackupSetId: LogTestData.FullId));
 
@@ -523,10 +504,10 @@ public sealed class LogCoverageRulesTests
     public void A08CopyOnlyOrExternalFullIsNotAnAutomaticStart()
     {
         var copyOnly = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [LogTestData.FullCandidate(copyOnly: true)]));
         var external = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [LogTestData.FullCandidate(managed: false)]));
 
         Assert.Equal(LogDataStartAvailability.Missing, copyOnly.Availability);
@@ -543,13 +524,11 @@ public sealed class LogCoverageRulesTests
             LogTestData.Id(173),
             200,
             300,
-            location: LogStorageLocation.Remote);
+            scope: LogLocationScope.Remote(LogTestData.Id(900)));
         var result = LogCoverageRules.Evaluate(new LogCoverageRequest(
             localStart,
             enumerationComplete: true,
-            [remoteLog],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+            [remoteLog]));
 
         Assert.Equal(LogCoverageConclusion.Gap, result.Conclusion);
         Assert.Equal(200m, result.FrontierLsn!.Value.Value);
@@ -561,13 +540,13 @@ public sealed class LogCoverageRulesTests
     {
         var localStart = LogTestData.AvailableStart(200);
         var remoteStart = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Remote,
+            LogLocationScope.Remote(LogTestData.Id(900)),
             [
                 new LogDataStartCandidate
                 {
                     BackupSetId = LogTestData.Id(180),
                     Actual = LogTestData.Metadata(200, 300),
-                    Location = LogStorageLocation.Remote,
+                    Scope = LogLocationScope.Remote(LogTestData.Id(900)),
                 },
             ]));
 
@@ -583,10 +562,8 @@ public sealed class LogCoverageRulesTests
                     LogTestData.Id(181),
                     200,
                     300,
-                    location: LogStorageLocation.Remote),
-            ],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+                    scope: LogLocationScope.Remote(LogTestData.Id(900))),
+            ]));
 
         Assert.Equal(LogCoverageConclusion.Unknown, coverage.Conclusion);
         Assert.Null(coverage.FrontierLsn);
@@ -607,7 +584,7 @@ public sealed class LogCoverageRulesTests
         Assert.NotEqual(maximum, neighbor);
 
         var maximumStart = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [LogTestData.FullCandidate(last: BackupLsn.MaximumValue - 1m)]));
         var maximumResult = LogCoverageRules.Evaluate(new LogCoverageRequest(
             maximumStart,
@@ -617,21 +594,17 @@ public sealed class LogCoverageRulesTests
                     LogTestData.Id(190),
                     BackupLsn.MaximumValue - 1m,
                     BackupLsn.MaximumValue),
-            ],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+            ]));
 
         Assert.Equal(BackupLsn.MaximumValue, maximumResult.FrontierLsn!.Value.Value);
 
         var zeroStart = LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
+            LogLocationScope.Local,
             [LogTestData.FullCandidate(last: 0, first: 0)]));
         var zeroResult = LogCoverageRules.Evaluate(new LogCoverageRequest(
             zeroStart,
             enumerationComplete: true,
-            [LogCandidate(LogTestData.Id(191), 0, 1)],
-            expectedUseChecksum: true,
-            expectedUseCompression: false));
+            [LogCandidate(LogTestData.Id(191), 0, 1)]));
 
         Assert.Equal(1m, zeroResult.FrontierLsn!.Value.Value);
     }
@@ -667,9 +640,9 @@ public sealed class LogCoverageRulesTests
         decimal? first,
         decimal? last,
         LogBackupActualMetadata? actual = null,
-        LogStorageLocation location = LogStorageLocation.Local,
+        LogLocationScope? scope = null,
         bool managed = true)
     {
-        return LogTestData.LogCandidate(id, first, last, actual, location, managed: managed);
+        return LogTestData.LogCandidate(id, first, last, actual, scope, managed: managed);
     }
 }

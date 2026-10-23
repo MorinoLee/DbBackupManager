@@ -38,6 +38,7 @@ public static class LogReason
     public const string StartCopyOnlyNotEligible = "log.start_copy_only_not_eligible";
     public const string StartExternalNotManaged = "log.start_external_not_managed";
     public const string StartEvidenceUnknown = "log.start_evidence_unknown";
+    public const string StartIdentityConflict = "log.start_identity_conflict";
     public const string StartBackupInvalid = "log.start_backup_invalid";
     public const string StartNotAvailable = "log.start_not_available";
     public const string StartBranchUnsupported = "log.start_branch_unsupported";

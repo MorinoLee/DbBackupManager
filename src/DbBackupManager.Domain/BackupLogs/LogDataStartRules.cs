@@ -11,7 +11,7 @@ public enum LogDataStartAvailability
 }
 
 /// <summary>
-/// 某个存储位置上一份候选数据备份。FULL 与 DIFF 都按该位置独立提供。
+/// 某个具体位置作用域上的一份候选数据备份。FULL 与 DIFF 都按该作用域独立提供。
 /// </summary>
 public sealed record LogDataStartCandidate
 {
@@ -19,7 +19,7 @@ public sealed record LogDataStartCandidate
 
     public LogBackupActualMetadata Actual { get; init; } = new();
 
-    public LogStorageLocation Location { get; init; } = LogStorageLocation.Local;
+    public LogLocationScope Scope { get; init; } = LogLocationScope.Local;
 
     public LogLocationCopyState LocationCopy { get; init; } = LogLocationCopyState.Available;
 
@@ -34,17 +34,17 @@ public sealed record LogDataStartCandidate
 public sealed class LogDataStartRequest
 {
     public LogDataStartRequest(
-        LogStorageLocation location,
+        LogLocationScope scope,
         IEnumerable<LogDataStartCandidate> candidates,
         Guid? preferredFullBackupSetId = null)
     {
         ArgumentNullException.ThrowIfNull(candidates);
-        Location = location;
+        Scope = scope;
         Candidates = Array.AsReadOnly(candidates.ToArray());
         PreferredFullBackupSetId = preferredFullBackupSetId;
     }
 
-    public LogStorageLocation Location { get; }
+    public LogLocationScope Scope { get; }
 
     public IReadOnlyList<LogDataStartCandidate> Candidates { get; }
 
@@ -57,7 +57,8 @@ public sealed class LogDataStartDecision
     internal LogDataStartDecision(
         LogDataStartAvailability availability,
         string reasonCode,
-        LogStorageLocation location,
+        LogLocationScope scope,
+        IEnumerable<LogObservationConflict> conflicts,
         Guid? fullBackupSetId = null,
         Guid? differentialBackupSetId = null,
         BackupLsn? restorePointLsn = null,
@@ -67,7 +68,8 @@ public sealed class LogDataStartDecision
     {
         Availability = availability;
         ReasonCode = reasonCode;
-        Location = location;
+        Scope = scope;
+        Conflicts = Array.AsReadOnly(conflicts.ToArray());
         FullBackupSetId = fullBackupSetId;
         DifferentialBackupSetId = differentialBackupSetId;
         RestorePointLsn = restorePointLsn;
@@ -80,7 +82,9 @@ public sealed class LogDataStartDecision
 
     public string ReasonCode { get; }
 
-    public LogStorageLocation Location { get; }
+    public LogLocationScope Scope { get; }
+
+    public IReadOnlyList<LogObservationConflict> Conflicts { get; }
 
     public Guid? FullBackupSetId { get; }
 
@@ -99,14 +103,14 @@ public sealed class LogDataStartDecision
 }
 
 /// <summary>
-/// 按存储位置选择受管普通 FULL 或实际匹配 DIFF 作为数据起点；不访问 SQL/文件。
+/// 按具体位置作用域选择受管普通 FULL 或实际匹配 DIFF 作为数据起点；不访问 SQL/文件。
 /// </summary>
 public static class LogDataStartRules
 {
     public static LogDataStartDecision Select(LogDataStartRequest? request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        RequireDefined(request.Location, nameof(request.Location));
+        RequireScope(request.Scope, nameof(request.Scope));
         foreach (var candidate in request.Candidates)
         {
             ArgumentNullException.ThrowIfNull(candidate);
@@ -116,13 +120,14 @@ public static class LogDataStartRules
                 throw new ArgumentException("数据备份集标识不能为空。", nameof(request));
             }
 
-            RequireDefined(candidate.Location, nameof(candidate.Location));
+            RequireScope(candidate.Scope, nameof(candidate.Scope));
             RequireDefined(candidate.LocationCopy, nameof(candidate.LocationCopy));
             RequireDefined(candidate.Actual.Status, nameof(candidate.Actual.Status));
             if (candidate.DifferentialDependency is { } dependency)
             {
                 RequireDefined(dependency, nameof(candidate.DifferentialDependency));
             }
+
             if (candidate.Actual.ObservedAtUtc is { } observedAtUtc
                 && observedAtUtc.Offset != TimeSpan.Zero)
             {
@@ -131,37 +136,51 @@ public static class LogDataStartRules
         }
 
         var local = request.Candidates
-            .Where(candidate => candidate.Location == request.Location)
+            .Where(candidate => candidate.Scope == request.Scope)
             .ToArray();
 
         if (local.Length == 0)
         {
             return Missing(
-                request.Location,
+                request.Scope,
                 request.Candidates.Count == 0
                     ? LogReason.StartNoManagedFull
-                    : LogReason.StartLocationMissing);
+                    : LogReason.StartLocationMissing,
+                []);
         }
+
+        var groups = Reconcile(local, request.Scope);
+        var conflicts = groups
+            .Where(group => group.Conflict is not null)
+            .Select(group => group.Conflict!)
+            .ToArray();
+        var clean = groups
+            .Where(group => group.Conflict is null)
+            .Select(group => group.Candidate!)
+            .ToArray();
 
         if (request.PreferredFullBackupSetId is { } preferredFullId)
         {
-            var preferred = local
+            var preferred = clean
                 .Where(candidate => candidate.BackupSetId == preferredFullId)
                 .ToArray();
             if (preferred.Length == 0)
             {
-                return Missing(request.Location, LogReason.StartNoManagedFull);
+                return groups.Any(group =>
+                    group.Conflict is not null && group.BackupSetId == preferredFullId)
+                    ? Unknown(request.Scope, LogReason.StartIdentityConflict, conflicts)
+                    : Missing(request.Scope, LogReason.StartNoManagedFull, conflicts);
             }
 
             if (!IsUsableFull(preferred[0]))
             {
-                return Unavailable(preferred[0], request.Location);
+                return Unavailable(preferred[0], request.Scope, conflicts);
             }
 
-            return Available(preferred[0], local, request.Location);
+            return Available(preferred[0], clean, request.Scope, conflicts);
         }
 
-        var usableFulls = local
+        var usableFulls = clean
             .Where(IsUsableFull)
             .OrderByDescending(candidate => candidate.Actual.LastLsn!.Value.Value)
             .ThenBy(candidate => candidate.BackupSetId)
@@ -169,24 +188,135 @@ public static class LogDataStartRules
 
         if (usableFulls.Length > 0)
         {
-            return Available(usableFulls[0], local, request.Location);
+            return Available(usableFulls[0], clean, request.Scope, conflicts);
         }
 
-        var fullCandidates = local
+        var fullCandidates = clean
             .Where(candidate => candidate.Actual.Type is null or BackupType.Full)
             .ToArray();
 
         if (fullCandidates.Length == 0)
         {
-            return Missing(request.Location, LogReason.StartNoManagedFull);
+            return groups.Any(group => group.Conflict is not null && group.PotentialFull)
+                ? Unknown(request.Scope, LogReason.StartIdentityConflict, conflicts)
+                : Missing(request.Scope, LogReason.StartNoManagedFull, conflicts);
         }
 
         if (fullCandidates.Any(IsUnknownFullEvidence))
         {
-            return Unknown(request.Location, LogReason.StartEvidenceUnknown);
+            return Unknown(request.Scope, LogReason.StartEvidenceUnknown, conflicts);
         }
 
-        return Missing(request.Location, FullUnavailableReason(fullCandidates));
+        return Missing(request.Scope, FullUnavailableReason(fullCandidates), conflicts);
+    }
+
+    private static List<StartCandidateGroup> Reconcile(
+        IReadOnlyList<LogDataStartCandidate> candidates,
+        LogLocationScope scope)
+    {
+        var groups = new List<StartCandidateGroup>();
+        foreach (var group in candidates
+            .GroupBy(candidate => candidate.BackupSetId)
+            .OrderBy(group => group.Key))
+        {
+            var merged = group.First();
+            string? conflict = null;
+            foreach (var next in group.Skip(1))
+            {
+                var observation = LogObservationReconciler.Reconcile(merged.Actual, next.Actual);
+                if (observation.ConflictField is { } field)
+                {
+                    conflict = field;
+                    break;
+                }
+
+                var candidate = MergeCandidate(merged, next, observation.Merged, out var candidateConflict);
+                if (candidateConflict is not null)
+                {
+                    conflict = candidateConflict;
+                    break;
+                }
+
+                merged = candidate!;
+            }
+
+            groups.Add(new StartCandidateGroup(
+                group.Key,
+                group.Any(candidate => candidate.Actual.Type is null or BackupType.Full),
+                conflict is null
+                    ? null
+                    : new LogObservationConflict(group.Key, scope, conflict),
+                conflict is null ? merged : null));
+        }
+
+        return groups;
+    }
+
+    private static LogDataStartCandidate? MergeCandidate(
+        LogDataStartCandidate left,
+        LogDataStartCandidate right,
+        LogBackupActualMetadata mergedActual,
+        out string? conflict)
+    {
+        conflict = null;
+        if (left.IsManaged != right.IsManaged)
+        {
+            conflict = LogFactField.IsManaged;
+            return null;
+        }
+
+        var copy = MergeCopyState(left.LocationCopy, right.LocationCopy);
+        if (copy is null)
+        {
+            conflict = LogFactField.CopyState;
+            return null;
+        }
+
+        if (left.DifferentialDependency is { } leftDependency
+            && right.DifferentialDependency is { } rightDependency
+            && leftDependency != rightDependency)
+        {
+            conflict = LogFactField.DifferentialDependency;
+            return null;
+        }
+
+        if (left.MatchesFullBackupSetId is { } leftFull
+            && right.MatchesFullBackupSetId is { } rightFull
+            && leftFull != rightFull)
+        {
+            conflict = LogFactField.MatchesFull;
+            return null;
+        }
+
+        return left with
+        {
+            Actual = mergedActual,
+            LocationCopy = copy.Value,
+            DifferentialDependency = left.DifferentialDependency ?? right.DifferentialDependency,
+            MatchesFullBackupSetId = left.MatchesFullBackupSetId ?? right.MatchesFullBackupSetId,
+        };
+    }
+
+    private static LogLocationCopyState? MergeCopyState(
+        LogLocationCopyState left,
+        LogLocationCopyState right)
+    {
+        if (left == right)
+        {
+            return left;
+        }
+
+        if (left == LogLocationCopyState.Unknown)
+        {
+            return right;
+        }
+
+        if (right == LogLocationCopyState.Unknown)
+        {
+            return left;
+        }
+
+        return null;
     }
 
     private static bool IsUsableFull(LogDataStartCandidate candidate)
@@ -264,7 +394,8 @@ public static class LogDataStartRules
     private static LogDataStartDecision Available(
         LogDataStartCandidate full,
         IReadOnlyList<LogDataStartCandidate> candidates,
-        LogStorageLocation location)
+        LogLocationScope scope,
+        IReadOnlyList<LogObservationConflict> conflicts)
     {
         var differential = candidates
             .Where(candidate => IsUsableDifferential(candidate, full))
@@ -275,7 +406,8 @@ public static class LogDataStartRules
         return new LogDataStartDecision(
             LogDataStartAvailability.Available,
             differential is null ? LogReason.StartManagedFull : LogReason.StartManagedDifferential,
-            location,
+            scope,
+            conflicts,
             full.BackupSetId,
             differential?.BackupSetId,
             differential?.Actual.LastLsn ?? full.Actual.LastLsn,
@@ -314,57 +446,58 @@ public static class LogDataStartRules
 
     private static LogDataStartDecision Unavailable(
         LogDataStartCandidate candidate,
-        LogStorageLocation location)
+        LogLocationScope scope,
+        IReadOnlyList<LogObservationConflict> conflicts)
     {
         var actual = candidate.Actual;
         if (!candidate.IsManaged)
         {
-            return Missing(location, LogReason.StartExternalNotManaged);
+            return Missing(scope, LogReason.StartExternalNotManaged, conflicts);
         }
 
         if (actual.Type is null)
         {
-            return Unknown(location, LogReason.StartEvidenceUnknown);
+            return Unknown(scope, LogReason.StartEvidenceUnknown, conflicts);
         }
 
         if (actual.Type != BackupType.Full)
         {
-            return Missing(location, LogReason.StartNoManagedFull);
+            return Missing(scope, LogReason.StartNoManagedFull, conflicts);
         }
 
         if (actual.IsCopyOnly == true)
         {
-            return Missing(location, LogReason.StartCopyOnlyNotEligible);
+            return Missing(scope, LogReason.StartCopyOnlyNotEligible, conflicts);
         }
 
         if (actual.IsCopyOnly is null)
         {
-            return Unknown(location, LogReason.StartEvidenceUnknown);
+            return Unknown(scope, LogReason.StartEvidenceUnknown, conflicts);
         }
 
         if (candidate.LocationCopy == LogLocationCopyState.Missing)
         {
-            return Missing(location, LogReason.StartLocationMissing);
+            return Missing(scope, LogReason.StartLocationMissing, conflicts);
         }
 
         if (actual.HasCompleteBranch
             && actual.Branch!.FirstRecoveryForkId != actual.Branch.RecoveryForkId)
         {
-            return Missing(location, LogReason.StartBranchUnsupported);
+            return Missing(scope, LogReason.StartBranchUnsupported, conflicts);
         }
 
         if (actual.IsDamaged == true
             || actual.IsSnapshot == true
             || actual.IsIncomplete == true)
         {
-            return Missing(location, LogReason.StartBackupInvalid);
+            return Missing(scope, LogReason.StartBackupInvalid, conflicts);
         }
 
         if (actual.IsDamaged is null
             || actual.IsSnapshot is null
             || actual.IsIncomplete is null)
         {
-            return Unknown(location, LogReason.StartEvidenceUnknown);
+            return Unknown(scope, LogReason.StartEvidenceUnknown, conflicts);
         }
 
         if (actual.HasCompleteIdentity
@@ -374,17 +507,33 @@ public static class LogDataStartRules
             && actual.Status == LogEvidenceStatus.Complete
             && candidate.LocationCopy == LogLocationCopyState.Available)
         {
-            return Missing(location, LogReason.StartNoManagedFull);
+            return Missing(scope, LogReason.StartNoManagedFull, conflicts);
         }
 
-        return Unknown(location, LogReason.StartEvidenceUnknown);
+        return Unknown(scope, LogReason.StartEvidenceUnknown, conflicts);
     }
 
-    private static LogDataStartDecision Missing(LogStorageLocation location, string reason) =>
-        new(LogDataStartAvailability.Missing, reason, location);
+    private static LogDataStartDecision Missing(
+        LogLocationScope scope,
+        string reason,
+        IReadOnlyList<LogObservationConflict> conflicts) =>
+        new(LogDataStartAvailability.Missing, reason, scope, conflicts);
 
-    private static LogDataStartDecision Unknown(LogStorageLocation location, string reason) =>
-        new(LogDataStartAvailability.Unknown, reason, location);
+    private static LogDataStartDecision Unknown(
+        LogLocationScope scope,
+        string reason,
+        IReadOnlyList<LogObservationConflict> conflicts) =>
+        new(LogDataStartAvailability.Unknown, reason, scope, conflicts);
+
+    private static void RequireScope(LogLocationScope scope, string parameterName)
+    {
+        RequireDefined(scope.Kind, parameterName);
+        if (scope.Kind == LogStorageLocation.Remote
+            && (scope.StorageTargetId is null || scope.StorageTargetId == Guid.Empty))
+        {
+            throw new ArgumentException("远端位置必须携带具体存储目标。", parameterName);
+        }
+    }
 
     private static void RequireDefined<TEnum>(TEnum value, string parameterName)
         where TEnum : struct, Enum
@@ -394,4 +543,10 @@ public static class LogDataStartRules
             throw new ArgumentOutOfRangeException(parameterName, value, "枚举值无效。");
         }
     }
+
+    private sealed record StartCandidateGroup(
+        Guid BackupSetId,
+        bool PotentialFull,
+        LogObservationConflict? Conflict,
+        LogDataStartCandidate? Candidate);
 }

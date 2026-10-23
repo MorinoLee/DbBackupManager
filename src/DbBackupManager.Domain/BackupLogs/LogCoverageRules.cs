@@ -20,11 +20,14 @@ public sealed record LogCoverageCandidate
 
     public LogBackupActualMetadata Actual { get; init; } = new();
 
-    public LogStorageLocation Location { get; init; } = LogStorageLocation.Local;
+    public LogLocationScope Scope { get; init; } = LogLocationScope.Local;
 
     public LogLocationCopyState LocationCopy { get; init; } = LogLocationCopyState.Available;
 
     public bool IsManaged { get; init; } = true;
+
+    /// <summary>该候选自己的不可变执行快照选项；不能用当前版本选项重验历史候选。</summary>
+    public LogProtectionExpectation? ProtectionExpectation { get; init; }
 }
 
 public sealed class LogCoverageRequest
@@ -32,17 +35,13 @@ public sealed class LogCoverageRequest
     public LogCoverageRequest(
         LogDataStartDecision start,
         bool enumerationComplete,
-        IEnumerable<LogCoverageCandidate> candidates,
-        bool expectedUseChecksum,
-        bool expectedUseCompression)
+        IEnumerable<LogCoverageCandidate> candidates)
     {
         ArgumentNullException.ThrowIfNull(start);
         ArgumentNullException.ThrowIfNull(candidates);
         Start = start;
         EnumerationComplete = enumerationComplete;
         Candidates = Array.AsReadOnly(candidates.ToArray());
-        ExpectedUseChecksum = expectedUseChecksum;
-        ExpectedUseCompression = expectedUseCompression;
     }
 
     public LogDataStartDecision Start { get; }
@@ -51,10 +50,6 @@ public sealed class LogCoverageRequest
     public bool EnumerationComplete { get; }
 
     public IReadOnlyList<LogCoverageCandidate> Candidates { get; }
-
-    public bool ExpectedUseChecksum { get; }
-
-    public bool ExpectedUseCompression { get; }
 }
 
 public sealed class LogCoverageResult
@@ -63,6 +58,7 @@ public sealed class LogCoverageResult
         LogCoverageConclusion conclusion,
         BackupLsn? frontierLsn,
         LogDataStartDecision start,
+        IEnumerable<LogObservationConflict> conflicts,
         IEnumerable<Guid> usedBackupSetIds,
         IEnumerable<LogCoverageRange> knownContinuousRanges,
         IEnumerable<LogCoverageRange> knownGaps,
@@ -74,6 +70,8 @@ public sealed class LogCoverageResult
         Conclusion = conclusion;
         FrontierLsn = frontierLsn;
         Start = start;
+        Conflicts = Array.AsReadOnly(
+            conflicts.Concat(start.Conflicts).Distinct().ToArray());
         UsedBackupSetIds = Array.AsReadOnly(usedBackupSetIds.ToArray());
         KnownContinuousRanges = Array.AsReadOnly(knownContinuousRanges.ToArray());
         KnownGaps = Array.AsReadOnly(knownGaps.ToArray());
@@ -89,6 +87,10 @@ public sealed class LogCoverageResult
     public BackupLsn? FrontierLsn { get; }
 
     public LogDataStartDecision Start { get; }
+
+    public LogLocationScope Scope => Start.Scope;
+
+    public IReadOnlyList<LogObservationConflict> Conflicts { get; }
 
     public IReadOnlyList<Guid> UsedBackupSetIds { get; }
 
@@ -124,7 +126,7 @@ public static class LogCoverageRules
             return Unavailable(start, request.EnumerationComplete);
         }
 
-        var classified = ClassifyAll(request);
+        var (classified, conflicts) = ClassifyAll(request);
         var frontier = start.RestorePointLsn.Value;
         var used = new List<Guid>();
         var usedSet = new HashSet<Guid>();
@@ -165,25 +167,8 @@ public static class LogCoverageRules
         var unknown = bridgeable
             .Where(candidate => candidate.State is CandidateState.Unresolved or CandidateState.Invalid)
             .ToArray();
-        var missingCopies = bridgeable
-            .Where(candidate => candidate.State == CandidateState.MissingCopy)
-            .ToArray();
-        var missingWithoutEnd = missingCopies
-            .Where(candidate => candidate.LastLsn is null)
-            .ToArray();
-        var missingEnd = missingCopies.Length > 0 && missingWithoutEnd.Length == 0
-            ? MissingRunEnd(missingCopies, frontier.Value)
-            : (decimal?)null;
-        IReadOnlyList<LogCoverageRange> missingGaps = missingEnd is { } unavailableEnd
-            ? [new LogCoverageRange(frontier, new BackupLsn(unavailableEnd))]
-            : [];
-        if (missingGaps.Count > 0)
-        {
-            reasons.Add(LogReason.CopyMissing);
-        }
-
         var hasUnknownEvidence = unknown.Length > 0
-            || missingWithoutEnd.Length > 0
+            || conflicts.Count > 0
             || !request.EnumerationComplete;
 
         if (unsupported.Length > 0)
@@ -192,13 +177,17 @@ public static class LogCoverageRules
             if (hasUnknownEvidence)
             {
                 reasons.Add(LogReason.CoverageUnknown);
+                if (conflicts.Count > 0)
+                {
+                    reasons.Add(LogReason.DuplicateIdentityConflict);
+                }
+
                 if (!request.EnumerationComplete)
                 {
                     reasons.Add(LogReason.QueryIncomplete);
                 }
 
                 reasons.AddRange(unknown.Select(candidate => candidate.ReasonCode));
-                reasons.AddRange(missingWithoutEnd.Select(candidate => candidate.ReasonCode));
             }
 
             reasons.AddRange(unsupported.Select(candidate => candidate.ReasonCode));
@@ -206,9 +195,10 @@ public static class LogCoverageRules
                 LogCoverageConclusion.UnsupportedBranch,
                 frontier,
                 start,
+                conflicts,
                 used,
                 continuous,
-                missingGaps,
+                [],
                 hasUnknownEvidence ? [new LogCoverageRange(frontier, null)] : [],
                 [new LogCoverageRange(frontier, null)],
                 reasons,
@@ -218,20 +208,25 @@ public static class LogCoverageRules
         if (hasUnknownEvidence)
         {
             reasons.Add(LogReason.CoverageUnknown);
+            if (conflicts.Count > 0)
+            {
+                reasons.Add(LogReason.DuplicateIdentityConflict);
+            }
+
             if (!request.EnumerationComplete)
             {
                 reasons.Add(LogReason.QueryIncomplete);
             }
 
             reasons.AddRange(unknown.Select(candidate => candidate.ReasonCode));
-            reasons.AddRange(missingWithoutEnd.Select(candidate => candidate.ReasonCode));
             return Create(
                 LogCoverageConclusion.Unknown,
                 frontier,
                 start,
+                conflicts,
                 used,
                 continuous,
-                missingGaps,
+                [],
                 [new LogCoverageRange(frontier, null)],
                 [],
                 reasons,
@@ -239,23 +234,6 @@ public static class LogCoverageRules
         }
 
         var next = NextKnownFirst(classified, frontier);
-        if (missingEnd is { } gapEnd)
-        {
-            reasons.Add(LogReason.CoverageGap);
-            reasons.Add(LogReason.CoverageUnknown);
-            return Create(
-                LogCoverageConclusion.Gap,
-                frontier,
-                start,
-                used,
-                continuous,
-                [new LogCoverageRange(frontier, new BackupLsn(gapEnd))],
-                [new LogCoverageRange(new BackupLsn(gapEnd), null)],
-                [],
-                reasons,
-                classified);
-        }
-
         if (next is { } nextCandidate)
         {
             var following = nextCandidate.FirstLsn!.Value.Value;
@@ -268,6 +246,7 @@ public static class LogCoverageRules
                     LogCoverageConclusion.Gap,
                     frontier,
                     start,
+                    conflicts,
                     used,
                     continuous,
                     [new LogCoverageRange(frontier, new BackupLsn(following))],
@@ -285,6 +264,7 @@ public static class LogCoverageRules
                     LogCoverageConclusion.Gap,
                     frontier,
                     start,
+                    conflicts,
                     used,
                     continuous,
                     [new LogCoverageRange(frontier, new BackupLsn(following))],
@@ -298,6 +278,7 @@ public static class LogCoverageRules
                 LogCoverageConclusion.Gap,
                 frontier,
                 start,
+                conflicts,
                 used,
                 continuous,
                 [new LogCoverageRange(frontier, new BackupLsn(following))],
@@ -314,6 +295,7 @@ public static class LogCoverageRules
                 LogCoverageConclusion.Continuous,
                 frontier,
                 start,
+                conflicts,
                 used,
                 continuous,
                 [],
@@ -328,6 +310,7 @@ public static class LogCoverageRules
             LogCoverageConclusion.Gap,
             frontier,
             start,
+            conflicts,
             used,
             continuous,
             [new LogCoverageRange(frontier, null)],
@@ -337,9 +320,11 @@ public static class LogCoverageRules
             classified);
     }
 
-    private static List<ClassifiedCandidate> ClassifyAll(LogCoverageRequest request)
+    private static (IReadOnlyList<ClassifiedCandidate> Classified, IReadOnlyList<LogObservationConflict> Conflicts) ClassifyAll(
+        LogCoverageRequest request)
     {
         var result = new List<ClassifiedCandidate>();
+        var conflicts = new List<LogObservationConflict>();
         foreach (var item in request.Candidates)
         {
             ArgumentNullException.ThrowIfNull(item);
@@ -349,7 +334,7 @@ public static class LogCoverageRules
                 throw new ArgumentException("日志备份集标识不能为空。", nameof(request));
             }
 
-            RequireDefined(item.Location, nameof(item.Location));
+            RequireScope(item.Scope, nameof(item.Scope));
             RequireDefined(item.LocationCopy, nameof(item.LocationCopy));
             RequireDefined(item.Actual.Status, nameof(item.Actual.Status));
             if (item.Actual.ObservedAtUtc is { } observedAtUtc
@@ -360,265 +345,300 @@ public static class LogCoverageRules
         }
 
         foreach (var group in request.Candidates
-            .Where(candidate => candidate.Location == request.Start.Location)
-            .GroupBy(candidate => candidate.BackupSetId))
+            .Where(candidate => candidate.Scope == request.Start.Scope)
+            .GroupBy(candidate => candidate.BackupSetId)
+            .OrderBy(group => group.Key))
         {
-            var items = group.ToArray();
-            if (items.Length == 1)
+            var merged = group.First();
+            string? conflict = null;
+            foreach (var next in group.Skip(1))
             {
-                result.Add(Classify(items[0], request));
+                var observation = LogObservationReconciler.Reconcile(merged.Actual, next.Actual);
+                if (observation.ConflictField is { } field)
+                {
+                    conflict = field;
+                    break;
+                }
+
+                var candidate = MergeCandidate(merged, next, observation.Merged, out var candidateConflict);
+                if (candidateConflict is not null)
+                {
+                    conflict = candidateConflict;
+                    break;
+                }
+
+                merged = candidate!;
+            }
+
+            if (conflict is not null)
+            {
+                conflicts.Add(new LogObservationConflict(group.Key, request.Start.Scope, conflict));
                 continue;
             }
 
-            var first = items[0];
-            if (items.Skip(1).Any(other => Conflicts(first, other)))
-            {
-                result.Add(new ClassifiedCandidate(
-                    first.BackupSetId,
-                    CandidateState.Unresolved,
-                    null,
-                    null,
-                    LogReason.DuplicateIdentityConflict));
-                continue;
-            }
-
-            var kept = items
-                .OrderByDescending(candidate =>
-                    candidate.Actual.Status == LogEvidenceStatus.Complete
-                    && candidate.LocationCopy == LogLocationCopyState.Available)
-                .First();
-            result.Add(Classify(kept, request));
+            result.Add(Classify(merged, request));
         }
 
-        return result;
+        return (result, conflicts);
     }
 
-    private static ClassifiedCandidate Classify(LogCoverageCandidate candidate, LogCoverageRequest request)
+    private static LogCoverageCandidate? MergeCandidate(
+        LogCoverageCandidate left,
+        LogCoverageCandidate right,
+        LogBackupActualMetadata mergedActual,
+        out string? conflict)
+    {
+        conflict = null;
+        if (left.IsManaged != right.IsManaged)
+        {
+            conflict = LogFactField.IsManaged;
+            return null;
+        }
+
+        var copy = MergeCopyState(left.LocationCopy, right.LocationCopy);
+        if (copy is null)
+        {
+            conflict = LogFactField.CopyState;
+            return null;
+        }
+
+        if (left.ProtectionExpectation is { } leftExpectation
+            && right.ProtectionExpectation is { } rightExpectation
+            && leftExpectation != rightExpectation)
+        {
+            conflict = LogFactField.ProtectionExpectation;
+            return null;
+        }
+
+        return left with
+        {
+            Actual = mergedActual,
+            LocationCopy = copy.Value,
+            ProtectionExpectation = left.ProtectionExpectation ?? right.ProtectionExpectation,
+        };
+    }
+
+    private static LogLocationCopyState? MergeCopyState(
+        LogLocationCopyState left,
+        LogLocationCopyState right)
+    {
+        if (left == right)
+        {
+            return left;
+        }
+
+        if (left == LogLocationCopyState.Unknown)
+        {
+            return right;
+        }
+
+        if (right == LogLocationCopyState.Unknown)
+        {
+            return left;
+        }
+
+        return null;
+    }
+
+    private static ClassifiedCandidate Classify(
+        LogCoverageCandidate candidate,
+        LogCoverageRequest request)
     {
         var actual = candidate.Actual;
         var first = actual.FirstLsn;
         var last = actual.LastLsn;
 
-        ClassifiedCandidate State(CandidateState state, string reason) =>
-            new(candidate.BackupSetId, state, first, last, reason);
+        ClassifiedCandidate State(CandidateState state, string reason, bool boundariesTrusted) =>
+            new(candidate.BackupSetId, state, first, last, reason, boundariesTrusted);
 
-        if (candidate.Location != request.Start.Location)
+        if (candidate.Scope != request.Start.Scope)
         {
-            return State(CandidateState.Unresolved, LogReason.LocationMismatch);
+            return State(CandidateState.Unresolved, LogReason.LocationMismatch, boundariesTrusted: false);
         }
 
         if (!candidate.IsManaged)
         {
-            return State(CandidateState.Unresolved, LogReason.ExternalNotManaged);
+            return State(CandidateState.Unresolved, LogReason.ExternalNotManaged, boundariesTrusted: false);
         }
 
         switch (actual.Status)
         {
             case LogEvidenceStatus.SourceConflict:
-                return State(CandidateState.Unresolved, LogReason.ActualSourceConflict);
+                return State(CandidateState.Unresolved, LogReason.ActualSourceConflict, boundariesTrusted: false);
             case LogEvidenceStatus.PermissionDenied:
             case LogEvidenceStatus.HistoryNotFound:
             case LogEvidenceStatus.MissingFields:
-                return State(CandidateState.Unresolved, LogReason.ActualEvidenceUnknown);
+                return State(CandidateState.Unresolved, LogReason.ActualEvidenceUnknown, boundariesTrusted: false);
         }
 
         if (first is null || last is null)
         {
-            return State(CandidateState.Unresolved, LogReason.IntervalMissingFields);
+            return State(CandidateState.Unresolved, LogReason.IntervalMissingFields, boundariesTrusted: false);
         }
 
         if (first.Value.Value >= last.Value.Value)
         {
-            return State(CandidateState.Invalid, LogReason.IntervalInvalid);
-        }
-
-        switch (candidate.LocationCopy)
-        {
-            case LogLocationCopyState.Unknown:
-                return State(CandidateState.Unresolved, LogReason.CopyUnknown);
-            case LogLocationCopyState.Missing:
-                return State(CandidateState.MissingCopy, LogReason.CopyMissing);
+            return State(CandidateState.Invalid, LogReason.IntervalInvalid, boundariesTrusted: false);
         }
 
         if (actual.Type is null)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualTypeUnknown);
+            return State(CandidateState.Unresolved, LogReason.ActualTypeUnknown, boundariesTrusted: false);
         }
 
         if (actual.Type != BackupType.Log)
         {
-            return State(CandidateState.Invalid, LogReason.ActualTypeNotLog);
+            return State(CandidateState.Invalid, LogReason.ActualTypeNotLog, boundariesTrusted: true);
         }
 
         if (actual.IsCopyOnly is null)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualCopyOnlyUnknown);
+            return State(CandidateState.Unresolved, LogReason.ActualCopyOnlyUnknown, boundariesTrusted: false);
         }
 
         if (actual.IsCopyOnly.Value)
         {
-            return State(CandidateState.Invalid, LogReason.ActualCopyOnly);
+            return State(CandidateState.Invalid, LogReason.ActualCopyOnly, boundariesTrusted: true);
         }
 
         if (actual.RecoveryModel is null or DatabaseRecoveryModel.Unknown)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualRecoveryModelUnknown);
+            return State(
+                CandidateState.Unresolved,
+                LogReason.ActualRecoveryModelUnknown,
+                boundariesTrusted: false);
         }
 
         if (actual.RecoveryModel != DatabaseRecoveryModel.Full)
         {
-            return State(CandidateState.Invalid, LogReason.ActualRecoveryModelNotFull);
+            return State(CandidateState.Invalid, LogReason.ActualRecoveryModelNotFull, boundariesTrusted: true);
         }
 
         if (actual.HasBulkLoggedData is null)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualBulkUnknown);
+            return State(CandidateState.Unresolved, LogReason.ActualBulkUnknown, boundariesTrusted: false);
         }
 
         if (actual.HasBulkLoggedData.Value)
         {
-            return State(CandidateState.Invalid, LogReason.ActualBulkLogged);
+            return State(CandidateState.Invalid, LogReason.ActualBulkLogged, boundariesTrusted: true);
         }
 
         if (actual.IsForceOffline is null)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualForceOfflineUnknown);
+            return State(
+                CandidateState.Unresolved,
+                LogReason.ActualForceOfflineUnknown,
+                boundariesTrusted: false);
         }
 
         if (actual.IsForceOffline.Value)
         {
-            return State(CandidateState.Invalid, LogReason.ActualForceOffline);
+            return State(CandidateState.Invalid, LogReason.ActualForceOffline, boundariesTrusted: true);
         }
 
         if (actual.IsDamaged is null || actual.IsSnapshot is null || actual.IsIncomplete is null)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualMetadataUnknown);
+            return State(CandidateState.Unresolved, LogReason.ActualMetadataUnknown, boundariesTrusted: false);
         }
 
         if (actual.IsDamaged.Value || actual.IsSnapshot.Value || actual.IsIncomplete.Value)
         {
-            return State(CandidateState.Invalid, LogReason.ActualMetadataInvalid);
+            return State(CandidateState.Invalid, LogReason.ActualMetadataInvalid, boundariesTrusted: true);
         }
 
-        if (actual.UseChecksum is null || actual.UseCompression is null)
+        if (candidate.ProtectionExpectation is not { } expectation
+            || actual.UseChecksum is null
+            || actual.UseCompression is null)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualProtectionUnknown);
+            return State(CandidateState.Unresolved, LogReason.ActualProtectionUnknown, boundariesTrusted: false);
         }
 
-        if (actual.UseChecksum.Value != request.ExpectedUseChecksum
-            || actual.UseCompression.Value != request.ExpectedUseCompression)
+        if (actual.UseChecksum.Value != expectation.UseChecksum
+            || actual.UseCompression.Value != expectation.UseCompression)
         {
-            return State(CandidateState.Invalid, LogReason.ActualProtectionMismatch);
+            return State(CandidateState.Invalid, LogReason.ActualProtectionMismatch, boundariesTrusted: true);
         }
 
         if (!actual.HasCompleteIdentity)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualIdentityUnknown);
+            return State(CandidateState.Unresolved, LogReason.ActualIdentityUnknown, boundariesTrusted: false);
         }
 
         if (actual.Database != request.Start.Database)
         {
-            return State(CandidateState.Unsupported, LogReason.ActualIdentityUnsupported);
+            return State(CandidateState.Unsupported, LogReason.ActualIdentityUnsupported, boundariesTrusted: true);
         }
 
         if (!actual.HasCompleteBranch)
         {
-            return State(CandidateState.Unresolved, LogReason.ActualBranchUnknown);
+            return State(CandidateState.Unresolved, LogReason.ActualBranchUnknown, boundariesTrusted: false);
         }
 
         if (actual.Branch!.FirstRecoveryForkId != actual.Branch.RecoveryForkId)
         {
-            return State(CandidateState.Unsupported, LogReason.ActualBranchUnsupported);
+            return State(CandidateState.Unsupported, LogReason.ActualBranchUnsupported, boundariesTrusted: true);
         }
 
         if (actual.Branch != request.Start.Branch)
         {
-            return State(CandidateState.Unsupported, LogReason.ActualBranchUnsupported);
+            return State(CandidateState.Unsupported, LogReason.ActualBranchUnsupported, boundariesTrusted: true);
         }
 
         if (actual.Generation is not { IsKnown: true })
         {
-            return State(CandidateState.Unresolved, LogReason.ActualGenerationUnknown);
+            return State(CandidateState.Unresolved, LogReason.ActualGenerationUnknown, boundariesTrusted: false);
         }
 
         if (request.Start.Generation is not { IsKnown: true }
             || actual.Generation.GenerationId != request.Start.Generation.GenerationId)
         {
-            return State(CandidateState.Unsupported, LogReason.ActualGenerationUnsupported);
+            return State(CandidateState.Unsupported, LogReason.ActualGenerationUnsupported, boundariesTrusted: true);
         }
 
-        return State(CandidateState.Valid, LogReason.CoverageContinuous);
+        return candidate.LocationCopy switch
+        {
+            LogLocationCopyState.Unknown => State(
+                CandidateState.Unresolved,
+                LogReason.CopyUnknown,
+                boundariesTrusted: true),
+            LogLocationCopyState.Missing => State(
+                CandidateState.Unresolved,
+                LogReason.CopyMissing,
+                boundariesTrusted: true),
+            _ => State(CandidateState.Valid, LogReason.CoverageContinuous, boundariesTrusted: true),
+        };
     }
 
-    private static bool Conflicts(LogCoverageCandidate left, LogCoverageCandidate right)
+    private static bool CanBridge(ClassifiedCandidate candidate, decimal frontier)
     {
-        var a = left.Actual;
-        var b = right.Actual;
-        return left.Location != right.Location
-            || left.IsManaged != right.IsManaged
-            || (a.Status == LogEvidenceStatus.SourceConflict) != (b.Status == LogEvidenceStatus.SourceConflict)
-            || a.FirstLsn != b.FirstLsn
-            || a.LastLsn != b.LastLsn
-            || a.Type != b.Type
-            || a.IsCopyOnly != b.IsCopyOnly
-            || a.RecoveryModel != b.RecoveryModel
-            || a.HasBulkLoggedData != b.HasBulkLoggedData
-            || a.IsForceOffline != b.IsForceOffline
-            || a.UseChecksum != b.UseChecksum
-            || a.UseCompression != b.UseCompression
-            || a.IsDamaged != b.IsDamaged
-            || a.IsSnapshot != b.IsSnapshot
-            || a.IsIncomplete != b.IsIncomplete
-            || a.Database != b.Database
-            || a.Branch != b.Branch
-            || a.Generation?.GenerationId != b.Generation?.GenerationId;
-    }
+        if (!candidate.BoundariesTrusted)
+        {
+            return true;
+        }
 
-    private static bool CanBridge(ClassifiedCandidate candidate, decimal frontier) =>
-        (candidate.FirstLsn is null || candidate.FirstLsn.Value.Value <= frontier)
-        && (candidate.LastLsn is null || candidate.LastLsn.Value.Value > frontier);
+        return (candidate.FirstLsn is null || candidate.FirstLsn.Value.Value <= frontier)
+            && (candidate.LastLsn is null || candidate.LastLsn.Value.Value > frontier);
+    }
 
     private static ClassifiedCandidate? NextKnownFirst(
         IReadOnlyList<ClassifiedCandidate> classified,
         BackupLsn frontier)
     {
         return classified
-            .Where(candidate => candidate.FirstLsn is not null
+            .Where(candidate => candidate.BoundariesTrusted
+                && candidate.FirstLsn is not null
                 && candidate.FirstLsn.Value.Value > frontier.Value)
             .OrderBy(candidate => candidate.FirstLsn!.Value.Value)
             .ThenBy(candidate => candidate.BackupSetId)
             .FirstOrDefault();
     }
 
-    private static decimal MissingRunEnd(
-        IReadOnlyList<ClassifiedCandidate> missingCopies,
-        decimal frontier)
-    {
-        var end = frontier;
-        var extended = true;
-        while (extended)
-        {
-            extended = false;
-            foreach (var candidate in missingCopies)
-            {
-                if (candidate.FirstLsn is { } first
-                    && candidate.LastLsn is { } last
-                    && first.Value <= end
-                    && last.Value > end)
-                {
-                    end = last.Value;
-                    extended = true;
-                }
-            }
-        }
-
-        return end;
-    }
-
     private static LogCoverageResult Create(
         LogCoverageConclusion conclusion,
         BackupLsn? frontier,
         LogDataStartDecision start,
+        IReadOnlyList<LogObservationConflict> conflicts,
         IEnumerable<Guid> used,
         IEnumerable<LogCoverageRange> continuous,
         IEnumerable<LogCoverageRange> gaps,
@@ -631,6 +651,7 @@ public static class LogCoverageRules
             conclusion,
             frontier,
             start,
+            conflicts,
             used,
             continuous,
             gaps,
@@ -639,10 +660,13 @@ public static class LogCoverageRules
             reasons,
             classified
                 .Where(candidate => candidate.State != CandidateState.Valid)
-                .Select(candidate => candidate.BackupSetId));
+                .Select(candidate => candidate.BackupSetId)
+                .Concat(conflicts.Select(conflict => conflict.BackupSetId)));
     }
 
-    private static LogCoverageResult Unavailable(LogDataStartDecision start, bool enumerationComplete)
+    private static LogCoverageResult Unavailable(
+        LogDataStartDecision start,
+        bool enumerationComplete)
     {
         var reasons = new List<string> { LogReason.CoverageUnknown, LogReason.StartNotAvailable };
         if (!enumerationComplete)
@@ -654,6 +678,7 @@ public static class LogCoverageRules
             LogCoverageConclusion.Unknown,
             null,
             start,
+            start.Conflicts,
             [],
             [],
             [],
@@ -661,6 +686,16 @@ public static class LogCoverageRules
             [],
             reasons,
             []);
+    }
+
+    private static void RequireScope(LogLocationScope scope, string parameterName)
+    {
+        RequireDefined(scope.Kind, parameterName);
+        if (scope.Kind == LogStorageLocation.Remote
+            && (scope.StorageTargetId is null || scope.StorageTargetId == Guid.Empty))
+        {
+            throw new ArgumentException("远端位置必须携带具体存储目标。", parameterName);
+        }
     }
 
     private static void RequireDefined<TEnum>(TEnum value, string parameterName)
@@ -675,10 +710,9 @@ public static class LogCoverageRules
     private enum CandidateState
     {
         Valid = 1,
-        MissingCopy = 2,
-        Unresolved = 3,
-        Unsupported = 4,
-        Invalid = 5
+        Unresolved = 2,
+        Unsupported = 3,
+        Invalid = 4
     }
 
     private sealed record ClassifiedCandidate(
@@ -686,5 +720,6 @@ public static class LogCoverageRules
         CandidateState State,
         BackupLsn? FirstLsn,
         BackupLsn? LastLsn,
-        string ReasonCode);
+        string ReasonCode,
+        bool BoundariesTrusted);
 }

@@ -11,6 +11,7 @@ internal static class LogTestData
     public static readonly BackupRecoveryBranch Branch = new(Id(4), Id(4));
     public static readonly LogChainGeneration Generation = new(Id(5), LogGenerationEvidenceKind.BeginsLogChain);
     public static readonly Guid FullId = Id(10);
+    public static readonly LogProtectionExpectation DefaultProtection = new(UseChecksum: true, UseCompression: false);
 
     public static Guid Id(int value) => new($"00000000-0000-0000-0000-{value:D12}");
 
@@ -72,17 +73,19 @@ internal static class LogTestData
         decimal? first = 200,
         decimal? last = 300,
         LogBackupActualMetadata? actual = null,
-        LogStorageLocation location = LogStorageLocation.Local,
+        LogLocationScope? scope = null,
         LogLocationCopyState copy = LogLocationCopyState.Available,
-        bool managed = true)
+        bool managed = true,
+        LogProtectionExpectation? protection = null)
     {
         return new LogCoverageCandidate
         {
             BackupSetId = id,
             Actual = actual ?? Metadata(first, last),
-            Location = location,
+            Scope = scope ?? LogLocationScope.Local,
             LocationCopy = copy,
             IsManaged = managed,
+            ProtectionExpectation = protection ?? DefaultProtection,
         };
     }
 
@@ -91,7 +94,7 @@ internal static class LogTestData
         decimal last = 200,
         decimal first = 100,
         decimal databaseBackupLsn = 150,
-        LogStorageLocation location = LogStorageLocation.Local,
+        LogLocationScope? scope = null,
         LogLocationCopyState copy = LogLocationCopyState.Available,
         bool managed = true,
         bool copyOnly = false,
@@ -107,7 +110,7 @@ internal static class LogTestData
                 type: BackupType.Full,
                 copyOnly: copyOnly,
                 databaseBackupLsn: databaseBackupLsn),
-            Location = location,
+            Scope = scope ?? LogLocationScope.Local,
             LocationCopy = copy,
             IsManaged = managed,
         };
@@ -119,7 +122,7 @@ internal static class LogTestData
         decimal last,
         DifferentialBaselineConclusion dependency = DifferentialBaselineConclusion.Verified,
         decimal first = 201,
-        LogStorageLocation location = LogStorageLocation.Local,
+        LogLocationScope? scope = null,
         bool managed = true)
     {
         return new LogDataStartCandidate
@@ -130,18 +133,20 @@ internal static class LogTestData
                 last,
                 type: BackupType.Differential,
                 copyOnly: false),
-            Location = location,
+            Scope = scope ?? LogLocationScope.Local,
             IsManaged = managed,
             DifferentialDependency = dependency,
             MatchesFullBackupSetId = matchesFullId,
         };
     }
 
-    public static LogDataStartDecision AvailableStart(decimal restorePoint = 200)
+    public static LogDataStartDecision AvailableStart(
+        decimal restorePoint = 200,
+        LogLocationScope? scope = null)
     {
         return LogDataStartRules.Select(new LogDataStartRequest(
-            LogStorageLocation.Local,
-            [FullCandidate(last: restorePoint)]));
+            scope ?? LogLocationScope.Local,
+            [FullCandidate(last: restorePoint, scope: scope)]));
     }
 
     public static LogCoverageRequest CoverageRequest(
@@ -152,9 +157,7 @@ internal static class LogTestData
         return new LogCoverageRequest(
             start,
             enumerationComplete,
-            candidates,
-            expectedUseChecksum: true,
-            expectedUseCompression: false);
+            candidates);
     }
 
     public static LogTechnicalReadinessFacts ReadyFacts()

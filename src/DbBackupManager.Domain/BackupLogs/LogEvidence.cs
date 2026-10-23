@@ -51,6 +51,58 @@ public enum LogStorageLocation
     Remote = 2
 }
 
+/// <summary>
+/// 受约束的具体位置作用域。远端必须携带稳定目标标识，不能只写 Remote 后跨目标拼接。
+/// </summary>
+public readonly record struct LogLocationScope
+{
+    public LogLocationScope(LogStorageLocation kind, Guid? storageTargetId = null)
+    {
+        if (!Enum.IsDefined(kind))
+        {
+            throw new ArgumentOutOfRangeException(nameof(kind), kind, "枚举值无效。");
+        }
+
+        if (kind == LogStorageLocation.Local)
+        {
+            if (storageTargetId is not null)
+            {
+                throw new ArgumentException("本地位置不能携带远端存储目标。", nameof(storageTargetId));
+            }
+
+            StorageTargetId = null;
+        }
+        else
+        {
+            if (storageTargetId is null || storageTargetId == Guid.Empty)
+            {
+                throw new ArgumentException("远端位置必须携带具体存储目标。", nameof(storageTargetId));
+            }
+
+            StorageTargetId = storageTargetId;
+        }
+
+        Kind = kind;
+    }
+
+    public LogStorageLocation Kind { get; }
+
+    public Guid? StorageTargetId { get; }
+
+    public static LogLocationScope Local { get; } = new(LogStorageLocation.Local);
+
+    public static LogLocationScope Remote(Guid storageTargetId) =>
+        new(LogStorageLocation.Remote, storageTargetId);
+
+    public override string ToString() =>
+        Kind == LogStorageLocation.Local
+            ? "Local"
+            : $"Remote:{StorageTargetId}";
+}
+
+/// <summary>候选自身绑定的不可变执行选项，不得用当前版本选项重验历史候选。</summary>
+public sealed record LogProtectionExpectation(bool UseChecksum, bool UseCompression);
+
 public enum LogLocationCopyState
 {
     Available = 1,
