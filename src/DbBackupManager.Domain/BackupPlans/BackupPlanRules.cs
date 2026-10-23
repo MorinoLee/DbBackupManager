@@ -26,7 +26,10 @@ public enum BackupAdmissionStatus
     BaselineRequired = 5,
     DatabaseBackupBusy = 6,
     LogBackupBusy = 7,
-    DatabaseAndLogMustQueue = 8
+    DatabaseAndLogMustQueue = 8,
+
+    /// <summary>旧预留入口不携带 LOG 专用技术事实，不能仅凭基线或日志序列布尔值放行。</summary>
+    LogTechnicalFactsRequired = 9
 }
 
 public readonly record struct BackupPlanProtectionOptions
@@ -115,6 +118,7 @@ public readonly record struct BackupAdmissionRequest
 
     public bool HasManagedBaseline { get; }
 
+    /// <summary>旧预留布尔值，仅保留调用面；它不是 LOG 技术就绪或调用授权。</summary>
     public bool HasValidLogSequence { get; }
 
     public BackupPlanProtectionOptions Protection { get; }
@@ -257,9 +261,14 @@ public static class BackupPlanRules
             return BackupAdmissionDecision.Deny(BackupAdmissionStatus.RecoveryModelUnsupported);
         }
 
+        // 旧预留入口没有 LOG 专用技术事实；HasManagedBaseline/HasValidLogSequence 不能作为最终放行。
+        if (request.Purpose == BackupRunPurpose.PlanLog)
+        {
+            return BackupAdmissionDecision.Deny(BackupAdmissionStatus.LogTechnicalFactsRequired);
+        }
+
         if (RequiresEstablishedBaseline(request.Purpose)
-            && !request.HasManagedBaseline
-            && !LogSequenceAllowsBackup(request))
+            && !request.HasManagedBaseline)
         {
             return BackupAdmissionDecision.Deny(BackupAdmissionStatus.BaselineRequired);
         }
@@ -292,12 +301,7 @@ public static class BackupPlanRules
 
     private static bool RequiresEstablishedBaseline(BackupRunPurpose purpose)
     {
-        return purpose is BackupRunPurpose.PlanDifferential or BackupRunPurpose.PlanLog;
-    }
-
-    private static bool LogSequenceAllowsBackup(BackupAdmissionRequest request)
-    {
-        return request.Purpose == BackupRunPurpose.PlanLog && request.HasValidLogSequence;
+        return purpose == BackupRunPurpose.PlanDifferential;
     }
 
     private static BackupAdmissionStatus? ResourceConflict(
