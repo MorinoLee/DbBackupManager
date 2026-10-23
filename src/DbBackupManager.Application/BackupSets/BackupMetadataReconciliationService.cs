@@ -119,7 +119,8 @@ public sealed class BackupMetadataReconciliationService(
                     RecoveryForkId = Field(current.CurrentRecoveryForkId),
                     DifferentialBaseGuid = Field(file?.BaseBackupSetGuid),
                     DifferentialBaseLsn = Field(file?.BaseLsn)
-                }, new(null, BackupCompletionTimeSource.Unknown, BackupCompletionTimeReason.SqlFinishMissing), active));
+                }, new(null, BackupCompletionTimeSource.Unknown, BackupCompletionTimeReason.SqlFinishMissing), active,
+                evidence.Active.ObservedAtUtc));
         }
         var command = new RegisterBackupSetCommand(request.Lease, request.BackupSetId, request.DatabaseId,
             request.MutationId, request.ObservedAtUtc, merged, completion, historical, baseId,
@@ -146,7 +147,8 @@ public sealed class BackupMetadataReconciliationService(
         BackupSetObservation Observation(BackupMetadataSourceEvidence source, BackupSetEvidenceKind kind,
             BackupSetAssessment assessment) => new(source.Source, kind, source.Metadata,
                 BackupCompletionTimeRules.Evaluate(kind == BackupSetEvidenceKind.Backup ? request.PlatformCompletedAtUtc : null,
-                    source.Metadata.SqlFinishedLocal.Value, request.ObservedAtUtc, evidence.CurrentServerOffset, evidence.ServerTimeZone), assessment);
+                    source.Metadata.SqlFinishedLocal.Value, request.ObservedAtUtc, evidence.CurrentServerOffset, evidence.ServerTimeZone),
+                assessment, source.ObservedAtUtc);
     }
 
     public Task<BackupTaskStoreResult<BackupSetRegistrationResult>> CommitAsync(

@@ -398,10 +398,7 @@ public sealed class BackupSetSqlServerTests(PlatformDatabaseSqlServerFixture dat
             await migrator.MigrateAsync();
             Assert.Equal(2, await TableCountAsync(db));
             Assert.True(await HasAssociationColumnAsync(db));
-            // 计划任务带有计划身份和 SQL 身份绑定，51003 与 51004 会拒绝带着它们回退。
-            // 空库先退到备份集迁移，再写入备份集，单独检验 51001。父行属于已删除的策略任务模型，只为本测试关闭外键。
-            var setMigration = migrations.Single(x => x.EndsWith("_AddBackupSets", StringComparison.Ordinal));
-            await migrator.MigrateAsync(setMigration);
+            // 最新 LOG 元数据迁移必须先保护已有备份/执行数据；回退被拒绝后，库仍停留在最新模型。
             await db.Database.ExecuteSqlRawAsync(
                 """
                 ALTER TABLE [BackupSets] NOCHECK CONSTRAINT [FK_BackupSets_BackupAttempts_TaskId_AttemptId];
@@ -418,7 +415,7 @@ public sealed class BackupSetSqlServerTests(PlatformDatabaseSqlServerFixture dat
             await db.SaveChangesAsync();
             var setHistory = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
-            Assert.Equal(51001, error.Number);
+            Assert.Equal(51014, error.Number);
             Assert.Equal(2, await TableCountAsync(db));
             Assert.True(await HasAssociationColumnAsync(db));
             Assert.Equal(setHistory, (await db.Database.GetAppliedMigrationsAsync()).ToArray());

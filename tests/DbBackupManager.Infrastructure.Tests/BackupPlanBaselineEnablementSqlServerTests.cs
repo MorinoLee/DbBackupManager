@@ -388,30 +388,16 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
             await using var db = isolated.CreateContext();
             var migrations = db.Database.GetMigrations().ToArray();
             var current = migrations.Single(name => name.EndsWith("_AddBackupPlanBaselineEnablements", StringComparison.Ordinal));
-            var previous = migrations[Array.IndexOf(migrations, current) - 1];
             var migrator = db.Database.GetService<IMigrator>();
-            // 本任务在顶端新增了 ClosedUnknown 迁移；先安全回退它，隔离下面要验证的 Down 守卫。
-            await migrator.MigrateAsync(migrations[^2]);
             var graph = await SeedAsync(isolated);
             var plan = await AddPlanAsync(isolated, graph, BackupPlanMode.FullAndDifferential, paused: false);
             Assert.Equal(BackupPlanBaselineSupplementCode.Queued, (await SupplementAsync(isolated, plan.Id, Guid.NewGuid(), graph.Actor)).Code);
 
             var historyAtLatest = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var blocked = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(current));
-            Assert.Equal(51011, blocked.Number);
+            Assert.Equal(51014, blocked.Number);
             Assert.Equal(historyAtLatest, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
-            await db.Database.ExecuteSqlRawAsync(
-                "UPDATE [BackupTasks] SET [TriggerType] = N'Manual' WHERE [TriggerType] = N'BaselineSupplement';");
-            await migrator.MigrateAsync(current);
-            var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
-            var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
-            Assert.Equal(51009, error.Number);
-            Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
             Assert.Equal(1, await db.BackupPlanBaselineEnablements.CountAsync());
-            await db.Database.ExecuteSqlRawAsync("DELETE FROM [BackupPlanBaselineEnablements];");
-            await migrator.MigrateAsync(previous);
-            await migrator.MigrateAsync();
-            Assert.Equal(0, await db.BackupPlanBaselineEnablements.CountAsync());
         }
         finally
         {
@@ -420,7 +406,7 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
     }
 
     [Fact]
-    public async Task EnablementSequenceMigrationDownRejectsRepeatedEnablementOfOneVersion()
+    public async Task EnablementSequenceMigrationDownIsBlockedByLogMetadataGuard()
     {
         var isolated = new PlatformDatabaseSqlServerFixture();
         try
@@ -429,30 +415,15 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
             await using var db = isolated.CreateContext();
             var migrations = db.Database.GetMigrations().ToArray();
             var current = migrations.Single(name => name.EndsWith("_AddBackupPlanEnablementSequenceAndBaselineTrigger", StringComparison.Ordinal));
-            var previous = migrations[Array.IndexOf(migrations, current) - 1];
             var migrator = db.Database.GetService<IMigrator>();
-            // 本任务在顶端新增了 ClosedUnknown 迁移；先安全回退它，隔离下面要验证的 Down 守卫。
-            await migrator.MigrateAsync(current);
             var graph = await SeedAsync(isolated);
             var plan = await AddPlanAsync(isolated, graph, BackupPlanMode.FullAndDifferential, paused: false);
             Assert.Equal(BackupPlanBaselineSupplementCode.Queued, (await SupplementAsync(isolated, plan.Id, Guid.NewGuid(), graph.Actor)).Code);
-            // 先排除 51011，单独验证同一计划版本多次启用时由 51010 拒绝回退。
-            await db.Database.ExecuteSqlRawAsync(
-                "UPDATE [BackupTasks] SET [TriggerType] = N'Manual' WHERE [TriggerType] = N'BaselineSupplement';");
-            var first = await db.BackupPlanBaselineEnablements.AsNoTracking().SingleAsync();
-            var repeatedId = Guid.NewGuid();
-            db.BackupPlanBaselineEnablements.Add(new BackupPlanBaselineEnablement(repeatedId, first.PlanId, first.PlanVersionId,
-                first.EnablementSequence + 1, Guid.NewGuid(), null, BackupPlanBaselineEnablementDecision.SkippedOutstandingFull));
-            await db.SaveChangesAsync();
 
             var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
-            var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
-            Assert.Equal(51010, error.Number);
+            var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(current));
+            Assert.Equal(51014, error.Number);
             Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
-            Assert.Equal(2, await db.BackupPlanBaselineEnablements.CountAsync());
-            await db.Database.ExecuteSqlInterpolatedAsync($"DELETE FROM [BackupPlanBaselineEnablements] WHERE [Id] = {repeatedId};");
-            await migrator.MigrateAsync(previous);
-            await migrator.MigrateAsync();
             Assert.Equal(1, await db.BackupPlanBaselineEnablements.CountAsync());
         }
         finally

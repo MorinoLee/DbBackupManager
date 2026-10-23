@@ -17,6 +17,8 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
             bs.differential_base_guid AS DifferentialBaseGUID, bs.is_copy_only AS IsCopyOnly,
             bs.has_backup_checksums AS HasBackupChecksums, media.is_compressed AS Compressed,
             bs.is_damaged AS IsDamaged, bs.is_snapshot AS IsSnapshot, bs.has_incomplete_metadata AS HasIncompleteMetadata,
+            bs.recovery_model AS RecoveryModel, bs.begins_log_chain AS BeginsLogChain,
+            bs.has_bulk_logged_data AS HasBulkLoggedData, bs.is_force_offline AS IsForceOffline,
             bs.backup_start_date AS BackupStartDate, bs.backup_finish_date AS BackupFinishDate
         FROM msdb.dbo.backupset AS bs JOIN msdb.dbo.backupmediaset AS media ON media.media_set_id = bs.media_set_id
         """;
@@ -67,6 +69,7 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
     private async Task<BackupMetadataSourceEvidence> ReadSingleAsync(string sql, TargetSqlBackupMetadataRequest request,
         BackupSetEvidenceSource source, Guid? requestedGuid, CancellationToken cancellationToken)
     {
+        var observedAt = _clock.GetUtcNow();
         try
         {
             await using var command = Command(sql, request);
@@ -76,10 +79,11 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var rows = new List<BackupMetadataSourceEvidence>();
             while (await reader.ReadAsync(cancellationToken)) rows.Add(new BackupMetadataRowMapper(reader).Map(source));
-            if (rows.Count == 1) return rows[0] with { RequestedBackupSetGuid = requestedGuid };
+            if (rows.Count == 1) return rows[0] with { RequestedBackupSetGuid = requestedGuid, ObservedAtUtc = observedAt };
             return new(source, new(), rows.Count == 0 ? BaselineEvidenceStatus.HistoryNotFound : BaselineEvidenceStatus.MissingFields,
                 [new("record", rows.Count == 0 ? BackupMetadataReadProblem.NotFound : BackupMetadataReadProblem.NotUnique)],
-                RequestedBackupSetGuid: requestedGuid, AmbiguousRecords: rows.Select(x => x.Metadata).ToArray());
+                RequestedBackupSetGuid: requestedGuid, AmbiguousRecords: rows.Select(x => x.Metadata).ToArray(),
+                ObservedAtUtc: observedAt);
         }
         catch (OperationCanceledException) { return Failure(TargetSqlFailureCode.Cancelled); }
         catch (Exception exception) when (TargetSqlClientException.CanClassify(exception))
@@ -87,11 +91,16 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
         catch (Exception exception) when (TargetSqlClientException.IsResponseShapeFailure(exception))
         { return Failure(TargetSqlFailureCode.InvalidResponse); }
         BackupMetadataSourceEvidence Failure(TargetSqlFailureCode code) =>
-            SqlClientTargetSqlBackupMetadataReader.FailedSource(source, code) with { RequestedBackupSetGuid = requestedGuid };
+            SqlClientTargetSqlBackupMetadataReader.FailedSource(source, code) with
+            {
+                RequestedBackupSetGuid = requestedGuid,
+                ObservedAtUtc = observedAt,
+            };
     }
 
     public async Task<BackupActiveMetadataEvidence> ReadActiveAsync(TargetSqlActiveBaselineRequest request, CancellationToken cancellationToken)
     {
+        var observedAt = _clock.GetUtcNow();
         try
         {
             var database = request.DatabaseName.Replace("]", "]]", StringComparison.Ordinal);
@@ -125,14 +134,15 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
                 issues.AddRange(mapper.Issues);
             }
             if (files.Count == 0) { status = BaselineEvidenceStatus.MissingFields; issues.Add(new("record", BackupMetadataReadProblem.NotFound)); }
-            return new(new(identity ?? new(null, null), fork, files, status), diagnosticFirst, issues.AsReadOnly());
+            return new(new(identity ?? new(null, null), fork, files, status), diagnosticFirst, issues.AsReadOnly(), ObservedAtUtc: observedAt);
         }
         catch (OperationCanceledException) { return Failure(TargetSqlFailureCode.Cancelled); }
         catch (Exception exception) when (TargetSqlClientException.CanClassify(exception))
         { return Failure(TargetSqlClientException.From(exception, TargetSqlClientOperation.ReadOnlyCommand).FailureCode); }
         catch (Exception exception) when (TargetSqlClientException.IsResponseShapeFailure(exception))
         { return Failure(TargetSqlFailureCode.InvalidResponse); }
-        static BackupActiveMetadataEvidence Failure(TargetSqlFailureCode code) => SqlClientTargetSqlBackupMetadataReader.Failed(code).Active;
+        BackupActiveMetadataEvidence Failure(TargetSqlFailureCode code) =>
+            SqlClientTargetSqlBackupMetadataReader.Failed(code).Active with { ObservedAtUtc = observedAt };
     }
 
     private SqlCommand Command(string sql, TargetSqlBackupMetadataRequest request) => new(sql, _connection) { CommandTimeout = request.TimeoutSeconds };

@@ -21,17 +21,29 @@ public sealed record TargetSqlBackupMetadataRequest
     public int TimeoutSeconds { get; }
 }
 
-public enum BackupMetadataReadProblem { MissingColumn, NullValue, InvalidValue, NotFound, NotUnique, ReadFailed }
+public enum BackupMetadataReadProblem
+{
+    MissingColumn,
+    NullValue,
+    InvalidValue,
+    NotFound,
+    NotUnique,
+    ReadFailed,
+    SourceConflict,
+    NotAttempted
+}
 public sealed record BackupMetadataReadIssue(string Field, BackupMetadataReadProblem Problem);
 
 public sealed record BackupMetadataSourceEvidence(
     BackupSetEvidenceSource Source, BackupSetMetadata Metadata, BaselineEvidenceStatus Status,
     IReadOnlyList<BackupMetadataReadIssue> Issues, TargetSqlFailureCode? FailureCode = null,
-    Guid? RequestedBackupSetGuid = null, IReadOnlyList<BackupSetMetadata>? AmbiguousRecords = null);
+    Guid? RequestedBackupSetGuid = null, IReadOnlyList<BackupSetMetadata>? AmbiguousRecords = null,
+    DateTimeOffset? ObservedAtUtc = null);
 
 public sealed record BackupActiveMetadataEvidence(
     ActiveDifferentialBaselineEvidence Baseline, Guid? DiagnosticFirstRecoveryForkId,
-    IReadOnlyList<BackupMetadataReadIssue> Issues, TargetSqlFailureCode? FailureCode = null)
+    IReadOnlyList<BackupMetadataReadIssue> Issues, TargetSqlFailureCode? FailureCode = null,
+    DateTimeOffset? ObservedAtUtc = null)
 {
     public BackupSetEvidenceSource Source { get; } = BackupSetEvidenceSource.Database;
 }

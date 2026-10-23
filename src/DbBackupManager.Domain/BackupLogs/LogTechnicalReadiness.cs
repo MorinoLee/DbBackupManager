@@ -158,9 +158,11 @@ public static class LogTechnicalReadinessRules
         && databaseGuid != Guid.Empty
         && familyGuid != Guid.Empty;
 
+    /// <summary>
+    /// 技术就绪只要求当前活动 fork 已知；目录首 fork 是诊断证据，缺失本身不阻断当前就绪。
+    /// </summary>
     private static bool CompleteBranch(BackupRecoveryBranch? branch) =>
-        branch is { FirstRecoveryForkId: { } firstFork, RecoveryForkId: { } recoveryFork }
-        && firstFork != Guid.Empty
+        branch is { RecoveryForkId: { } recoveryFork }
         && recoveryFork != Guid.Empty;
 
     private static void RequireDefined<TEnum>(TEnum value, string parameterName)

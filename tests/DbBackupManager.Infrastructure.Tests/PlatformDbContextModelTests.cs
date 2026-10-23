@@ -10,6 +10,38 @@ namespace DbBackupManager.Infrastructure.Tests;
 public sealed class PlatformDbContextModelTests
 {
     [Fact]
+    public void B13GeneratedModelMapsLogMetadataOnAllFourHosts()
+    {
+        using var context = CreateContext();
+        var script = context.Database.GenerateCreateScript();
+
+        foreach (var table in new[]
+        {
+            "BackupSets",
+            "BackupSetEvidence",
+            "BackupPlanExecutionOperations",
+            "BackupPlanExecutionObservations",
+        })
+        {
+            var start = script.IndexOf($"CREATE TABLE [{table}]", StringComparison.Ordinal);
+            Assert.True(start >= 0, table);
+            var next = script.IndexOf("CREATE TABLE ", start + 1, StringComparison.Ordinal);
+            var tableScript = script[start..(next < 0 ? script.Length : next)];
+            Assert.Contains("[RecoveryModel] nvarchar(20)", tableScript, StringComparison.Ordinal);
+            Assert.Contains("[RecoveryModelState] nvarchar(20)", tableScript, StringComparison.Ordinal);
+            Assert.Contains("[BeginsLogChainState] nvarchar(20)", tableScript, StringComparison.Ordinal);
+            Assert.Contains("[HasBulkLoggedDataState] nvarchar(20)", tableScript, StringComparison.Ordinal);
+            Assert.Contains("[IsForceOfflineState] nvarchar(20)", tableScript, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("[SourceObservedAtUtc]", script, StringComparison.Ordinal);
+        Assert.Contains("CK_BackupSets_RecoveryModel", script, StringComparison.Ordinal);
+        Assert.Contains("CK_BackupSetEvidence_SourceObservedAtUtc", script, StringComparison.Ordinal);
+        Assert.Contains("CK_BackupPlanExecutionOperations_RecoveryModel", script, StringComparison.Ordinal);
+        Assert.Contains("CK_BackupPlanExecutionObservations_RecoveryModel", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ModelContainsInitialEntitiesAndSqlServerGuards()
     {
         using var context = CreateContext();

@@ -42,6 +42,18 @@ internal sealed class BackupMetadataRowMapper(DbDataReader reader)
     });
     public BackupMetadataField<DateTime> Local(string column) => Field(column, value =>
         value is DateTime { Kind: DateTimeKind.Unspecified } date ? date : throw new ArgumentException("SQL 时间的 Kind 无效。"));
+    public BackupMetadataField<DatabaseRecoveryModel> RecoveryModel() =>
+        Field("RecoveryModel", value => value switch
+        {
+            string text => text.Trim().ToUpperInvariant() switch
+            {
+                "FULL" => DatabaseRecoveryModel.Full,
+                "BULK_LOGGED" or "BULK-LOGGED" => DatabaseRecoveryModel.BulkLogged,
+                "SIMPLE" => DatabaseRecoveryModel.Simple,
+                _ => throw new ArgumentException("恢复模式无效。")
+            },
+            _ => throw new ArgumentException("恢复模式类型无效。")
+        });
 
     public BackupMetadataSourceEvidence Map(BackupSetEvidenceSource source)
     {
@@ -76,10 +88,21 @@ internal sealed class BackupMetadataRowMapper(DbDataReader reader)
             IsDamaged = Flag("IsDamaged"),
             IsSnapshot = Flag("IsSnapshot"),
             HasIncompleteMetadata = Flag("HasIncompleteMetadata"),
+            RecoveryModel = RecoveryModel(),
+            BeginsLogChain = Flag("BeginsLogChain"),
+            HasBulkLoggedData = Flag("HasBulkLoggedData"),
+            IsForceOffline = Flag("IsForceOffline"),
             SqlStartedLocal = Local("BackupStartDate"),
             SqlFinishedLocal = Local("BackupFinishDate")
         };
         metadata.Validate();
-        return new(source, metadata, Issues.Count == 0 ? BaselineEvidenceStatus.Complete : BaselineEvidenceStatus.MissingFields, Issues.AsReadOnly());
+        // 新 LOG 四字段不反向要求旧 FULL/DIFF 来源提供；LOG 或类型未知时缺失仍是证据问题。
+        var relevantIssues = type.Value is BackupType.Full or BackupType.Differential
+            ? Issues.Where(issue => issue.Field is not ("RecoveryModel" or "BeginsLogChain"
+                or "HasBulkLoggedData" or "IsForceOffline")).ToArray()
+            : Issues.ToArray();
+        return new(source, metadata,
+            relevantIssues.Length == 0 ? BaselineEvidenceStatus.Complete : BaselineEvidenceStatus.MissingFields,
+            Array.AsReadOnly(relevantIssues));
     }
 }

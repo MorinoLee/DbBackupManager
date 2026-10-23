@@ -1,5 +1,6 @@
 using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
+using DbBackupManager.Domain.Configuration;
 
 namespace DbBackupManager.Domain.Tests.BackupTasks;
 
@@ -41,6 +42,35 @@ public sealed class BackupExecutionContractTests
     [InlineData(BackupExecutionOperationKind.ValidateCopy)]
     public void UncertainWritesCannotBeAbandonedAndIssuedAgain(BackupExecutionOperationKind kind) =>
         Assert.Throws<InvalidOperationException>(() => Operation(kind).Abandon());
+
+    [Fact]
+    public void B14FrozenLogMetadataAndSourceTimeRejectConflictingReplay()
+    {
+        var facts = new BackupExecutionFacts
+        {
+            Metadata = new()
+            {
+                RecoveryModel = BackupMetadata.Known(DatabaseRecoveryModel.Full),
+                BeginsLogChain = BackupMetadata.Known(false),
+                HasBulkLoggedData = BackupMetadata.Known(false),
+                IsForceOffline = BackupMetadata.Known(false),
+            },
+            EvidenceAtUtc = Now,
+            SqlSuccessObserved = true,
+        };
+        var operation = Operation(BackupExecutionOperationKind.Metadata);
+        operation.Freeze(facts);
+        operation.Freeze(facts with { });
+
+        Assert.Throws<InvalidOperationException>(() => operation.Freeze(facts with
+        {
+            Metadata = facts.Metadata with { BeginsLogChain = BackupMetadata.Known(true) },
+        }));
+        Assert.Throws<InvalidOperationException>(() => operation.Freeze(facts with
+        {
+            EvidenceAtUtc = Now.AddSeconds(1),
+        }));
+    }
 
     [Fact]
     public void FrozenPayloadRetainsLsnContentAndRejectsConflictingReplay()

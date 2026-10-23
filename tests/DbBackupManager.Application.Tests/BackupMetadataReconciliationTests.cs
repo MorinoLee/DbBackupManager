@@ -262,6 +262,60 @@ public sealed class BackupMetadataReconciliationTests
             prepared.Command.Observations.Count(x => x.Kind == BackupSetEvidenceKind.Dependency));
     }
 
+    [Fact]
+    public async Task B10HeaderAndHistoryObservationTimesRemainIndependent()
+    {
+        var headerAt = new DateTimeOffset(2026, 10, 8, 1, 59, 0, TimeSpan.Zero);
+        var historyAt = new DateTimeOffset(2026, 10, 8, 1, 58, 0, TimeSpan.Zero);
+        var evidence = Evidence(Full(), Full()) with
+        {
+            Header = Source(Full()) with
+            {
+                Source = BackupSetEvidenceSource.BackupHeader,
+                ObservedAtUtc = headerAt,
+            },
+            History = Source(Full()) with { ObservedAtUtc = historyAt }
+        };
+        var prepared = await new BackupMetadataReconciliationService(
+            new Reader(evidence), new Lookup(), new Store()).PrepareAsync(Request());
+
+        var header = Assert.Single(prepared.Command.Observations,
+            x => x.Source == BackupSetEvidenceSource.BackupHeader && x.Kind == BackupSetEvidenceKind.Backup);
+        var history = Assert.Single(prepared.Command.Observations,
+            x => x.Source == BackupSetEvidenceSource.Msdb && x.Kind == BackupSetEvidenceKind.Backup);
+        Assert.Equal(headerAt, header.SourceObservedAtUtc);
+        Assert.Equal(historyAt, history.SourceObservedAtUtc);
+        Assert.True(prepared.Command.ObservedAtUtc > headerAt);
+        Assert.True(prepared.Command.ObservedAtUtc > historyAt);
+    }
+
+    [Fact]
+    public async Task B04FourFieldConflictRetainsBothObservationsAndNoCompleteAssessment()
+    {
+        var full = Full();
+        var headerMetadata = full with
+        {
+            RecoveryModel = BackupMetadata.Known(DatabaseRecoveryModel.Full),
+            BeginsLogChain = BackupMetadata.Known(false),
+            HasBulkLoggedData = BackupMetadata.Known(false),
+            IsForceOffline = BackupMetadata.Known(false),
+        };
+        var historyMetadata = headerMetadata with { BeginsLogChain = BackupMetadata.Known(true) };
+        var evidence = new TargetSqlBackupMetadataEvidence(
+            Source(headerMetadata) with { Source = BackupSetEvidenceSource.BackupHeader },
+            Source(historyMetadata),
+            Active(full),
+            [],
+            null,
+            null);
+        var prepared = await new BackupMetadataReconciliationService(
+            new Reader(evidence), new Lookup(), new Store()).PrepareAsync(Request());
+
+        Assert.NotEqual(DifferentialBaselineConclusion.Verified, prepared.HistoricalDependency.Conclusion);
+        Assert.Contains(prepared.Command.Observations, x => x.Metadata.BeginsLogChain.Value == false);
+        Assert.Contains(prepared.Command.Observations, x => x.Metadata.BeginsLogChain.Value == true);
+    }
+
     private static BackupSetMetadata Full() => new()
     {
         BackupSetGuid = BackupMetadata.Known(Guid.NewGuid()),

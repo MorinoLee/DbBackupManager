@@ -159,7 +159,7 @@ public sealed class BackupSetEvidence
         BackupSetEvidenceSource source, BackupSetEvidenceKind kind,
         BackupSetMetadata metadata, BackupCompletionTimeDecision completion,
         BackupSetAssessment assessment, DateTimeOffset observedAtUtc, bool sqlSuccessObserved,
-        Guid? requestedBaseBackupSetId = null)
+        Guid? requestedBaseBackupSetId = null, DateTimeOffset? sourceObservedAtUtc = null)
     {
         Id = BackupSetCodes.RequireId(id);
         TaskId = BackupSetCodes.RequireId(taskId);
@@ -167,7 +167,9 @@ public sealed class BackupSetEvidence
         BackupSetId = backupSetId;
         MutationId = BackupSetCodes.RequireId(mutationId);
         if (reconciliationNumber < 1 || entryNumber < 0 || !Enum.IsDefined(source) || !Enum.IsDefined(kind)
-            || observedAtUtc.Offset != TimeSpan.Zero) throw new ArgumentException("证据编号、来源或时间无效。");
+            || observedAtUtc.Offset != TimeSpan.Zero
+            || sourceObservedAtUtc is { Offset.Ticks: not 0 })
+            throw new ArgumentException("证据编号、来源或时间无效。");
         metadata.Validate();
         assessment.Validate();
         BackupSetCodes.ValidateCompletion(completion);
@@ -179,6 +181,7 @@ public sealed class BackupSetEvidence
         Completion = completion;
         Assessment = assessment;
         ObservedAtUtc = observedAtUtc;
+        SourceObservedAtUtc = sourceObservedAtUtc;
         SqlSuccessObserved = sqlSuccessObserved;
         RequestedBaseBackupSetId = requestedBaseBackupSetId;
     }
@@ -197,5 +200,6 @@ public sealed class BackupSetEvidence
         new(null, BackupCompletionTimeSource.Unknown, BackupCompletionTimeReason.SqlFinishMissing);
     public BackupSetAssessment Assessment { get; private set; }
     public DateTimeOffset ObservedAtUtc { get; private set; }
+    public DateTimeOffset? SourceObservedAtUtc { get; private set; }
     public bool SqlSuccessObserved { get; private set; }
 }

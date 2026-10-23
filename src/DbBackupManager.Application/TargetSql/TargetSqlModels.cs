@@ -21,6 +21,8 @@ public enum TargetSqlFailurePhase
     BackupIdentityInspection,
     BackupVerification,
     ResponseProcessing,
+    DatabaseReadiness,
+    RecoveryStatusRead,
 }
 
 public enum TargetSqlFailureCode
@@ -44,6 +46,7 @@ public enum TargetSqlFailureCode
     InvalidResponse,
     BackupTypeNotValidated,
     DifferentialBaseMissing,
+    NotFoundOrNotVisible,
 }
 
 public enum TargetSqlDatabaseState

@@ -67,7 +67,14 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
                 };
                 operation = await _flow.FreezeAsync(session, operation, facts, command.Observations.Select((x, i) => new BackupExecutionObservationInput(i,
                     Enum.Parse<BackupExecutionObservationSource>(x.Source.ToString()), x.Kind,
-                    new() { Metadata = x.Metadata, Completion = x.Completion, Assessment = x.Assessment, SqlSuccessObserved = true })).ToArray(), token);
+                    new()
+                    {
+                        Metadata = x.Metadata,
+                        Completion = x.Completion,
+                        Assessment = x.Assessment,
+                        SqlSuccessObserved = true,
+                        EvidenceAtUtc = x.SourceObservedAtUtc,
+                    })).ToArray(), token);
             }
             if (operation.State != BackupExecutionOperationState.Applied)
             {
@@ -209,7 +216,14 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
                 }
                 observations.AddRange(command.Observations.Select((x, i) => new BackupExecutionObservationInput(i,
                     Enum.Parse<BackupExecutionObservationSource>(x.Source.ToString()), x.Kind,
-                    new() { Metadata = x.Metadata, Completion = x.Completion, Assessment = x.Assessment, SqlSuccessObserved = complete })));
+                    new()
+                    {
+                        Metadata = x.Metadata,
+                        Completion = x.Completion,
+                        Assessment = x.Assessment,
+                        SqlSuccessObserved = complete,
+                        EvidenceAtUtc = x.SourceObservedAtUtc,
+                    })));
             }
             var ended = await termination.ReadAsync(Connection(work), authorization.PermitId, authorization.Binding,
                 Math.Min(work.Snapshot.Policy.VerifyTimeoutMinutes * 60, 3600), token);

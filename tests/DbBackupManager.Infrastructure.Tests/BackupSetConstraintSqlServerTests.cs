@@ -36,6 +36,10 @@ public sealed class BackupSetConstraintSqlServerTests(PlatformDatabaseSqlServerF
                 "IsDamaged",
                 "IsSnapshot",
                 "HasIncompleteMetadata",
+                "RecoveryModel",
+                "BeginsLogChain",
+                "HasBulkLoggedData",
+                "IsForceOffline",
                 "SqlStartedLocal",
                 "SqlFinishedLocal",
             ];
@@ -71,8 +75,10 @@ public sealed class BackupSetConstraintSqlServerTests(PlatformDatabaseSqlServerF
         Assert.Equal(515, stateError.Number);
         var value = column.EndsWith("Lsn", StringComparison.Ordinal) ? "1"
             : column is "Type" ? "'Differential'"
+            : column is "RecoveryModel" ? "'Full'"
             : column.StartsWith("Sql", StringComparison.Ordinal) ? "'2026-10-07T12:00:00'"
-            : column.StartsWith("Is", StringComparison.Ordinal) || column.StartsWith("Has", StringComparison.Ordinal) ? "1"
+            : column.StartsWith("Is", StringComparison.Ordinal) || column.StartsWith("Has", StringComparison.Ordinal)
+                || column == "BeginsLogChain" ? "1"
             : "'00000001-0000-0000-0000-000000000001'";
         var unknownSql = $"UPDATE [{table}] SET [{column}State]='Unknown',[{column}]={value} WHERE [Id]={{0}}";
         var unknownError = await Assert.ThrowsAsync<SqlException>(() => db.Database.ExecuteSqlRawAsync(unknownSql, id));
@@ -96,6 +102,9 @@ public sealed class BackupSetConstraintSqlServerTests(PlatformDatabaseSqlServerF
         { "BackupSetEvidence", "Kind", "[Kind]='Other'", 547 },
         { "BackupSetEvidence", "ObservedAtUtc", "[ObservedAtUtc]=NULL", 515 },
         { "BackupSetEvidence", "ObservedAtUtc", "[ObservedAtUtc]='2026-10-07T12:00:00+01:00'", 547 },
+        { "BackupSetEvidence", "SourceObservedAtUtc", "[SourceObservedAtUtc]='2026-10-07T12:00:00+01:00'", 547 },
+        { "BackupSets", "RecoveryModel", "[RecoveryModelState]='Known',[RecoveryModel]='Unknown'", 547 },
+        { "BackupSetEvidence", "RecoveryModel", "[RecoveryModelState]='Known',[RecoveryModel]='Unknown'", 547 },
         { "BackupSets", "DifferentialFields", "[TypeState]='Known',[Type]='Full'", 547 },
         { "BackupSetEvidence", "DifferentialFields", "[TypeState]='Known',[Type]='Full'", 547 },
         { "BackupSets", "Assessment", "[Conclusion]=NULL", 547 },

@@ -33,7 +33,8 @@ internal sealed class BackupMetadataReconciliationLookup(IDbContextFactory<Platf
             || rows.Where((row, index) => row.EntryNumber != index).Any())
             throw new InvalidOperationException("已提交核对证据不完整，不能重放。");
         var request = rows[0];
-        var observations = rows.Skip(2).Select(x => new BackupSetObservation(x.Source, x.Kind, x.Metadata, x.Completion, x.Assessment)).ToArray();
+        var observations = rows.Skip(2).Select(x => new BackupSetObservation(x.Source, x.Kind, x.Metadata, x.Completion, x.Assessment,
+            x.SourceObservedAtUtc)).ToArray();
         var activeAssessments = observations.Where(x => x.Kind == BackupSetEvidenceKind.ActiveBaseline)
             .Select(x => x.Assessment).Distinct().ToArray();
         var active = activeAssessments.Length == 1 ? activeAssessments[0]

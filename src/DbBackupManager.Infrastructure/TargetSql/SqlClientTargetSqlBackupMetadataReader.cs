@@ -10,8 +10,10 @@ internal interface ITargetSqlMetadataSession
 }
 
 internal sealed class SqlClientTargetSqlBackupMetadataReader(
-    ITargetSqlCredentialResolver resolver, ITargetSqlClientSessionFactory factory) : ITargetSqlBackupMetadataReader
+    ITargetSqlCredentialResolver resolver, ITargetSqlClientSessionFactory factory, TimeProvider? clock = null) : ITargetSqlBackupMetadataReader
 {
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+
     public async Task<TargetSqlBackupMetadataEvidence> ReadAsync(TargetSqlConnectionInput connection,
         TargetSqlBackupMetadataRequest request, CancellationToken cancellationToken = default)
     {
@@ -22,12 +24,12 @@ internal sealed class SqlClientTargetSqlBackupMetadataReader(
         try
         {
             using var resolution = await resolver.ResolveSqlPasswordAsync(connection.CredentialReferenceId, deadline.Token);
-            if (resolution.FailureCode is { } failure) return Failed(failure);
+            if (resolution.FailureCode is { } failure) return FailedAt(failure);
             await using var session = await factory.OpenAsync(connection, resolution.Credential!, deadline.Token);
             var server = await session.ReadServerInfoAsync(deadline.Token);
             if (!TargetSqlServerInfoMapper.IsSupported(server, connection.AllowLegacyTls))
-                return Failed(TargetSqlFailureCode.UnsupportedServerVersion);
-            if (session is not ITargetSqlMetadataSession metadata) return Failed(TargetSqlFailureCode.InvalidResponse);
+                return FailedAt(TargetSqlFailureCode.UnsupportedServerVersion);
+            if (session is not ITargetSqlMetadataSession metadata) return FailedAt(TargetSqlFailureCode.InvalidResponse);
             var evidence = await metadata.ReadMetadataAsync(request, server, deadline.Token);
             if (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
                 evidence = evidence with
@@ -41,8 +43,8 @@ internal sealed class SqlClientTargetSqlBackupMetadataReader(
             return evidence;
         }
         catch (OperationCanceledException)
-        { return Failed(cancellationToken.IsCancellationRequested ? TargetSqlFailureCode.Cancelled : TargetSqlFailureCode.TimedOut); }
-        catch (TargetSqlClientException exception) { return Failed(exception.FailureCode); }
+        { return FailedAt(cancellationToken.IsCancellationRequested ? TargetSqlFailureCode.Cancelled : TargetSqlFailureCode.TimedOut); }
+        catch (TargetSqlClientException exception) { return FailedAt(exception.FailureCode); }
         static BackupMetadataSourceEvidence TimedOut(BackupMetadataSourceEvidence source) =>
             source.FailureCode == TargetSqlFailureCode.Cancelled ? source with { FailureCode = TargetSqlFailureCode.TimedOut } : source;
     }
@@ -55,4 +57,15 @@ internal sealed class SqlClientTargetSqlBackupMetadataReader(
         FailedSource(BackupSetEvidenceSource.BackupHeader, code), FailedSource(BackupSetEvidenceSource.Msdb, code),
         new(new(new(null, null), null, [], Status(code)), null, [new("source", BackupMetadataReadProblem.ReadFailed)], code),
         [], null, null);
+
+    private TargetSqlBackupMetadataEvidence FailedAt(TargetSqlFailureCode code)
+    {
+        var observedAt = _clock.GetUtcNow();
+        return new(
+            FailedSource(BackupSetEvidenceSource.BackupHeader, code) with { ObservedAtUtc = observedAt },
+            FailedSource(BackupSetEvidenceSource.Msdb, code) with { ObservedAtUtc = observedAt },
+            new(new(new(null, null), null, [], Status(code)), null, [new("source", BackupMetadataReadProblem.ReadFailed)], code,
+                ObservedAtUtc: observedAt),
+            [], null, null);
+    }
 }
