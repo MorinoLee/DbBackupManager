@@ -68,6 +68,18 @@ internal sealed class SqlClientTargetSqlLogReadinessReader(
             {
                 FailureCode = Timeout(evidence.Recovery.FailureCode),
             },
+            Recheck = evidence.Recheck is null
+                ? null
+                : evidence.Recheck with
+                {
+                    FailureCode = Timeout(evidence.Recheck.FailureCode),
+                },
+            RecoveryRecheck = evidence.RecoveryRecheck is null
+                ? null
+                : evidence.RecoveryRecheck with
+                {
+                    FailureCode = Timeout(evidence.RecoveryRecheck.FailureCode),
+                },
         };
     }
 

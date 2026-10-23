@@ -262,7 +262,7 @@ public sealed class LogMetadataMigrationSqlServerTests
         }
     }
 
-    private static async Task DropLogMetadataColumnsAsync(PlatformDbContext db)
+    internal static async Task DropLogMetadataColumnsAsync(PlatformDbContext db)
     {
         await db.Database.ExecuteSqlRawAsync($"""
             DECLARE @sql nvarchar(max) = N'';

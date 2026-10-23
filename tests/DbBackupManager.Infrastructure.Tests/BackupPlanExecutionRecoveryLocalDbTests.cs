@@ -8,6 +8,8 @@ using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace DbBackupManager.Infrastructure.Tests;
 
@@ -554,6 +556,102 @@ public sealed class BackupPlanExecutionRecoveryLocalDbTests(PlatformDatabaseSqlS
         Assert.Equal(BackupExecutionContractCode.Conflict, conflict.Code);
     }
 
+
+    [Fact]
+    public async Task B11B15AppliedReceiptUpgradeReplaysActualFreezeAndApply()
+    {
+        var fault = new PlanExecutionCommitFault("ApplyAsync", "Metadata");
+        await using var test = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalOnly, fault);
+        var taskId = await test.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        await Assert.ThrowsAsync<LostPlanCommitResponseException>(() => test.Runner.RunTaskOnceAsync(new(taskId, Guid.NewGuid())));
+        var (lease, identity, endpoint, path) = await ReadMetadataOperationAsync(platform, taskId);
+        var reads = test.MetadataReads;
+        await UpgradeAfterLegacyDropAsync(platform);
+
+        var operations = new BackupExecutionOperationStore(new BackupExecutionContractSqlServerTests.Factory(platform), TimeProvider.System);
+        var saved = await operations.ReadAsync(identity);
+        Assert.Equal(BackupExecutionOperationState.Applied, saved.Value!.State);
+        var replayFreeze = await operations.FreezeAsync(lease,
+            new(identity, saved.Value.Facts, saved.Value.Observations.ToArray()));
+        Assert.Equal(BackupExecutionContractCode.AlreadyApplied, replayFreeze.Code);
+        var changed = saved.Value.Observations.Select(x => x.EntryNumber == 0
+            ? x with { Facts = x.Facts with { EvidenceAtUtc = x.Facts.EvidenceAtUtc?.AddSeconds(1) } }
+            : x).ToArray();
+        Assert.Equal(BackupExecutionContractCode.Conflict,
+            (await operations.FreezeAsync(lease, new(identity, saved.Value.Facts, changed))).Code);
+
+        var read = await test.FileVerifier.OpenVerifiedAsync(new(taskId, lease.BackupAttemptId, endpoint, path, 30));
+        Assert.True(read.IsSucceeded);
+        await using var handle = read.Value!;
+        Assert.Equal(BackupExecutionContractCode.AlreadyApplied,
+            await test.Store.ApplyAsync(lease, identity, handle));
+        Assert.Equal(reads, test.MetadataReads);
+        await using var db = platform.CreateContext();
+        var evidence = await db.BackupSetEvidence.AsNoTracking()
+            .Where(x => x.AttemptId == lease.BackupAttemptId).ToArrayAsync();
+        Assert.NotEmpty(evidence);
+        Assert.All(evidence, row => Assert.Null(row.SourceObservedAtUtc));
+    }
+
+    [Fact]
+    public async Task B11B15FrozenReceiptUpgradeContinuesActualApplyPath()
+    {
+        var fault = new PlanExecutionCommitFault("FreezeAsync", "Metadata");
+        await using var test = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalOnly, fault);
+        var taskId = await test.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        await Assert.ThrowsAsync<LostPlanCommitResponseException>(() => test.Runner.RunTaskOnceAsync(new(taskId, Guid.NewGuid())));
+        var (lease, identity, endpoint, path) = await ReadMetadataOperationAsync(platform, taskId);
+        var reads = test.MetadataReads;
+        await UpgradeAfterLegacyDropAsync(platform);
+
+        var operations = new BackupExecutionOperationStore(new BackupExecutionContractSqlServerTests.Factory(platform), TimeProvider.System);
+        var frozenSaved = await operations.ReadAsync(identity);
+        Assert.Equal(BackupExecutionOperationState.Frozen, frozenSaved.Value!.State);
+        Assert.Equal(BackupExecutionContractCode.AlreadyApplied, (await operations.FreezeAsync(lease,
+            new(identity, frozenSaved.Value.Facts, frozenSaved.Value.Observations.ToArray()))).Code);
+        var frozenChanged = frozenSaved.Value.Observations.Select(x => x.EntryNumber == 0
+            ? x with { Facts = x.Facts with { EvidenceAtUtc = x.Facts.EvidenceAtUtc?.AddSeconds(1) } }
+            : x).ToArray();
+        Assert.Equal(BackupExecutionContractCode.Conflict,
+            (await operations.FreezeAsync(lease, new(identity, frozenSaved.Value.Facts, frozenChanged))).Code);
+        var read = await test.FileVerifier.OpenVerifiedAsync(new(taskId, lease.BackupAttemptId, endpoint, path, 30));
+        Assert.True(read.IsSucceeded);
+        await using var handle = read.Value!;
+        Assert.Equal(BackupExecutionContractCode.Succeeded,
+            await test.Store.ApplyAsync(lease, identity, handle));
+        Assert.Equal(reads, test.MetadataReads);
+        await using var db = platform.CreateContext();
+        var evidence = await db.BackupSetEvidence.AsNoTracking()
+            .Where(x => x.AttemptId == lease.BackupAttemptId && x.SourceObservedAtUtc != null).ToArrayAsync();
+        Assert.NotEmpty(evidence);
+        var saved = await operations.ReadAsync(identity);
+        Assert.Equal(BackupExecutionOperationState.Applied, saved.Value!.State);
+        Assert.All(evidence, row => Assert.Contains(row.SourceObservedAtUtc!.Value,
+            saved.Value.Observations.Select(x => x.Facts.EvidenceAtUtc!.Value)));
+    }
+
+    private static async Task<(LeaseHandle Lease, ReserveBackupExecutionOperation Identity,
+        BackupFileEndpointInput Endpoint, string Path)> ReadMetadataOperationAsync(
+        PlatformDatabaseSqlServerFixture platform, Guid taskId)
+    {
+        await using var db = platform.CreateContext();
+        var task = await db.BackupTasks.SingleAsync(x => x.Id == taskId);
+        var operation = await db.BackupPlanExecutionOperations.AsNoTracking()
+            .SingleAsync(x => x.TaskId == taskId && x.Kind == BackupExecutionOperationKind.Metadata);
+        var endpoint = BackupPlanExecutionStore.Endpoint((await db.BackupTaskSnapshots.SingleAsync(x => x.TaskId == taskId))
+            .ToSnapshotModel().WorkerSourceEndpoint);
+        var path = (await db.BackupAttempts.SingleAsync(x => x.TaskId == taskId)).WorkerSourceFilePath;
+        return (task.ToLeaseHandle(), new(operation.Id, operation.TaskId, operation.AttemptId, operation.Kind,
+            operation.Sequence, operation.IntendedBackupSetId, operation.ObservedAtUtc), endpoint, path);
+    }
+
+    private static async Task UpgradeAfterLegacyDropAsync(PlatformDatabaseSqlServerFixture platform)
+    {
+        await using var db = platform.CreateContext();
+        await LogMetadataMigrationSqlServerTests.DropLogMetadataColumnsAsync(db);
+        var latest = db.Database.GetMigrations().Last();
+        await db.GetService<IMigrator>().MigrateAsync(latest);
+    }
 
     [Fact]
     public async Task CancellationBeforeAuthorizationCannotGrantOrInvokeAndReadOnlyRecoveryCancelsPreparedTask()
