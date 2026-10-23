@@ -149,25 +149,26 @@ public sealed class BackupPlanRulesTests
     }
 
     [Fact]
-    public void LogCanContinueFromValidSequenceAfterPeriodicFullFailure()
+    public void LogIsNeverAllowedByLegacyBaselineOrSequenceBooleans()
     {
         var decision = BackupPlanRules.Evaluate(Request(
             BackupPlanMode.FullAndDifferentialAndLog,
             BackupRunPurpose.PlanLog,
+            hasManagedBaseline: true,
             hasValidLogSequence: true));
 
-        Assert.True(decision.IsAllowed);
-        Assert.False(decision.ChangesDifferentialBase);
+        Assert.Equal(BackupAdmissionStatus.LogTechnicalFactsRequired, decision.Status);
+        Assert.False(decision.IsAllowed);
     }
 
     [Fact]
-    public void LogWithoutBaselineOrSequenceIsRejected()
+    public void LogWithoutBaselineOrSequenceIsAlsoRejectedForMissingTechnicalFacts()
     {
         var decision = BackupPlanRules.Evaluate(Request(
             BackupPlanMode.FullAndDifferentialAndLog,
             BackupRunPurpose.PlanLog));
 
-        Assert.Equal(BackupAdmissionStatus.BaselineRequired, decision.Status);
+        Assert.Equal(BackupAdmissionStatus.LogTechnicalFactsRequired, decision.Status);
     }
 
     [Fact]
@@ -208,7 +209,7 @@ public sealed class BackupPlanRulesTests
     }
 
     [Fact]
-    public void LogOverlapsDatabaseBackupOnlyWhenThatOverlapIsEnabled()
+    public void LegacyLogAdmissionDoesNotAllowThroughResourceSlots()
     {
         var queued = BackupPlanRules.Evaluate(Request(
             BackupPlanMode.FullAndDifferentialAndLog,
@@ -228,9 +229,9 @@ public sealed class BackupPlanRulesTests
             slotOccupancy: BackupSlotOccupancy.ForPurpose(BackupRunPurpose.PlanLog),
             allowDatabaseBackupAndLogOverlap: true));
 
-        Assert.Equal(BackupAdmissionStatus.DatabaseAndLogMustQueue, queued.Status);
-        Assert.True(overlapped.IsAllowed);
-        Assert.Equal(BackupAdmissionStatus.LogBackupBusy, secondLog.Status);
+        Assert.Equal(BackupAdmissionStatus.LogTechnicalFactsRequired, queued.Status);
+        Assert.Equal(BackupAdmissionStatus.LogTechnicalFactsRequired, overlapped.Status);
+        Assert.Equal(BackupAdmissionStatus.LogTechnicalFactsRequired, secondLog.Status);
     }
 
     [Fact]
@@ -248,7 +249,7 @@ public sealed class BackupPlanRulesTests
             slotOccupancy: BackupSlotOccupancy.Both,
             allowDatabaseBackupAndLogOverlap: true));
 
-        Assert.Equal(BackupAdmissionStatus.LogBackupBusy, log.Status);
+        Assert.Equal(BackupAdmissionStatus.LogTechnicalFactsRequired, log.Status);
         Assert.Equal(BackupAdmissionStatus.DatabaseBackupBusy, full.Status);
     }
 
