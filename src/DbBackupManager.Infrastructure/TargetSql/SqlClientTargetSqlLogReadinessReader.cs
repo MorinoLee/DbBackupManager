@@ -35,7 +35,8 @@ internal sealed class SqlClientTargetSqlLogReadinessReader(
                 return Failed(request, TargetSqlFailureCode.InvalidResponse);
             }
 
-            return (await readiness.ReadLogReadinessAsync(request, deadline.Token)) with { Server = server };
+            var evidence = await readiness.ReadLogReadinessAsync(request, deadline.Token);
+            return NormalizeDeadline(evidence with { Server = server }, deadline, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -50,6 +51,28 @@ internal sealed class SqlClientTargetSqlLogReadinessReader(
             return Failed(request, exception.FailureCode);
         }
     }
+
+    private static TargetSqlLogReadinessEvidence NormalizeDeadline(
+        TargetSqlLogReadinessEvidence evidence,
+        CancellationTokenSource deadline,
+        CancellationToken caller)
+    {
+        if (!deadline.IsCancellationRequested || caller.IsCancellationRequested) return evidence;
+        return evidence with
+        {
+            Database = evidence.Database with
+            {
+                FailureCode = Timeout(evidence.Database.FailureCode),
+            },
+            Recovery = evidence.Recovery with
+            {
+                FailureCode = Timeout(evidence.Recovery.FailureCode),
+            },
+        };
+    }
+
+    private static TargetSqlFailureCode? Timeout(TargetSqlFailureCode? code) =>
+        code == TargetSqlFailureCode.Cancelled ? TargetSqlFailureCode.TimedOut : code;
 
     private TargetSqlLogReadinessEvidence Failed(
         TargetSqlLogReadinessRequest request,

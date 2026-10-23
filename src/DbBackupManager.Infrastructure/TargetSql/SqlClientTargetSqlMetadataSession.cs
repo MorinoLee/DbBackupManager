@@ -83,7 +83,10 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
             return new(source, new(), rows.Count == 0 ? BaselineEvidenceStatus.HistoryNotFound : BaselineEvidenceStatus.MissingFields,
                 [new("record", rows.Count == 0 ? BackupMetadataReadProblem.NotFound : BackupMetadataReadProblem.NotUnique)],
                 RequestedBackupSetGuid: requestedGuid, AmbiguousRecords: rows.Select(x => x.Metadata).ToArray(),
-                ObservedAtUtc: observedAt);
+                ObservedAtUtc: observedAt)
+            {
+                HasRequiredFields = false,
+            };
         }
         catch (OperationCanceledException) { return Failure(TargetSqlFailureCode.Cancelled); }
         catch (Exception exception) when (TargetSqlClientException.CanClassify(exception))
@@ -130,8 +133,12 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlMetadataSess
                 diagnosticFirst = diagnostic.Field("FirstRecoveryForkID", value => (Guid)value).Value;
                 var guid = mapper.GuidField("DifferentialBaseGUID").Value;
                 var lsn = mapper.Lsn("DifferentialBaseLSN").Value;
-                files.Add(new(guid, lsn, mapper.Issues.Count == 0 ? BaselineEvidenceStatus.Complete : BaselineEvidenceStatus.MissingFields));
-                issues.AddRange(mapper.Issues);
+                // 活动基线查询只含差异依赖字段；备份类型与 LOG 四字段在这里不是必需证据。
+                var fileIssues = mapper.Issues.Where(issue => issue.Field is "BindingID" or "FamilyGUID"
+                    or "RecoveryForkID" or "DifferentialBaseGUID" or "DifferentialBaseLSN").ToArray();
+                files.Add(new(guid, lsn,
+                    fileIssues.Length == 0 ? BaselineEvidenceStatus.Complete : BaselineEvidenceStatus.MissingFields));
+                issues.AddRange(fileIssues);
             }
             if (files.Count == 0) { status = BaselineEvidenceStatus.MissingFields; issues.Add(new("record", BackupMetadataReadProblem.NotFound)); }
             return new(new(identity ?? new(null, null), fork, files, status), diagnosticFirst, issues.AsReadOnly(), ObservedAtUtc: observedAt);

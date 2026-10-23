@@ -46,13 +46,18 @@ internal sealed class SqlClientTargetSqlBackupMetadataReader(
         { return FailedAt(cancellationToken.IsCancellationRequested ? TargetSqlFailureCode.Cancelled : TargetSqlFailureCode.TimedOut); }
         catch (TargetSqlClientException exception) { return FailedAt(exception.FailureCode); }
         static BackupMetadataSourceEvidence TimedOut(BackupMetadataSourceEvidence source) =>
-            source.FailureCode == TargetSqlFailureCode.Cancelled ? source with { FailureCode = TargetSqlFailureCode.TimedOut } : source;
+            source.FailureCode == TargetSqlFailureCode.Cancelled
+                ? source with { FailureCode = TargetSqlFailureCode.TimedOut, HasRequiredFields = false }
+                : source;
     }
 
     internal static BaselineEvidenceStatus Status(TargetSqlFailureCode code) =>
         code == TargetSqlFailureCode.AuthorizationDenied ? BaselineEvidenceStatus.PermissionDenied : BaselineEvidenceStatus.MissingFields;
     internal static BackupMetadataSourceEvidence FailedSource(BackupSetEvidenceSource source, TargetSqlFailureCode code) =>
-        new(source, new(), Status(code), [new("source", BackupMetadataReadProblem.ReadFailed)], code);
+        new(source, new(), Status(code), [new("source", BackupMetadataReadProblem.ReadFailed)], code)
+        {
+            HasRequiredFields = false,
+        };
     internal static TargetSqlBackupMetadataEvidence Failed(TargetSqlFailureCode code) => new(
         FailedSource(BackupSetEvidenceSource.BackupHeader, code), FailedSource(BackupSetEvidenceSource.Msdb, code),
         new(new(new(null, null), null, [], Status(code)), null, [new("source", BackupMetadataReadProblem.ReadFailed)], code),

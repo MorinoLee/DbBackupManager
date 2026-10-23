@@ -316,6 +316,72 @@ public sealed class BackupMetadataReconciliationTests
         Assert.Contains(prepared.Command.Observations, x => x.Metadata.BeginsLogChain.Value == true);
     }
 
+    [Fact]
+    public async Task B01B11OptionalFullDiagnosticsRemainVisibleButDoNotBlockEligibility()
+    {
+        var full = Full();
+        var optional = new BackupMetadataReadIssue("BeginsLogChain", BackupMetadataReadProblem.MissingColumn);
+        var evidence = Evidence(full, full) with
+        {
+            Header = Source(full) with
+            {
+                Status = BaselineEvidenceStatus.MissingFields,
+                Issues = [optional],
+                HasRequiredFields = true,
+            },
+            History = Source(full) with
+            {
+                Status = BaselineEvidenceStatus.MissingFields,
+                Issues = [optional],
+                HasRequiredFields = true,
+            },
+        };
+        var prepared = await new BackupMetadataReconciliationService(
+            new Reader(evidence), new Lookup(full), new Store()).PrepareAsync(Request());
+
+        Assert.Equal(BackupSetAssessment.NotApplicable, prepared.HistoricalDependency);
+        Assert.Equal([optional], prepared.Evidence!.Header.Issues);
+        Assert.Equal([optional], prepared.Evidence.History.Issues);
+    }
+
+    [Fact]
+    public async Task B11OptionalDiagnosticsOnReferencedFullDoNotDegradeDifferential()
+    {
+        var full = Full();
+        var diff = Diff(full);
+        var optional = new BackupMetadataReadIssue("BeginsLogChain", BackupMetadataReadProblem.MissingColumn);
+        var evidence = Evidence(diff, full) with
+        {
+            Header = Source(diff) with
+            {
+                Status = BaselineEvidenceStatus.MissingFields,
+                Issues = [optional],
+                HasRequiredFields = true,
+            },
+            History = Source(diff) with
+            {
+                Status = BaselineEvidenceStatus.MissingFields,
+                Issues = [optional],
+                HasRequiredFields = true,
+            },
+            ReferencedFulls =
+            [
+                Source(full) with
+                {
+                    Status = BaselineEvidenceStatus.MissingFields,
+                    Issues = [optional],
+                    HasRequiredFields = true,
+                },
+            ],
+        };
+
+        var prepared = await new BackupMetadataReconciliationService(
+            new Reader(evidence), new Lookup(full), new Store()).PrepareAsync(Request());
+
+        Assert.Equal(DifferentialBaselineConclusion.Verified, prepared.HistoricalDependency.Conclusion);
+        Assert.NotNull(prepared.Command.BaseBackupSetId);
+    }
+
     private static BackupSetMetadata Full() => new()
     {
         BackupSetGuid = BackupMetadata.Known(Guid.NewGuid()),

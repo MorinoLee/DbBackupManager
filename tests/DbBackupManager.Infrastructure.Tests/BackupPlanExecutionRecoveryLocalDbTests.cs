@@ -2,6 +2,7 @@ using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.FileStorage;
 using DbBackupManager.Application.TargetSql;
 using DbBackupManager.Domain.BackupPlans;
+using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
 using DbBackupManager.Domain.Configuration;
 using DbBackupManager.Infrastructure.Persistence;
@@ -490,6 +491,69 @@ public sealed class BackupPlanExecutionRecoveryLocalDbTests(PlatformDatabaseSqlS
         Assert.Equal(BackupExecutionOperationState.Frozen,
             (await finalDb.BackupPlanExecutionOperations.SingleAsync(x => x.Id == identity.MutationId)).State);
     }
+
+    [Fact]
+    public async Task MetadataApplyPersistsFrozenSourceTimesAndConflictingReplay()
+    {
+        var fault = new PlanExecutionCommitFault("ApplyAsync", "Metadata");
+        await using var test = await PlanExecutionTestEnvironment.CreateAsync(platform, BackupStorageMode.LocalOnly, fault);
+        var taskId = await test.CreateTaskAsync(BackupRunPurpose.PlanFull);
+        await Assert.ThrowsAsync<LostPlanCommitResponseException>(() => test.Runner.RunTaskOnceAsync(new(taskId, Guid.NewGuid())));
+
+        LeaseHandle lease;
+        ReserveBackupExecutionOperation identity;
+        BackupFileEndpointInput endpoint;
+        string path;
+        Dictionary<int, DateTimeOffset?> frozenTimes;
+        await using (var db = platform.CreateContext())
+        {
+            var task = await db.BackupTasks.SingleAsync(x => x.Id == taskId);
+            lease = task.ToLeaseHandle();
+            var operation = await db.BackupPlanExecutionOperations.AsNoTracking()
+                .SingleAsync(x => x.TaskId == taskId && x.Kind == BackupExecutionOperationKind.Metadata);
+            identity = new(operation.Id, operation.TaskId, operation.AttemptId, operation.Kind,
+                operation.Sequence, operation.IntendedBackupSetId, operation.ObservedAtUtc);
+            endpoint = BackupPlanExecutionStore.Endpoint((await db.BackupTaskSnapshots.SingleAsync(x => x.TaskId == taskId))
+                .ToSnapshotModel().WorkerSourceEndpoint);
+            path = (await db.BackupAttempts.SingleAsync(x => x.TaskId == taskId)).WorkerSourceFilePath;
+            frozenTimes = await db.BackupPlanExecutionObservations.AsNoTracking()
+                .Where(x => x.OperationId == operation.Id && x.Facts.EvidenceAtUtc != null)
+                .ToDictionaryAsync(x => x.EntryNumber, x => x.Facts.EvidenceAtUtc);
+        }
+
+        var read = await test.FileVerifier.OpenVerifiedAsync(new(taskId, lease.BackupAttemptId, endpoint, path, 30));
+        Assert.True(read.IsSucceeded);
+        await using var handle = read.Value!;
+        var apply = await test.Store.ApplyAsync(lease, identity, handle);
+        Assert.True(apply is BackupExecutionContractCode.Succeeded or BackupExecutionContractCode.AlreadyApplied, apply.ToString());
+
+        await using (var db = platform.CreateContext())
+        {
+            var evidence = await db.BackupSetEvidence.AsNoTracking()
+                .Where(x => x.AttemptId == lease.BackupAttemptId
+                    && (x.Source == BackupSetEvidenceSource.BackupHeader || x.Source == BackupSetEvidenceSource.Msdb))
+                .ToArrayAsync();
+            Assert.NotEmpty(evidence);
+            Assert.All(evidence, row => Assert.NotNull(row.SourceObservedAtUtc));
+            Assert.All(evidence, row => Assert.Contains(row.SourceObservedAtUtc!.Value, frozenTimes.Values.Select(x => x!.Value)));
+            Assert.Contains(evidence, row => row.Source == BackupSetEvidenceSource.BackupHeader
+                && row.SourceObservedAtUtc == frozenTimes[0]);
+            Assert.Contains(evidence, row => row.Source == BackupSetEvidenceSource.Msdb
+                && row.SourceObservedAtUtc == frozenTimes[1]);
+        }
+
+        Assert.Equal(BackupExecutionContractCode.AlreadyApplied, await test.Store.ApplyAsync(lease, identity, handle));
+        var operations = new BackupExecutionOperationStore(new BackupExecutionContractSqlServerTests.Factory(platform), TimeProvider.System);
+        var saved = await operations.ReadAsync(identity);
+        Assert.Equal(BackupExecutionContractCode.AlreadyApplied, saved.Code);
+        var changed = saved.Value!.Observations.Select(x => x.EntryNumber == 0
+            ? x with { Facts = x.Facts with { EvidenceAtUtc = x.Facts.EvidenceAtUtc?.AddSeconds(1) } }
+            : x).ToArray();
+        var conflict = await operations.FreezeAsync(lease,
+            new(identity, saved.Value.Facts, changed));
+        Assert.Equal(BackupExecutionContractCode.Conflict, conflict.Code);
+    }
+
 
     [Fact]
     public async Task CancellationBeforeAuthorizationCannotGrantOrInvokeAndReadOnlyRecoveryCancelsPreparedTask()

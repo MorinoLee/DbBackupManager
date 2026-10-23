@@ -6,6 +6,18 @@ using Microsoft.Data.SqlClient;
 
 namespace DbBackupManager.Infrastructure.TargetSql;
 
+internal interface ITargetSqlLogReadinessQuery
+{
+    Task<TargetSqlDatabaseReadinessObservation> ReadDatabaseStateAsync(
+        TargetSqlLogReadinessRequest request,
+        CancellationToken cancellationToken);
+
+    Task<TargetSqlRecoveryStatusObservation> ReadRecoveryStatusAsync(
+        TargetSqlLogReadinessRequest request,
+        int? databaseId,
+        CancellationToken cancellationToken);
+}
+
 internal interface ITargetSqlLogReadinessSession
 {
     Task<TargetSqlLogReadinessEvidence> ReadLogReadinessAsync(
@@ -37,6 +49,7 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlLogReadiness
             ? await ReadRecoveryStatusAsync(request, database.SqlDatabaseId, cancellationToken)
             : NotAttemptedRecovery(database);
         TargetSqlDatabaseReadinessObservation? recheck = null;
+        TargetSqlRecoveryStatusObservation? recoveryRecheck = null;
         bool? stable = null;
         if (database.IsOnline && database.QueryComplete)
         {
@@ -44,22 +57,34 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlLogReadiness
             if (recheck.QueryComplete)
             {
                 stable = SameDatabaseState(database, recheck);
-                if (stable == true && recovery.QueryComplete)
+                if (stable == true)
                 {
-                    var recoveryRecheck = await ReadRecoveryStatusAsync(
-                        request,
-                        database.SqlDatabaseId,
-                        cancellationToken);
-                    if (!recoveryRecheck.QueryComplete
-                        || !SameRecoveryStatus(recovery, recoveryRecheck))
+                    if (!recovery.QueryComplete)
                     {
-                        stable = false;
-                        recovery = recovery with
+                        // 首次恢复目录证据不足时，两次库状态一致不能证明恢复身份/fork 一致。
+                        stable = null;
+                    }
+                    else
+                    {
+                        recoveryRecheck = await ReadRecoveryStatusAsync(
+                            request,
+                            database.SqlDatabaseId,
+                            cancellationToken);
+                        if (!recoveryRecheck.QueryComplete)
                         {
-                            Issues = recovery.Issues
-                                .Append(new("recovery_status", BackupMetadataReadProblem.SourceConflict))
-                                .ToArray(),
-                        };
+                            // 复核读取不足只表示无法判断；保留复核原证据，不伪造来源冲突。
+                            stable = null;
+                        }
+                        else if (!SameRecoveryStatus(recovery, recoveryRecheck))
+                        {
+                            stable = false;
+                            recovery = recovery with
+                            {
+                                Issues = recovery.Issues
+                                    .Append(new("recovery_status", BackupMetadataReadProblem.SourceConflict))
+                                    .ToArray(),
+                            };
+                        }
                     }
                 }
 
@@ -82,10 +107,24 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlLogReadiness
             recovery,
             recheck,
             IdentityMatches(request.ExpectedDatabase, recovery.Database),
-            stable);
+            stable,
+            recoveryRecheck);
     }
 
-    private async Task<TargetSqlDatabaseReadinessObservation> ReadDatabaseStateAsync(
+    private Task<TargetSqlDatabaseReadinessObservation> ReadDatabaseStateAsync(
+        TargetSqlLogReadinessRequest request,
+        CancellationToken cancellationToken) =>
+        _logReadinessQuery?.ReadDatabaseStateAsync(request, cancellationToken)
+        ?? ReadDatabaseStateSqlAsync(request, cancellationToken);
+
+    private Task<TargetSqlRecoveryStatusObservation> ReadRecoveryStatusAsync(
+        TargetSqlLogReadinessRequest request,
+        int? databaseId,
+        CancellationToken cancellationToken) =>
+        _logReadinessQuery?.ReadRecoveryStatusAsync(request, databaseId, cancellationToken)
+        ?? ReadRecoveryStatusSqlAsync(request, databaseId, cancellationToken);
+
+    private async Task<TargetSqlDatabaseReadinessObservation> ReadDatabaseStateSqlAsync(
         TargetSqlLogReadinessRequest request,
         CancellationToken cancellationToken)
     {
@@ -142,7 +181,7 @@ internal sealed partial class SqlClientTargetSqlSession : ITargetSqlLogReadiness
         }
     }
 
-    private async Task<TargetSqlRecoveryStatusObservation> ReadRecoveryStatusAsync(
+    private async Task<TargetSqlRecoveryStatusObservation> ReadRecoveryStatusSqlAsync(
         TargetSqlLogReadinessRequest request,
         int? databaseId,
         CancellationToken cancellationToken)

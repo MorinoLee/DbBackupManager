@@ -156,4 +156,86 @@ public sealed class BackupMetadataRowMapperTests
         Assert.Equal(BackupMetadataState.Unknown, result.Metadata.BeginsLogChain.State);
         Assert.Contains(new("BeginsLogChain", BackupMetadataReadProblem.InvalidValue), result.Issues);
     }
+
+    [Theory]
+    [InlineData((byte)1, true)]
+    [InlineData((byte)3, false)]
+    public void B01OptionalLogDiagnosticsArePreservedWhileOnlyFullDiffAreNonBlocking(byte type, bool required)
+    {
+        using var table = CompleteTable(type, includeForceOffline: false);
+        table.Rows.Add(RowValues(type, includeForceOffline: false));
+        table.Rows[0]["RecoveryModel"] = "NOT_A_RECOVERY_MODEL";
+        table.Rows[0]["BeginsLogChain"] = 2;
+        table.Rows[0]["HasBulkLoggedData"] = DBNull.Value;
+        using var reader = table.CreateDataReader();
+        Assert.True(reader.Read());
+
+        var result = new BackupMetadataRowMapper(reader).Map(BackupSetEvidenceSource.BackupHeader);
+
+        Assert.Equal(BaselineEvidenceStatus.MissingFields, result.Status);
+        Assert.Equal(required, result.HasRequiredFields);
+        Assert.Contains(new("RecoveryModel", BackupMetadataReadProblem.InvalidValue), result.Issues);
+        Assert.Contains(new("BeginsLogChain", BackupMetadataReadProblem.InvalidValue), result.Issues);
+        Assert.Contains(new("HasBulkLoggedData", BackupMetadataReadProblem.NullValue), result.Issues);
+        Assert.Contains(new("IsForceOffline", BackupMetadataReadProblem.MissingColumn), result.Issues);
+    }
+
+    [Fact]
+    public void B01DiagnosticsAreNotRemovedWhenOptionalFieldsAreValid()
+    {
+        using var table = CompleteTable((byte)1, includeForceOffline: true);
+        table.Rows.Add(RowValues((byte)1, includeForceOffline: true));
+        using var reader = table.CreateDataReader();
+        Assert.True(reader.Read());
+
+        var result = new BackupMetadataRowMapper(reader).Map(BackupSetEvidenceSource.BackupHeader);
+
+        Assert.Equal(BaselineEvidenceStatus.Complete, result.Status);
+        Assert.True(result.HasRequiredFields);
+        Assert.Empty(result.Issues);
+    }
+
+    private static DataTable CompleteTable(byte type, bool includeForceOffline)
+    {
+        var table = new DataTable();
+        table.Columns.Add("BackupSetGUID", typeof(Guid));
+        table.Columns.Add("BindingID", typeof(Guid));
+        table.Columns.Add("FamilyGUID", typeof(Guid));
+        table.Columns.Add("BackupType", typeof(byte));
+        table.Columns.Add("FirstRecoveryForkID", typeof(Guid));
+        table.Columns.Add("RecoveryForkID", typeof(Guid));
+        table.Columns.Add("FirstLSN", typeof(decimal));
+        table.Columns.Add("LastLSN", typeof(decimal));
+        table.Columns.Add("CheckpointLSN", typeof(decimal));
+        table.Columns.Add("DatabaseBackupLSN", typeof(decimal));
+        table.Columns.Add("ForkPointLSN", typeof(decimal));
+        table.Columns.Add("IsCopyOnly", typeof(byte));
+        table.Columns.Add("HasBackupChecksums", typeof(byte));
+        table.Columns.Add("Compressed", typeof(byte));
+        table.Columns.Add("IsDamaged", typeof(byte));
+        table.Columns.Add("IsSnapshot", typeof(byte));
+        table.Columns.Add("HasIncompleteMetadata", typeof(byte));
+        table.Columns.Add("BackupStartDate", typeof(DateTime));
+        table.Columns.Add("BackupFinishDate", typeof(DateTime));
+        table.Columns.Add("RecoveryModel", typeof(string));
+        table.Columns.Add("BeginsLogChain", typeof(byte));
+        table.Columns.Add("HasBulkLoggedData", typeof(byte));
+        if (includeForceOffline) table.Columns.Add("IsForceOffline", typeof(byte));
+        return table;
+    }
+
+    private static object[] RowValues(byte type, bool includeForceOffline)
+    {
+        var fork = Guid.NewGuid();
+        return
+        [
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), type,
+            fork, fork, 1m, 2m, 1m, 0m, DBNull.Value,
+            (byte)0, (byte)1, (byte)0, (byte)0, (byte)0, (byte)0,
+            new DateTime(2026, 10, 8, 1, 0, 0, DateTimeKind.Unspecified),
+            new DateTime(2026, 10, 8, 1, 0, 1, DateTimeKind.Unspecified),
+            "FULL", (byte)0, (byte)0,
+            .. includeForceOffline ? new object[] { (byte)0 } : [],
+        ];
+    }
 }

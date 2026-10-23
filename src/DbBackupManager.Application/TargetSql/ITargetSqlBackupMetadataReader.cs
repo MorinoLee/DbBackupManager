@@ -38,7 +38,11 @@ public sealed record BackupMetadataSourceEvidence(
     BackupSetEvidenceSource Source, BackupSetMetadata Metadata, BaselineEvidenceStatus Status,
     IReadOnlyList<BackupMetadataReadIssue> Issues, TargetSqlFailureCode? FailureCode = null,
     Guid? RequestedBackupSetGuid = null, IReadOnlyList<BackupSetMetadata>? AmbiguousRecords = null,
-    DateTimeOffset? ObservedAtUtc = null);
+    DateTimeOffset? ObservedAtUtc = null)
+{
+    /// <summary>用途相关必需字段是否齐全；可选字段诊断仍保留在 Issues/Status 中。</summary>
+    public bool HasRequiredFields { get; init; } = true;
+}
 
 public sealed record BackupActiveMetadataEvidence(
     ActiveDifferentialBaselineEvidence Baseline, Guid? DiagnosticFirstRecoveryForkId,

@@ -89,7 +89,8 @@ public sealed record TargetSqlLogReadinessEvidence(
     TargetSqlRecoveryStatusObservation Recovery,
     TargetSqlDatabaseReadinessObservation? Recheck,
     bool? ExpectedIdentityMatches,
-    bool? StableAcrossRead);
+    bool? StableAcrossRead,
+    TargetSqlRecoveryStatusObservation? RecoveryRecheck = null);
 
 public interface ITargetSqlLogReadinessReader
 {

@@ -96,13 +96,17 @@ internal sealed class BackupMetadataRowMapper(DbDataReader reader)
             SqlFinishedLocal = Local("BackupFinishDate")
         };
         metadata.Validate();
-        // 新 LOG 四字段不反向要求旧 FULL/DIFF 来源提供；LOG 或类型未知时缺失仍是证据问题。
-        var relevantIssues = type.Value is BackupType.Full or BackupType.Differential
-            ? Issues.Where(issue => issue.Field is not ("RecoveryModel" or "BeginsLogChain"
-                or "HasBulkLoggedData" or "IsForceOffline")).ToArray()
-            : Issues.ToArray();
+        // 保留所有原始诊断；仅对旧 FULL/DIFF 放宽“新 LOG 四字段”的用途阻断。
+        var optionalLogIssues = type.Value is BackupType.Full or BackupType.Differential
+            ? Issues.Where(issue => issue.Field is "RecoveryModel" or "BeginsLogChain"
+                or "HasBulkLoggedData" or "IsForceOffline").ToHashSet()
+            : [];
+        var requiredComplete = Issues.All(issue => optionalLogIssues.Contains(issue));
         return new(source, metadata,
-            relevantIssues.Length == 0 ? BaselineEvidenceStatus.Complete : BaselineEvidenceStatus.MissingFields,
-            Array.AsReadOnly(relevantIssues));
+            Issues.Count == 0 ? BaselineEvidenceStatus.Complete : BaselineEvidenceStatus.MissingFields,
+            Issues.AsReadOnly())
+        {
+            HasRequiredFields = requiredComplete,
+        };
     }
 }
