@@ -503,6 +503,47 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     [Fact]
+    public async Task Z05ComplementaryMissingTypeObservationMustNotRejectValidCoverage()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var full = FullCandidate();
+        var logId = Guid.NewGuid();
+        var logActual = full.Actual with
+        {
+            Type = BackupType.Log,
+            BeginsLogChain = false,
+            FirstLsn = new(100),
+            LastLsn = new(200),
+            ForkPointLsn = new(100),
+            Generation = new(full.Actual.Generation!.GenerationId, LogGenerationEvidenceKind.RecoveryFork),
+            Source = LogObservationSource.Msdb,
+            ObservedAtUtc = At,
+        };
+        var complete = new LogAssessmentCandidate(logId, logActual,
+            LogLocationScope.Local, LogLocationCopyState.Available, false, new(true, false), null, null,
+            Guid.NewGuid());
+        var missing = new LogAssessmentCandidate(logId, logActual with
+        {
+            Type = null,
+            Status = LogEvidenceStatus.MissingFields,
+            Source = LogObservationSource.BackupHeader,
+            ObservedAtUtc = At.AddSeconds(1),
+        }, LogLocationScope.Local, LogLocationCopyState.Available, false, new(true, false), null, null,
+            Guid.NewGuid()) with
+        {
+            HasRequiredFields = false,
+        };
+
+        var prepared = await PrepareCandidatesAsync(store, Guid.NewGuid(), full, complete, missing);
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await store.CommitAsync(prepared)).Code);
+        await using var db = fixture.CreateContext();
+        Assert.True(await db.LogAssessmentCommits.AnyAsync(x => x.Id == prepared.AssessmentId));
+    }
+
+    [Fact]
     public async Task C17ConcurrentSamePayloadOneRowAndSameGenerationOneIdentity()
     {
         await using var fixture = new PlatformDatabaseSqlServerFixture();

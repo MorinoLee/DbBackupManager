@@ -197,9 +197,6 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
                 || x.Rejected != rejected.Contains(x.BackupSetId)))
             return false;
         var byId = resolved.GroupBy(x => x.BackupSetId).ToDictionary(x => x.Key, x => x.ToArray());
-        if (used.Any(id => !byId.TryGetValue(id, out var candidates)
-                || candidates.Any(x => x.Actual.Type != BackupType.Log)))
-            return false;
         if (prepared.DataStart.FullBackupSetId is { } fullId
             && (!byId.TryGetValue(fullId, out var fullCandidates)
                 || fullCandidates.All(x => x.Actual.Type != BackupType.Full)))
