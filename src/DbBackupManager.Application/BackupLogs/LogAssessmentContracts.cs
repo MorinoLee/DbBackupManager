@@ -295,6 +295,7 @@ public static class LogAssessmentCanonicalizer
     };
 
     public static string RequestFingerprint(LogAssessmentInput input) => Hash(input);
+    public static string SemanticFingerprint(object value) => Hash(value);
     public static string CandidateSortKey(LogAssessmentCandidate candidate) => Hash(candidate);
     public static string CandidateSetRevision(IReadOnlyList<LogAssessmentCandidate> candidates) => Hash(candidates);
     public static Guid CandidateSourceRevision(Guid backupSetId, byte[] rowVersion,

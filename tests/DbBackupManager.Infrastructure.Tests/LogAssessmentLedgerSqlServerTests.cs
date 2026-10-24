@@ -441,6 +441,68 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     [Fact]
+    public async Task Y05DerivedStartAndCoverageMustMatchFixedCandidates()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var prepared = await PrepareAsync(store, Guid.NewGuid());
+        var restorePoint = Rebind(prepared with
+        {
+            DataStart = prepared.DataStart with
+            {
+                RestorePointLsn = new((prepared.DataStart.RestorePointLsn?.Value ?? 0) + 1),
+            },
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(restorePoint)).Code);
+
+        var frontier = Rebind(prepared with
+        {
+            Coverage = prepared.Coverage with
+            {
+                FrontierLsn = new((prepared.Coverage.FrontierLsn?.Value ?? 0) + 100),
+            },
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(frontier)).Code);
+
+        var missingCandidate = FullCandidate() with { CopyState = LogLocationCopyState.Missing };
+        var missing = await PrepareCandidatesAsync(store, Guid.NewGuid(), missingCandidate);
+        var promoted = Rebind(missing with
+        {
+            DataStart = missing.DataStart with
+            {
+                Availability = "Available",
+                FullBackupSetId = missingCandidate.BackupSetId,
+                RestorePointLsn = new(10),
+            },
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(promoted)).Code);
+    }
+
+    [Fact]
+    public async Task Y05GenerationObservationTimeAndStatusMustMatchFixedCandidate()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var prepared = await PrepareAsync(store, Guid.NewGuid());
+        var changed = Rebind(prepared with
+        {
+            Generations =
+            [
+                prepared.Generations[0] with
+                {
+                    ObservedAtUtc = prepared.Generations[0].ObservedAtUtc?.AddMinutes(5),
+                    Status = LogEvidenceStatus.PermissionDenied,
+                },
+            ],
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(changed)).Code);
+    }
+
+    [Fact]
     public async Task C17ConcurrentSamePayloadOneRowAndSameGenerationOneIdentity()
     {
         await using var fixture = new PlatformDatabaseSqlServerFixture();

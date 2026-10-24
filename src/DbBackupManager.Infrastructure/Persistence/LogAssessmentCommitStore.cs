@@ -1,6 +1,7 @@
 using System.Data;
 using System.Text.Json;
 using DbBackupManager.Application.BackupLogs;
+using DbBackupManager.Domain.BackupLogs;
 using DbBackupManager.Domain.Configuration;
 using Microsoft.EntityFrameworkCore;
 
@@ -169,6 +170,7 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
 
     private static bool ReferencesAreClosed(PreparedLogAssessment prepared)
     {
+        if (!DerivedResultsMatch(prepared)) return false;
         var resolved = prepared.ResolvedCandidates;
         if (prepared.Candidates.Count != resolved.Count) return false;
         for (var index = 0; index < resolved.Count; index++)
@@ -223,11 +225,73 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
                 && generation.EvidenceKey == LogAssessmentCanonicalizer.EvidenceKey(
                     prepared.Input.DatabaseId, x.Actual, generation.EvidenceKind, x.SourceRevision)
                 && generation.BoundaryKey == LogAssessmentCanonicalizer.GenerationBoundaryKey(
-                    prepared.Input.DatabaseId, x.BackupSetId, x.Actual));
+                    prepared.Input.DatabaseId, x.BackupSetId, x.Actual)
+                && generation.ObservedAtUtc == x.Actual.ObservedAtUtc
+                && generation.Status == x.Status);
             if (!matchesDraft) return false;
         }
         return true;
     }
+
+    private static bool DerivedResultsMatch(PreparedLogAssessment prepared)
+    {
+        try
+        {
+            var kind = Enum.Parse<LogStorageLocation>(prepared.Input.ScopeKind);
+            var scope = new LogLocationScope(kind, prepared.Input.StorageTargetId);
+            var startRequest = new LogDataStartRequest(scope,
+                prepared.ResolvedCandidates.Select(ToStartCandidate), prepared.Input.PreferredFullBackupSetId);
+            var start = LogDataStartRules.Select(startRequest);
+            var expectedStart = new LogDataStartSnapshot(start.Availability.ToString(), start.ReasonCode,
+                scope.Kind.ToString(), scope.StorageTargetId, start.FullBackupSetId, start.DifferentialBackupSetId,
+                start.RestorePointLsn, start.Database, start.Branch, start.Generation,
+                start.Conflicts.Select(ToConflict).ToArray());
+            if (LogAssessmentCanonicalizer.SemanticFingerprint(expectedStart)
+                != LogAssessmentCanonicalizer.SemanticFingerprint(prepared.DataStart))
+                return false;
+
+            var coverage = LogCoverageRules.Evaluate(new(start, prepared.CandidateEnumerationComplete,
+                prepared.ResolvedCandidates.Select(ToCoverageCandidate)));
+            var expectedCoverage = new LogCoverageSnapshot(coverage.Conclusion.ToString(), coverage.FrontierLsn,
+                scope.Kind.ToString(), scope.StorageTargetId, coverage.UsedBackupSetIds,
+                coverage.RejectedBackupSetIds, coverage.KnownContinuousRanges.Select(ToRange).ToArray(),
+                coverage.KnownGaps.Select(ToRange).ToArray(), coverage.UnknownRanges.Select(ToRange).ToArray(),
+                coverage.UnsupportedRanges.Select(ToRange).ToArray(), coverage.ReasonCodes,
+                coverage.Conflicts.Select(ToConflict).ToArray());
+            return LogAssessmentCanonicalizer.SemanticFingerprint(expectedCoverage)
+                == LogAssessmentCanonicalizer.SemanticFingerprint(prepared.Coverage);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static LogDataStartCandidate ToStartCandidate(LogAssessmentCandidate candidate) => new()
+    {
+        BackupSetId = candidate.BackupSetId,
+        Actual = candidate.Actual,
+        Scope = candidate.Scope,
+        LocationCopy = candidate.CopyState,
+        IsManaged = candidate.IsManaged,
+        DifferentialDependency = candidate.DifferentialDependency,
+        MatchesFullBackupSetId = candidate.MatchesFullBackupSetId,
+    };
+
+    private static LogCoverageCandidate ToCoverageCandidate(LogAssessmentCandidate candidate) => new()
+    {
+        BackupSetId = candidate.BackupSetId,
+        Actual = candidate.Actual,
+        Scope = candidate.Scope,
+        LocationCopy = candidate.CopyState,
+        IsManaged = candidate.IsManaged,
+        ProtectionExpectation = candidate.ProtectionExpectation,
+    };
+
+    private static LogConflictSnapshot ToConflict(LogObservationConflict conflict) =>
+        new(conflict.BackupSetId, conflict.Scope.Kind.ToString(), conflict.Scope.StorageTargetId, conflict.FieldCode);
+
+    private static LogRangeSnapshot ToRange(LogCoverageRange range) => new(range.FromLsn, range.ToLsn);
 
     private static LogAssessmentCommitResult Compare(LogAssessmentCommit existing,
         PreparedLogAssessment prepared)
