@@ -1,6 +1,7 @@
 using System.Data;
 using System.Text.Json;
 using DbBackupManager.Application.BackupLogs;
+using DbBackupManager.Domain.Configuration;
 using Microsoft.EntityFrameworkCore;
 
 namespace DbBackupManager.Infrastructure.Persistence;
@@ -111,7 +112,6 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
                         });
                     }
                     else if (fact.DatabaseId != prepared.Input.DatabaseId
-                        || fact.BoundaryKey != generation.BoundaryKey
                         || fact.SourceDatabaseGuid != generation.SourceDatabaseGuid
                         || fact.FamilyGuid != generation.FamilyGuid
                         || fact.FirstRecoveryForkId != generation.FirstRecoveryForkId
@@ -194,14 +194,38 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
         if (prepared.Candidates.Any(x => x.Used != used.Contains(x.BackupSetId)
                 || x.Rejected != rejected.Contains(x.BackupSetId)))
             return false;
+        var byId = resolved.GroupBy(x => x.BackupSetId).ToDictionary(x => x.Key, x => x.ToArray());
+        if (used.Any(id => !byId.TryGetValue(id, out var candidates)
+                || candidates.Any(x => x.Actual.Type != BackupType.Log)))
+            return false;
+        if (prepared.DataStart.FullBackupSetId is { } fullId
+            && (!byId.TryGetValue(fullId, out var fullCandidates)
+                || fullCandidates.All(x => x.Actual.Type != BackupType.Full)))
+            return false;
+        if (prepared.DataStart.DifferentialBackupSetId is { } differentialId
+            && (!byId.TryGetValue(differentialId, out var differentialCandidates)
+                || differentialCandidates.All(x => x.Actual.Type != BackupType.Differential)))
+            return false;
         foreach (var id in new[] { prepared.DataStart.FullBackupSetId, prepared.DataStart.DifferentialBackupSetId })
             if (id is { } value && !ids.Contains(value)) return false;
         if (used.Any(x => !ids.Contains(x)) || rejected.Any(x => !ids.Contains(x)))
             return false;
         foreach (var generation in prepared.Generations.Where(x => x.GenerationId is { }))
-            if (!resolved.Any(x => x.Actual.Generation?.GenerationId == generation.GenerationId
-                && x.Actual.Generation?.Evidence == generation.EvidenceKind))
-                return false;
+        {
+            var members = resolved.Where(x => x.Actual.Generation?.GenerationId == generation.GenerationId
+                && x.Actual.Generation?.Evidence == generation.EvidenceKind).ToArray();
+            if (members.Length == 0) return false;
+            var matchesDraft = members.Any(x =>
+                x.Actual.Database?.DatabaseGuid == generation.SourceDatabaseGuid
+                && x.Actual.Database?.FamilyGuid == generation.FamilyGuid
+                && x.Actual.Branch?.FirstRecoveryForkId == generation.FirstRecoveryForkId
+                && x.Actual.Branch?.RecoveryForkId == generation.RecoveryForkId
+                && generation.EvidenceKey == LogAssessmentCanonicalizer.EvidenceKey(
+                    prepared.Input.DatabaseId, x.Actual, generation.EvidenceKind, x.SourceRevision)
+                && generation.BoundaryKey == LogAssessmentCanonicalizer.GenerationBoundaryKey(
+                    prepared.Input.DatabaseId, x.BackupSetId, x.Actual));
+            if (!matchesDraft) return false;
+        }
         return true;
     }
 

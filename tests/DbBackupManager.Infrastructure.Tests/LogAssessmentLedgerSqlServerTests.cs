@@ -326,6 +326,121 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     [Fact]
+    public async Task P03LegacySameGenerationFullAndLogDifferentBackupsAreAccepted()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var full = FullCandidate();
+        var log = new LogAssessmentCandidate(Guid.NewGuid(), full.Actual with
+        {
+            Type = BackupType.Log,
+            BeginsLogChain = false,
+            FirstLsn = new(100),
+            LastLsn = new(200),
+            ForkPointLsn = new(100),
+            Generation = new(full.Actual.Generation!.GenerationId, LogGenerationEvidenceKind.RecoveryFork),
+            Source = LogObservationSource.BackupHeader,
+            ObservedAtUtc = At,
+        }, LogLocationScope.Local, LogLocationCopyState.Available, false, new(true, false), null, null,
+            Guid.NewGuid());
+        var prepared = await PrepareCandidatesAsync(store, Guid.NewGuid(), full, log);
+
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await store.CommitAsync(prepared)).Code);
+        await using var db = fixture.CreateContext();
+        Assert.Equal(1, await db.LogGenerationFacts.CountAsync());
+        Assert.Equal(2, await db.LogGenerationEvidence.CountAsync());
+    }
+
+    [Fact]
+    public async Task X04LaterLogCanReferenceAnAlreadyProvenGeneration()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var baseCandidate = FullCandidate();
+        var first = baseCandidate with
+        {
+            Actual = baseCandidate.Actual with
+            {
+                BeginsLogChain = true,
+                Generation = null,
+                Source = LogObservationSource.BackupHeader,
+            },
+        };
+        var initial = await PrepareCandidatesAsync(store, Guid.NewGuid(), first);
+        var generationId = Assert.Single(initial.Generations).GenerationId;
+        Assert.NotNull(generationId);
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await store.CommitAsync(initial)).Code);
+
+        var later = new LogAssessmentCandidate(Guid.NewGuid(), first.Actual with
+        {
+            Type = BackupType.Log,
+            BeginsLogChain = false,
+            FirstLsn = new(100),
+            LastLsn = new(200),
+            ForkPointLsn = new(100),
+            Generation = new(generationId!.Value, LogGenerationEvidenceKind.RecoveryFork),
+            Source = LogObservationSource.BackupHeader,
+            ObservedAtUtc = At.AddMinutes(1),
+        }, LogLocationScope.Local, LogLocationCopyState.Available, false, new(true, false), null, null,
+            Guid.NewGuid());
+        var follow = await PrepareCandidatesAsync(store, Guid.NewGuid(), later);
+
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await store.CommitAsync(follow)).Code);
+        await using var db = fixture.CreateContext();
+        Assert.Equal(1, await db.LogGenerationFacts.CountAsync());
+        Assert.Equal(2, await db.LogGenerationEvidence.CountAsync());
+    }
+
+    [Fact]
+    public async Task X04GenerationDraftMustMatchResolvedCandidateIdentity()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var prepared = await PrepareAsync(store, Guid.NewGuid());
+        var changed = Rebind(prepared with
+        {
+            Generations =
+            [
+                prepared.Generations[0] with
+                {
+                    SourceDatabaseGuid = Guid.NewGuid(),
+                    BoundaryKey = "tampered-boundary",
+                },
+            ],
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(changed)).Code);
+    }
+
+    [Fact]
+    public async Task X05FullCannotBecomeUsedLogOrDifferentialStart()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var prepared = await PrepareAsync(store, Guid.NewGuid());
+        var fullId = prepared.ResolvedCandidates[0].BackupSetId;
+        var usedFull = Rebind(prepared with
+        {
+            Coverage = prepared.Coverage with { UsedBackupSetIds = [fullId] },
+            Candidates = [prepared.Candidates[0] with { Used = true }],
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(usedFull)).Code);
+
+        var diffStart = Rebind(prepared with
+        {
+            DataStart = prepared.DataStart with { DifferentialBackupSetId = fullId },
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(diffStart)).Code);
+    }
+
+    [Fact]
     public async Task C17ConcurrentSamePayloadOneRowAndSameGenerationOneIdentity()
     {
         await using var fixture = new PlatformDatabaseSqlServerFixture();
