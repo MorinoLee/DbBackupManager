@@ -42,6 +42,19 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
                 if (existing is not null)
                     return Compare(existing, prepared);
 
+                var managedIds = prepared.ResolvedCandidates.Where(x => x.IsManaged)
+                    .Select(x => x.BackupSetId).Distinct().ToArray();
+                if (managedIds.Length > 0)
+                {
+                    var owners = await db.BackupSets.AsNoTracking()
+                        .Where(x => managedIds.Contains(x.Id))
+                        .Select(x => new { x.Id, x.DatabaseId })
+                        .ToArrayAsync(cancellationToken);
+                    if (owners.Length != managedIds.Length
+                        || owners.Any(x => x.DatabaseId != prepared.Input.DatabaseId))
+                        return new(LogAssessmentCommitCode.Conflict);
+                }
+
                 var committedAt = clock.GetUtcNow();
                 db.LogAssessmentCommits.Add(ToEntity(prepared, committedAt));
                 foreach (var observation in prepared.Observations.OrderBy(x => x.EntryNumber))
@@ -76,17 +89,34 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
 
                 foreach (var generation in prepared.Generations.Where(x => x.GenerationId is not null))
                 {
+                    var generationId = generation.GenerationId!.Value;
+                    var fact = await db.LogGenerationFacts.FindAsync([generationId], cancellationToken);
+                    if (fact is null)
+                    {
+                        db.LogGenerationFacts.Add(new()
+                        {
+                            Id = generationId,
+                            DatabaseId = prepared.Input.DatabaseId,
+                            CreatedAtUtc = committedAt,
+                        });
+                    }
+                    else if (fact.DatabaseId != prepared.Input.DatabaseId)
+                    {
+                        return new(LogAssessmentCommitCode.Conflict);
+                    }
+
                     var existingGeneration = await db.LogGenerationEvidence
                         .SingleOrDefaultAsync(x => x.EvidenceKey == generation.EvidenceKey, cancellationToken);
                     if (existingGeneration is not null)
                     {
-                        if (existingGeneration.Id != generation.GenerationId) return new(LogAssessmentCommitCode.Conflict);
+                        if (existingGeneration.GenerationId != generationId) return new(LogAssessmentCommitCode.Conflict);
                         continue;
                     }
 
                     db.LogGenerationEvidence.Add(new()
                     {
-                        Id = generation.GenerationId!.Value,
+                        Id = LogAssessmentCanonicalizer.DeterministicId("generation-evidence", generation.EvidenceKey),
+                        GenerationId = generationId,
                         EvidenceKey = generation.EvidenceKey,
                         EvidenceKind = generation.EvidenceKind.ToString(),
                         DatabaseId = prepared.Input.DatabaseId,

@@ -53,24 +53,16 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                 });
 
             migrationBuilder.CreateTable(
-                name: "LogGenerationEvidence",
+                name: "LogGenerationFacts",
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    EvidenceKey = table.Column<string>(type: "nchar(64)", fixedLength: true, maxLength: 64, nullable: false),
-                    EvidenceKind = table.Column<string>(type: "nvarchar(30)", maxLength: 30, nullable: false),
                     DatabaseId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    SourceDatabaseGuid = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
-                    FamilyGuid = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
-                    FirstRecoveryForkId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
-                    RecoveryForkId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
-                    ObservedAtUtc = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: true),
-                    RecordedAtUtc = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false),
-                    Status = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false)
+                    CreatedAtUtc = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false)
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_LogGenerationEvidence", x => x.Id);
+                    table.PrimaryKey("PK_LogGenerationFacts", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -123,6 +115,34 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         onDelete: ReferentialAction.Restrict);
                 });
 
+            migrationBuilder.CreateTable(
+                name: "LogGenerationEvidence",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    GenerationId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    EvidenceKey = table.Column<string>(type: "nchar(64)", fixedLength: true, maxLength: 64, nullable: false),
+                    EvidenceKind = table.Column<string>(type: "nvarchar(30)", maxLength: 30, nullable: false),
+                    DatabaseId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    SourceDatabaseGuid = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    FamilyGuid = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    FirstRecoveryForkId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    RecoveryForkId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    ObservedAtUtc = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: true),
+                    RecordedAtUtc = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false),
+                    Status = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_LogGenerationEvidence", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_LogGenerationEvidence_LogGenerationFacts_GenerationId",
+                        column: x => x.GenerationId,
+                        principalTable: "LogGenerationFacts",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Restrict);
+                });
+
             migrationBuilder.CreateIndex(
                 name: "IX_LogCoverageEntries_AssessmentId",
                 table: "LogCoverageEntries",
@@ -134,6 +154,11 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                 table: "LogGenerationEvidence",
                 column: "EvidenceKey",
                 unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_LogGenerationEvidence_GenerationId",
+                table: "LogGenerationEvidence",
+                column: "GenerationId");
 
             migrationBuilder.CreateIndex(
                 name: "IX_LogObservationEntries_AssessmentId_EntryNumber",
@@ -149,6 +174,7 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                 IF EXISTS (SELECT 1 FROM [LogAssessmentCommits])
                 OR EXISTS (SELECT 1 FROM [LogObservationEntries])
                 OR EXISTS (SELECT 1 FROM [LogCoverageEntries])
+                OR EXISTS (SELECT 1 FROM [LogGenerationFacts])
                 OR EXISTS (SELECT 1 FROM [LogGenerationEvidence])
                 OR EXISTS (SELECT 1 FROM [BackupSets])
                 OR EXISTS (SELECT 1 FROM [BackupSetEvidence])
@@ -169,6 +195,9 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
             migrationBuilder.DropTable(
                 name: "LogObservationEntries");
+
+            migrationBuilder.DropTable(
+                name: "LogGenerationFacts");
 
             migrationBuilder.DropTable(
                 name: "LogAssessmentCommits");

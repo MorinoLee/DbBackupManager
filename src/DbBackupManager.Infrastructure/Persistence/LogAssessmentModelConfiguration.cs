@@ -5,7 +5,7 @@ namespace DbBackupManager.Infrastructure.Persistence;
 
 internal sealed class LogAssessmentModelConfiguration : IEntityTypeConfiguration<LogAssessmentCommit>,
     IEntityTypeConfiguration<LogObservationEntry>, IEntityTypeConfiguration<LogCoverageEntry>,
-    IEntityTypeConfiguration<LogGenerationEvidence>
+    IEntityTypeConfiguration<LogGenerationEvidence>, IEntityTypeConfiguration<LogGenerationFact>
 {
     public void Configure(EntityTypeBuilder<LogAssessmentCommit> builder)
     {
@@ -67,9 +67,19 @@ internal sealed class LogAssessmentModelConfiguration : IEntityTypeConfiguration
         builder.ToTable("LogGenerationEvidence");
         builder.HasKey(x => x.Id);
         builder.HasIndex(x => x.EvidenceKey).IsUnique();
+        builder.HasIndex(x => x.GenerationId);
         builder.Property(x => x.EvidenceKey).HasMaxLength(64).IsFixedLength();
         builder.Property(x => x.EvidenceKind).HasMaxLength(30);
         builder.Property(x => x.Status).HasMaxLength(20);
         builder.Property(x => x.RecordedAtUtc).IsRequired();
+        builder.HasOne<LogGenerationFact>().WithMany().HasForeignKey(x => x.GenerationId)
+            .OnDelete(DeleteBehavior.Restrict);
+    }
+
+    public void Configure(EntityTypeBuilder<LogGenerationFact> builder)
+    {
+        builder.ToTable("LogGenerationFacts");
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.CreatedAtUtc).IsRequired();
     }
 }

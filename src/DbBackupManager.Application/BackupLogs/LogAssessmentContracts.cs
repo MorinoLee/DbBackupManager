@@ -179,7 +179,11 @@ public sealed record LogAssessmentInput(
         TargetSqlConnectionSnapshot.From(request.Connection), request.PriorCall, request.Capability,
         request.ResourceAvailability, request.DatabaseBudgetLimits, request.DatabaseBudgetObservation,
         request.GlobalBudgetLimits, request.GlobalBudgetObservation, request.EnumerationComplete,
-        request.PreferredFullBackupSetId, request.Candidates);
+        request.PreferredFullBackupSetId,
+        request.Candidates.OrderBy(x => x.BackupSetId).ThenBy(x => x.SourceRevision)
+            .ThenBy(x => x.Scope.Kind).ThenBy(x => x.Scope.StorageTargetId)
+            .ThenBy(x => x.Actual.Type).ThenBy(x => x.Actual.FirstLsn?.Value)
+            .ThenBy(x => x.Actual.LastLsn?.Value).ToArray());
 
     public LogLocationScope Scope => new(
         Enum.Parse<LogStorageLocation>(ScopeKind, false), StorageTargetId);
@@ -255,6 +259,9 @@ public sealed record PreparedLogAssessment(
     LogPriorCallSnapshot PriorCall,
     LogBudgetSnapshot DatabaseBudget,
     LogBudgetSnapshot GlobalBudget,
+    IReadOnlyList<LogAssessmentCandidate> ResolvedCandidates,
+    string CandidateSetRevision,
+    bool CandidateEnumerationComplete,
     IReadOnlyList<LogObservationDraft> Observations,
     IReadOnlyList<LogGenerationDraft> Generations,
     IReadOnlyList<LogCandidateRefDraft> Candidates,
@@ -286,6 +293,7 @@ public static class LogAssessmentCanonicalizer
     };
 
     public static string RequestFingerprint(LogAssessmentInput input) => Hash(input);
+    public static string CandidateSetRevision(IReadOnlyList<LogAssessmentCandidate> candidates) => Hash(candidates);
     public static string PayloadFingerprint(PreparedLogAssessment prepared) =>
         Hash(prepared with { RequestFingerprint = string.Empty, PayloadFingerprint = string.Empty });
 

@@ -54,9 +54,17 @@ public sealed class LogCoverageEntry
     public decimal? RestorePointLsn { get; set; }
 }
 
+public sealed class LogGenerationFact
+{
+    public Guid Id { get; set; }
+    public Guid DatabaseId { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
+}
+
 public sealed class LogGenerationEvidence
 {
     public Guid Id { get; set; }
+    public Guid GenerationId { get; set; }
     public string EvidenceKey { get; set; } = string.Empty;
     public string EvidenceKind { get; set; } = string.Empty;
     public Guid DatabaseId { get; set; }

@@ -13,7 +13,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace DbBackupManager.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(PlatformDbContext))]
-    [Migration("20261024020650_AddLogAssessmentLedger")]
+    [Migration("20261024043021_AddLogAssessmentLedger")]
     partial class AddLogAssessmentLedger
     {
         /// <inheritdoc />
@@ -4856,6 +4856,9 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("FirstRecoveryForkId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid>("GenerationId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<DateTimeOffset?>("ObservedAtUtc")
                         .HasColumnType("datetimeoffset");
 
@@ -4878,7 +4881,26 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                     b.HasIndex("EvidenceKey")
                         .IsUnique();
 
+                    b.HasIndex("GenerationId");
+
                     b.ToTable("LogGenerationEvidence", (string)null);
+                });
+
+            modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogGenerationFact", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("LogGenerationFacts", (string)null);
                 });
 
             modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogObservationEntry", b =>
@@ -5344,6 +5366,15 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                     b.HasOne("DbBackupManager.Infrastructure.Persistence.LogAssessmentCommit", null)
                         .WithMany()
                         .HasForeignKey("AssessmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogGenerationEvidence", b =>
+                {
+                    b.HasOne("DbBackupManager.Infrastructure.Persistence.LogGenerationFact", null)
+                        .WithMany()
+                        .HasForeignKey("GenerationId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

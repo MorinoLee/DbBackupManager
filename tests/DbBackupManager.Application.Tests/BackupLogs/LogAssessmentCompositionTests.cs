@@ -191,6 +191,41 @@ public sealed class LogAssessmentCompositionTests
     }
 
     [Fact]
+    public async Task R32o1ReaderResolvedCandidatesAreFrozenInPrepared()
+    {
+        var resolved = FullCandidate();
+        var service = new LogAssessmentCompositionService(new FakeReader(ReadyEvidence()), new FakeCommitStore(),
+            new FakeCandidateReader(resolved));
+        var prepared = await service.PrepareAsync(Request(candidates: []));
+
+        Assert.Empty(prepared.Input.Candidates);
+        var candidate = Assert.Single(prepared.ResolvedCandidates);
+        Assert.Equal(resolved.BackupSetId, candidate.BackupSetId);
+        Assert.Equal(resolved.Actual.FirstLsn, candidate.Actual.FirstLsn);
+        Assert.NotEmpty(prepared.CandidateSetRevision);
+        var roundTrip = LogAssessmentCanonicalizer.Deserialize(LogAssessmentCanonicalizer.Serialize(prepared));
+        Assert.Equal(candidate.Actual.FirstLsn, roundTrip.ResolvedCandidates.Single().Actual.FirstLsn);
+        Assert.Equal(prepared.PayloadFingerprint, LogAssessmentCanonicalizer.PayloadFingerprint(roundTrip));
+    }
+
+    [Fact]
+    public async Task R32o6CandidatePermutationDoesNotChangeRequestIdentity()
+    {
+        var store = new FakeCommitStore();
+        var service = new LogAssessmentCompositionService(new FakeReader(ReadyEvidence()), store);
+        var full = FullCandidate();
+        var log = LogCandidate(new(100), new(200));
+        var first = await service.PrepareAsync(Request(candidates: [full, log]));
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await service.CommitAsync(first)).Code);
+
+        var replayRequest = Request(candidates: [log, full]) with { MutationId = first.Input.MutationId };
+        var replay = await service.PrepareAsync(replayRequest);
+
+        Assert.Equal(first.AssessmentId, replay.AssessmentId);
+        Assert.Equal(first.PayloadFingerprint, replay.PayloadFingerprint);
+    }
+
+    [Fact]
     public async Task C21PriorCallStateRemainsIndependent()
     {
         var request = Request(candidates: [FullCandidate()]) with
@@ -206,6 +241,22 @@ public sealed class LogAssessmentCompositionTests
         Assert.False(prepared.PriorCall.MayEnterAdmission);
         Assert.Equal(LogReason.PriorCallActive, prepared.PriorCall.ReasonCode);
         Assert.Equal("Ready", prepared.Technical.Readiness);
+    }
+
+    [Fact]
+    public async Task R32o5DifferentSourceIdentityCannotBecomeRequestDataStart()
+    {
+        var candidate = FullCandidate();
+        candidate = candidate with
+        {
+            Actual = candidate.Actual with { Database = new(Guid.NewGuid(), Guid.NewGuid()) },
+        };
+
+        var prepared = await PrepareAsync(Request(candidates: [candidate]));
+
+        Assert.Equal("Missing", prepared.DataStart.Availability);
+        Assert.Contains(prepared.Issues, x => x.Code == "log.candidate_identity_mismatch");
+        Assert.Empty(prepared.Candidates);
     }
 
     [Fact]
@@ -231,6 +282,16 @@ public sealed class LogAssessmentCompositionTests
         Assert.Single(prepared.Generations);
         Assert.NotNull(prepared.Generations[0].GenerationId);
         Assert.Equal(LogGenerationEvidenceKind.BeginsLogChain, prepared.Generations[0].EvidenceKind);
+        Assert.Equal(prepared.Generations[0].GenerationId, prepared.Candidates[0].GenerationId);
+
+        var conflicted = candidate with
+        {
+            Status = LogEvidenceStatus.SourceConflict,
+            HasRequiredFields = false,
+        };
+        var blocked = await PrepareAsync(Request(candidates: [conflicted]));
+        Assert.Empty(blocked.Generations);
+        Assert.Null(blocked.Candidates[0].GenerationId);
 
         var full = await PrepareAsync(Request(candidates: [FullCandidate() with
         {
@@ -412,6 +473,14 @@ public sealed class LogAssessmentCompositionTests
             Calls++;
             return Task.FromResult(evidence);
         }
+    }
+
+    private sealed class FakeCandidateReader(params LogAssessmentCandidate[] candidates)
+        : ILogAssessmentCandidateReader
+    {
+        public Task<LogCandidateSnapshot> ReadAsync(LogAssessmentRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new LogCandidateSnapshot(true, candidates, []));
     }
 
     private sealed class FakeCommitStore : ILogAssessmentCommitStore

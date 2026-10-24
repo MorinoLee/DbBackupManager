@@ -73,6 +73,7 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
     public DbSet<LogCoverageEntry> LogCoverageEntries => Set<LogCoverageEntry>();
 
     public DbSet<LogGenerationEvidence> LogGenerationEvidence => Set<LogGenerationEvidence>();
+    public DbSet<LogGenerationFact> LogGenerationFacts => Set<LogGenerationFact>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -189,6 +190,9 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
             if (entry.State is EntityState.Modified or EntityState.Deleted)
                 throw new InvalidOperationException("LOG 评估账本只能追加，不能修改或删除。");
         foreach (var entry in ChangeTracker.Entries<LogGenerationEvidence>())
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+                throw new InvalidOperationException("LOG 评估账本只能追加，不能修改或删除。");
+        foreach (var entry in ChangeTracker.Entries<LogGenerationFact>())
             if (entry.State is EntityState.Modified or EntityState.Deleted)
                 throw new InvalidOperationException("LOG 评估账本只能追加，不能修改或删除。");
 

@@ -70,10 +70,17 @@ public sealed class LogAssessmentCompositionService(
         string requestFingerprint, TargetSqlLogReadinessEvidence readiness, LogCandidateSnapshot snapshot)
     {
         var candidates = snapshot.Candidates.Where(c => c.Scope == request.Scope)
+            .Where(c => !c.IsManaged || c.Actual.Database is null
+                || c.Actual.Database.DatabaseGuid is not { } databaseGuid
+                || c.Actual.Database.FamilyGuid is not { } familyGuid
+                || databaseGuid == request.ExpectedDatabase.DatabaseGuid && familyGuid == request.ExpectedDatabase.FamilyGuid)
             .OrderBy(c => c.BackupSetId).ThenBy(c => c.SourceRevision).ToArray();
         var issues = new List<LogAssessmentIssueDraft>();
         if (snapshot.Candidates.Any(c => c.Scope != request.Scope))
             issues.Add(new("log.candidate_scope_mismatch"));
+        if (snapshot.Candidates.Any(c => c.IsManaged && c.Actual.Database is { DatabaseGuid: { } d, FamilyGuid: { } f }
+                && (d != request.ExpectedDatabase.DatabaseGuid || f != request.ExpectedDatabase.FamilyGuid)))
+            issues.Add(new("log.candidate_identity_mismatch"));
         issues.AddRange(snapshot.Issues.Select(code => new LogAssessmentIssueDraft(code)));
 
         var technicalStatus = MapStatus(readiness);
@@ -106,15 +113,18 @@ public sealed class LogAssessmentCompositionService(
                 && c.Actual.IsCopyOnly == false),
         };
         var technical = LogTechnicalReadinessRules.Evaluate(facts);
-        var start = ComposeStart(request, candidates);
-        var coverage = ComposeCoverage(request, candidates, start, snapshot.EnumerationComplete);
+        var resolved = ResolveGenerations(request.DatabaseId, candidates);
+        var candidatesWithGenerations = resolved.Candidates;
+        var start = ComposeStart(request, candidatesWithGenerations);
+        var coverage = ComposeCoverage(request, candidatesWithGenerations, start, snapshot.EnumerationComplete);
         var prior = LogPriorCallRules.Evaluate(request.PriorCall, request.Intent);
         var databaseBudget = LogBudgetRules.Evaluate(request.DatabaseBudgetLimits, request.DatabaseBudgetObservation);
         var globalBudget = LogBudgetRules.Evaluate(request.GlobalBudgetLimits, request.GlobalBudgetObservation);
 
-        var observations = Observations(readiness, candidates, out var candidateStart);
-        var generations = Generations(request.DatabaseId, candidates);
-        var refs = CandidateRefs(candidates, candidateStart, coverage);
+        var observations = Observations(readiness, candidatesWithGenerations, out var candidateStart);
+        var generations = resolved.Generations;
+        var refs = CandidateRefs(candidatesWithGenerations, candidateStart, coverage);
+        var candidateSetRevision = LogAssessmentCanonicalizer.CandidateSetRevision(candidatesWithGenerations);
         var assessmentId = LogAssessmentCanonicalizer.DeterministicId("assessment",
             request.DatabaseId, request.MutationId);
         var prepared = new PreparedLogAssessment(assessmentId, PreparedLogAssessment.CurrentSchemaVersion,
@@ -123,6 +133,7 @@ public sealed class LogAssessmentCompositionService(
             new(prior.MayEnterAdmission, prior.ReusesOriginalInvocation, prior.PreservesPriorUnknown, prior.ReasonCode),
             new(databaseBudget.AllowsNewLog, databaseBudget.ReasonCode),
             new(globalBudget.AllowsNewLog, globalBudget.ReasonCode),
+            candidatesWithGenerations, candidateSetRevision, snapshot.EnumerationComplete,
             observations, generations, refs, issues, _clock.GetUtcNow());
         return prepared with { PayloadFingerprint = LogAssessmentCanonicalizer.PayloadFingerprint(prepared) };
     }
@@ -240,34 +251,50 @@ public sealed class LogAssessmentCompositionService(
         observation.FailureCode == TargetSqlFailureCode.AuthorizationDenied ? LogEvidenceStatus.PermissionDenied
         : observation.QueryComplete ? LogEvidenceStatus.Complete : LogEvidenceStatus.MissingFields;
 
-    private static LogGenerationDraft[] Generations(Guid databaseId, IReadOnlyList<LogAssessmentCandidate> candidates)
+    private static (LogAssessmentCandidate[] Candidates, LogGenerationDraft[] Generations) ResolveGenerations(
+        Guid databaseId, LogAssessmentCandidate[] candidates)
     {
-        var result = new List<LogGenerationDraft>();
+        var result = new List<LogAssessmentCandidate>(candidates.Length);
+        var drafts = new List<LogGenerationDraft>();
         var keys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var candidate in candidates)
         {
             var actual = candidate.Actual;
-            if (actual.Generation?.IsKnown == true && actual.Generation.GenerationId is { } known)
+            var valid = candidate.Status == LogEvidenceStatus.Complete && candidate.HasRequiredFields
+                && actual.Type is not null && actual.Database is { DatabaseGuid: { } databaseGuid, FamilyGuid: { } familyGuid }
+                && databaseGuid != Guid.Empty && familyGuid != Guid.Empty
+                && actual.Branch is { FirstRecoveryForkId: { } firstFork, RecoveryForkId: { } recoveryFork }
+                && firstFork != Guid.Empty && recoveryFork != Guid.Empty;
+            Guid? generationId = null;
+            var evidenceKind = actual.Generation?.Evidence ?? LogGenerationEvidenceKind.Unspecified;
+            if (valid && actual.Generation?.IsKnown == true)
             {
-                var key = LogAssessmentCanonicalizer.EvidenceKey(databaseId, actual,
-                    actual.Generation.Evidence, candidate.SourceRevision);
-                if (keys.Add(key))
-                    result.Add(new(known, key, actual.Generation.Evidence, actual.Database?.DatabaseGuid,
-                        actual.Database?.FamilyGuid, actual.Branch?.FirstRecoveryForkId,
-                        actual.Branch?.RecoveryForkId, actual.ObservedAtUtc, candidate.Status));
-                continue;
+                generationId = actual.Generation.GenerationId;
             }
-            if (actual.BeginsLogChain != true || actual.Database is null || actual.Branch is null) continue;
-            var evidenceKey = LogAssessmentCanonicalizer.EvidenceKey(databaseId, actual,
-                LogGenerationEvidenceKind.BeginsLogChain, candidate.SourceRevision);
-            if (!keys.Add(evidenceKey)) continue;
-            var generationId = LogAssessmentCanonicalizer.DeterministicId("generation", evidenceKey);
-            result.Add(new(generationId, evidenceKey, LogGenerationEvidenceKind.BeginsLogChain,
-                actual.Database.DatabaseGuid, actual.Database.FamilyGuid,
-                actual.Branch.FirstRecoveryForkId, actual.Branch.RecoveryForkId,
-                actual.ObservedAtUtc, candidate.Status));
+            else if (valid && actual.BeginsLogChain == true)
+            {
+                evidenceKind = LogGenerationEvidenceKind.BeginsLogChain;
+                generationId = LogAssessmentCanonicalizer.DeterministicId("generation",
+                    LogAssessmentCanonicalizer.EvidenceKey(databaseId,
+                        actual, evidenceKind, candidate.SourceRevision));
+            }
+
+            var resolvedActual = actual with
+            {
+                Generation = generationId is { } id && id != Guid.Empty
+                    ? new LogChainGeneration(id, evidenceKind)
+                    : null,
+            };
+            result.Add(candidate with { Actual = resolvedActual });
+            if (generationId is null) continue;
+            var key = LogAssessmentCanonicalizer.EvidenceKey(databaseId,
+                actual, evidenceKind, candidate.SourceRevision);
+            if (keys.Add(key))
+                drafts.Add(new(generationId, key, evidenceKind, actual.Database?.DatabaseGuid,
+                    actual.Database?.FamilyGuid, actual.Branch?.FirstRecoveryForkId,
+                    actual.Branch?.RecoveryForkId, actual.ObservedAtUtc, candidate.Status));
         }
-        return result.ToArray();
+        return (result.ToArray(), drafts.ToArray());
     }
 
     private static LogCandidateRefDraft[] CandidateRefs(IReadOnlyList<LogAssessmentCandidate> candidates,
