@@ -6,7 +6,8 @@ namespace DbBackupManager.Application.BackupSets;
 
 public sealed record BackupSetObservation(
     BackupSetEvidenceSource Source, BackupSetEvidenceKind Kind,
-    BackupSetMetadata Metadata, BackupCompletionTimeDecision Completion, BackupSetAssessment Assessment);
+    BackupSetMetadata Metadata, BackupCompletionTimeDecision Completion, BackupSetAssessment Assessment,
+    DateTimeOffset? SourceObservedAtUtc = null);
 
 public sealed record RegisterBackupSetCommand(
     LeaseHandle Lease, Guid BackupSetId, Guid DatabaseId, Guid MutationId, DateTimeOffset ObservedAtUtc,

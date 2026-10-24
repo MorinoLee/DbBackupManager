@@ -32,7 +32,12 @@ public sealed class TargetSqlAdapterRegistrationTests
         var executor = scope.ServiceProvider.GetRequiredService<ITargetSqlBackupExecutor>();
         var planExecutor = scope.ServiceProvider.GetRequiredService<ITargetSqlPlanBackupExecutor>();
         var metadata = scope.ServiceProvider.GetRequiredService<ITargetSqlBackupMetadataReader>();
+        var readiness = scope.ServiceProvider.GetRequiredService<ITargetSqlLogReadinessReader>();
         Assert.IsType<SqlClientTargetSqlBackupMetadataReader>(metadata);
+        Assert.IsType<SqlClientTargetSqlLogReadinessReader>(readiness);
+        Assert.Same(readiness, scope.ServiceProvider.GetRequiredService<ITargetSqlLogReadinessReader>());
+        using var otherScope = provider.CreateScope();
+        Assert.NotSame(readiness, otherScope.ServiceProvider.GetRequiredService<ITargetSqlLogReadinessReader>());
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<BackupMetadataReconciliationService>());
         Assert.IsType<BackupMetadataReconciliationLookup>(scope.ServiceProvider.GetRequiredService<IBackupMetadataReconciliationLookup>());
 

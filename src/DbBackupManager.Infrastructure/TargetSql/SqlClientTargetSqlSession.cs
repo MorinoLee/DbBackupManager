@@ -108,10 +108,15 @@ internal static class SqlClientTargetSqlConnectionFactory
     }
 }
 
-internal sealed partial class SqlClientTargetSqlSession(SqlConnection connection) : ITargetSqlClientSession
+internal sealed partial class SqlClientTargetSqlSession(
+    SqlConnection connection,
+    TimeProvider? clock = null,
+    ITargetSqlLogReadinessQuery? logReadinessQuery = null) : ITargetSqlClientSession
 {
     private readonly SqlConnection _connection = connection
         ?? throw new ArgumentNullException(nameof(connection));
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private readonly ITargetSqlLogReadinessQuery? _logReadinessQuery = logReadinessQuery;
 
     public async Task<TargetSqlServerInfo> ReadServerInfoAsync(CancellationToken cancellationToken)
     {

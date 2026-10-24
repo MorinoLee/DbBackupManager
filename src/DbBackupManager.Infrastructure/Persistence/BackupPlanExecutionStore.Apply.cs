@@ -128,7 +128,7 @@ internal sealed partial class BackupPlanExecutionStore
                 var command = new RegisterBackupSetCommand(lease, identity.IntendedBackupSetId, snapshot.DatabaseId, operation.Id,
                     identity.ObservedAtUtc, facts.Metadata, facts.Completion, facts.Assessment, facts.ActualBaseBackupSetId, true,
                     observations.Select(x => new BackupSetObservation(Enum.Parse<BackupSetEvidenceSource>(x.Source.ToString()), x.Kind,
-                        x.Facts.Metadata, x.Facts.Completion, x.Facts.Assessment)).ToArray());
+                        x.Facts.Metadata, x.Facts.Completion, x.Facts.Assessment, x.Facts.EvidenceAtUtc)).ToArray());
                 var registered = await BackupSetRegistrationStore.RegisterInTransactionAsync(db, command, now, cancellationToken);
                 if (!registered.IsSucceeded) return BackupExecutionContractCode.Conflict;
                 var set = await db.BackupSets.SingleAsync(x => x.AttemptId == attempt.Id, cancellationToken);

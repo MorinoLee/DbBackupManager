@@ -398,6 +398,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                         .HasColumnName("BackupSetGuid");
                                 });
 
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "BeginsLogChain", "DbBackupManager.Domain.BackupSets.BackupSet.Metadata#BackupSetMetadata.BeginsLogChain#BackupMetadataField<bool>", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasDefaultValue("Unknown")
+                                        .HasColumnName("BeginsLogChainState");
+
+                                    b2.Property<bool?>("Value")
+                                        .HasColumnType("bit")
+                                        .HasColumnName("BeginsLogChain");
+                                });
+
                             b1.ComplexProperty(typeof(Dictionary<string, object>), "CheckpointLsn", "DbBackupManager.Domain.BackupSets.BackupSet.Metadata#BackupSetMetadata.CheckpointLsn#BackupMetadataField<BackupLsn>", b2 =>
                                 {
                                     b2.IsRequired();
@@ -548,6 +565,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                         .HasColumnName("HasBackupChecksums");
                                 });
 
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "HasBulkLoggedData", "DbBackupManager.Domain.BackupSets.BackupSet.Metadata#BackupSetMetadata.HasBulkLoggedData#BackupMetadataField<bool>", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasDefaultValue("Unknown")
+                                        .HasColumnName("HasBulkLoggedDataState");
+
+                                    b2.Property<bool?>("Value")
+                                        .HasColumnType("bit")
+                                        .HasColumnName("HasBulkLoggedData");
+                                });
+
                             b1.ComplexProperty(typeof(Dictionary<string, object>), "HasIncompleteMetadata", "DbBackupManager.Domain.BackupSets.BackupSet.Metadata#BackupSetMetadata.HasIncompleteMetadata#BackupMetadataField<bool>", b2 =>
                                 {
                                     b2.IsRequired();
@@ -608,6 +642,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                         .HasColumnName("IsDamaged");
                                 });
 
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "IsForceOffline", "DbBackupManager.Domain.BackupSets.BackupSet.Metadata#BackupSetMetadata.IsForceOffline#BackupMetadataField<bool>", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasDefaultValue("Unknown")
+                                        .HasColumnName("IsForceOfflineState");
+
+                                    b2.Property<bool?>("Value")
+                                        .HasColumnType("bit")
+                                        .HasColumnName("IsForceOffline");
+                                });
+
                             b1.ComplexProperty(typeof(Dictionary<string, object>), "IsSnapshot", "DbBackupManager.Domain.BackupSets.BackupSet.Metadata#BackupSetMetadata.IsSnapshot#BackupMetadataField<bool>", b2 =>
                                 {
                                     b2.IsRequired();
@@ -651,6 +702,24 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                     b2.Property<Guid?>("Value")
                                         .HasColumnType("uniqueidentifier")
                                         .HasColumnName("RecoveryForkId");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "RecoveryModel", "DbBackupManager.Domain.BackupSets.BackupSet.Metadata#BackupSetMetadata.RecoveryModel#BackupMetadataField<DatabaseRecoveryModel>", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasDefaultValue("Unknown")
+                                        .HasColumnName("RecoveryModelState");
+
+                                    b2.Property<string>("Value")
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("RecoveryModel");
                                 });
 
                             b1.ComplexProperty(typeof(Dictionary<string, object>), "SqlFinishedLocal", "DbBackupManager.Domain.BackupSets.BackupSet.Metadata#BackupSetMetadata.SqlFinishedLocal#BackupMetadataField<DateTime>", b2 =>
@@ -717,6 +786,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupSets_BackupSetGuid", "([BackupSetGuidState] = 'Known' AND [BackupSetGuid] IS NOT NULL AND [BackupSetGuid] <> '00000000-0000-0000-0000-000000000000') OR ([BackupSetGuidState] IN ('Unknown') AND [BackupSetGuid] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupSets_BeginsLogChain", "([BeginsLogChainState] = 'Known' AND [BeginsLogChain] IS NOT NULL) OR ([BeginsLogChainState] IN ('Unknown') AND [BeginsLogChain] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupSets_CheckpointLsn", "([CheckpointLsnState] = 'Known' AND [CheckpointLsn] IS NOT NULL AND [CheckpointLsn] >= 0) OR ([CheckpointLsnState] IN ('Unknown') AND [CheckpointLsn] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupSets_Completion", "([CompletionSource] = 'PlatformObserved' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.platform_observed') OR ([CompletionSource] = 'SqlLocalTime' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.sql_local_converted') OR ([CompletionSource] = 'Unknown' AND [CompletedAtUtc] IS NULL AND [CompletionReasonCode] IN ('completion.ambiguous_local_time','completion.conversion_out_of_range','completion.future_sql_time','completion.invalid_local_time','completion.older_than_24_hours','completion.server_offset_mismatch','completion.server_offset_unknown','completion.server_time_zone_unknown','completion.sql_finish_missing'))");
@@ -745,6 +816,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupSets_HasBackupChecksums", "([HasBackupChecksumsState] = 'Known' AND [HasBackupChecksums] IS NOT NULL) OR ([HasBackupChecksumsState] IN ('Unknown') AND [HasBackupChecksums] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupSets_HasBulkLoggedData", "([HasBulkLoggedDataState] = 'Known' AND [HasBulkLoggedData] IS NOT NULL) OR ([HasBulkLoggedDataState] IN ('Unknown') AND [HasBulkLoggedData] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupSets_HasIncompleteMetadata", "([HasIncompleteMetadataState] = 'Known' AND [HasIncompleteMetadata] IS NOT NULL) OR ([HasIncompleteMetadataState] IN ('Unknown') AND [HasIncompleteMetadata] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupSets_IsCompressed", "([IsCompressedState] = 'Known' AND [IsCompressed] IS NOT NULL) OR ([IsCompressedState] IN ('Unknown') AND [IsCompressed] IS NULL)");
@@ -753,6 +826,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupSets_IsDamaged", "([IsDamagedState] = 'Known' AND [IsDamaged] IS NOT NULL) OR ([IsDamagedState] IN ('Unknown') AND [IsDamaged] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupSets_IsForceOffline", "([IsForceOfflineState] = 'Known' AND [IsForceOffline] IS NOT NULL) OR ([IsForceOfflineState] IN ('Unknown') AND [IsForceOffline] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupSets_IsSnapshot", "([IsSnapshotState] = 'Known' AND [IsSnapshot] IS NOT NULL) OR ([IsSnapshotState] IN ('Unknown') AND [IsSnapshot] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupSets_LastLsn", "([LastLsnState] = 'Known' AND [LastLsn] IS NOT NULL AND [LastLsn] >= 0) OR ([LastLsnState] IN ('Unknown') AND [LastLsn] IS NULL)");
@@ -760,6 +835,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("CK_BackupSets_ReconciliationCount", "[ReconciliationCount] >= 1");
 
                             t.HasCheckConstraint("CK_BackupSets_RecoveryForkId", "([RecoveryForkIdState] = 'Known' AND [RecoveryForkId] IS NOT NULL AND [RecoveryForkId] <> '00000000-0000-0000-0000-000000000000') OR ([RecoveryForkIdState] IN ('Unknown') AND [RecoveryForkId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupSets_RecoveryModel", "([RecoveryModelState] = 'Known' AND [RecoveryModel] IS NOT NULL AND [RecoveryModel] IN ('Full','BulkLogged','Simple')) OR ([RecoveryModelState] IN ('Unknown') AND [RecoveryModel] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupSets_SqlFinishedLocal", "([SqlFinishedLocalState] = 'Known' AND [SqlFinishedLocal] IS NOT NULL) OR ([SqlFinishedLocalState] IN ('Unknown') AND [SqlFinishedLocal] IS NULL)");
 
@@ -805,6 +882,10 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
+
+                    b.Property<DateTimeOffset?>("SourceObservedAtUtc")
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("SourceObservedAtUtc");
 
                     b.Property<bool>("SqlSuccessObserved")
                         .HasColumnType("bit");
@@ -871,6 +952,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                     b2.Property<Guid?>("Value")
                                         .HasColumnType("uniqueidentifier")
                                         .HasColumnName("BackupSetGuid");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "BeginsLogChain", "DbBackupManager.Domain.BackupSets.BackupSetEvidence.Metadata#BackupSetMetadata.BeginsLogChain#BackupMetadataField<bool>", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasDefaultValue("Unknown")
+                                        .HasColumnName("BeginsLogChainState");
+
+                                    b2.Property<bool?>("Value")
+                                        .HasColumnType("bit")
+                                        .HasColumnName("BeginsLogChain");
                                 });
 
                             b1.ComplexProperty(typeof(Dictionary<string, object>), "CheckpointLsn", "DbBackupManager.Domain.BackupSets.BackupSetEvidence.Metadata#BackupSetMetadata.CheckpointLsn#BackupMetadataField<BackupLsn>", b2 =>
@@ -1023,6 +1121,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                         .HasColumnName("HasBackupChecksums");
                                 });
 
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "HasBulkLoggedData", "DbBackupManager.Domain.BackupSets.BackupSetEvidence.Metadata#BackupSetMetadata.HasBulkLoggedData#BackupMetadataField<bool>", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasDefaultValue("Unknown")
+                                        .HasColumnName("HasBulkLoggedDataState");
+
+                                    b2.Property<bool?>("Value")
+                                        .HasColumnType("bit")
+                                        .HasColumnName("HasBulkLoggedData");
+                                });
+
                             b1.ComplexProperty(typeof(Dictionary<string, object>), "HasIncompleteMetadata", "DbBackupManager.Domain.BackupSets.BackupSetEvidence.Metadata#BackupSetMetadata.HasIncompleteMetadata#BackupMetadataField<bool>", b2 =>
                                 {
                                     b2.IsRequired();
@@ -1083,6 +1198,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                         .HasColumnName("IsDamaged");
                                 });
 
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "IsForceOffline", "DbBackupManager.Domain.BackupSets.BackupSetEvidence.Metadata#BackupSetMetadata.IsForceOffline#BackupMetadataField<bool>", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasDefaultValue("Unknown")
+                                        .HasColumnName("IsForceOfflineState");
+
+                                    b2.Property<bool?>("Value")
+                                        .HasColumnType("bit")
+                                        .HasColumnName("IsForceOffline");
+                                });
+
                             b1.ComplexProperty(typeof(Dictionary<string, object>), "IsSnapshot", "DbBackupManager.Domain.BackupSets.BackupSetEvidence.Metadata#BackupSetMetadata.IsSnapshot#BackupMetadataField<bool>", b2 =>
                                 {
                                     b2.IsRequired();
@@ -1126,6 +1258,24 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                     b2.Property<Guid?>("Value")
                                         .HasColumnType("uniqueidentifier")
                                         .HasColumnName("RecoveryForkId");
+                                });
+
+                            b1.ComplexProperty(typeof(Dictionary<string, object>), "RecoveryModel", "DbBackupManager.Domain.BackupSets.BackupSetEvidence.Metadata#BackupSetMetadata.RecoveryModel#BackupMetadataField<DatabaseRecoveryModel>", b2 =>
+                                {
+                                    b2.IsRequired();
+
+                                    b2.Property<string>("State")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasDefaultValue("Unknown")
+                                        .HasColumnName("RecoveryModelState");
+
+                                    b2.Property<string>("Value")
+                                        .HasMaxLength(20)
+                                        .HasColumnType("nvarchar(20)")
+                                        .HasColumnName("RecoveryModel");
                                 });
 
                             b1.ComplexProperty(typeof(Dictionary<string, object>), "SqlFinishedLocal", "DbBackupManager.Domain.BackupSets.BackupSetEvidence.Metadata#BackupSetMetadata.SqlFinishedLocal#BackupMetadataField<DateTime>", b2 =>
@@ -1193,6 +1343,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_BackupSetGuid", "([BackupSetGuidState] = 'Known' AND [BackupSetGuid] IS NOT NULL AND [BackupSetGuid] <> '00000000-0000-0000-0000-000000000000') OR ([BackupSetGuidState] IN ('Unknown') AND [BackupSetGuid] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupSetEvidence_BeginsLogChain", "([BeginsLogChainState] = 'Known' AND [BeginsLogChain] IS NOT NULL) OR ([BeginsLogChainState] IN ('Unknown') AND [BeginsLogChain] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupSetEvidence_CheckpointLsn", "([CheckpointLsnState] = 'Known' AND [CheckpointLsn] IS NOT NULL AND [CheckpointLsn] >= 0) OR ([CheckpointLsnState] IN ('Unknown') AND [CheckpointLsn] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_Completion", "([CompletionSource] = 'PlatformObserved' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.platform_observed') OR ([CompletionSource] = 'SqlLocalTime' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.sql_local_converted') OR ([CompletionSource] = 'Unknown' AND [CompletedAtUtc] IS NULL AND [CompletionReasonCode] IN ('completion.ambiguous_local_time','completion.conversion_out_of_range','completion.future_sql_time','completion.invalid_local_time','completion.older_than_24_hours','completion.server_offset_mismatch','completion.server_offset_unknown','completion.server_time_zone_unknown','completion.sql_finish_missing'))");
@@ -1217,6 +1369,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_HasBackupChecksums", "([HasBackupChecksumsState] = 'Known' AND [HasBackupChecksums] IS NOT NULL) OR ([HasBackupChecksumsState] IN ('Unknown') AND [HasBackupChecksums] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupSetEvidence_HasBulkLoggedData", "([HasBulkLoggedDataState] = 'Known' AND [HasBulkLoggedData] IS NOT NULL) OR ([HasBulkLoggedDataState] IN ('Unknown') AND [HasBulkLoggedData] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupSetEvidence_HasIncompleteMetadata", "([HasIncompleteMetadataState] = 'Known' AND [HasIncompleteMetadata] IS NOT NULL) OR ([HasIncompleteMetadataState] IN ('Unknown') AND [HasIncompleteMetadata] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_IsCompressed", "([IsCompressedState] = 'Known' AND [IsCompressed] IS NOT NULL) OR ([IsCompressedState] IN ('Unknown') AND [IsCompressed] IS NULL)");
@@ -1224,6 +1378,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("CK_BackupSetEvidence_IsCopyOnly", "([IsCopyOnlyState] = 'Known' AND [IsCopyOnly] IS NOT NULL) OR ([IsCopyOnlyState] IN ('Unknown') AND [IsCopyOnly] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_IsDamaged", "([IsDamagedState] = 'Known' AND [IsDamaged] IS NOT NULL) OR ([IsDamagedState] IN ('Unknown') AND [IsDamaged] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupSetEvidence_IsForceOffline", "([IsForceOfflineState] = 'Known' AND [IsForceOffline] IS NOT NULL) OR ([IsForceOfflineState] IN ('Unknown') AND [IsForceOffline] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_IsSnapshot", "([IsSnapshotState] = 'Known' AND [IsSnapshot] IS NOT NULL) OR ([IsSnapshotState] IN ('Unknown') AND [IsSnapshot] IS NULL)");
 
@@ -1235,9 +1391,13 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_RecoveryForkId", "([RecoveryForkIdState] = 'Known' AND [RecoveryForkId] IS NOT NULL AND [RecoveryForkId] <> '00000000-0000-0000-0000-000000000000') OR ([RecoveryForkIdState] IN ('Unknown') AND [RecoveryForkId] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupSetEvidence_RecoveryModel", "([RecoveryModelState] = 'Known' AND [RecoveryModel] IS NOT NULL AND [RecoveryModel] IN ('Full','BulkLogged','Simple')) OR ([RecoveryModelState] IN ('Unknown') AND [RecoveryModel] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupSetEvidence_Sequence", "[ReconciliationNumber] >= 1 AND [EntryNumber] >= 0");
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_Source", "[Source] IN ('Comparison','BackupHeader','Msdb','Database','Registration')");
+
+                            t.HasCheckConstraint("CK_BackupSetEvidence_SourceObservedAtUtc", "[SourceObservedAtUtc] IS NULL OR DATEPART(TZOFFSET,[SourceObservedAtUtc]) = 0");
 
                             t.HasCheckConstraint("CK_BackupSetEvidence_SqlFinishedLocal", "([SqlFinishedLocalState] = 'Known' AND [SqlFinishedLocal] IS NOT NULL) OR ([SqlFinishedLocalState] IN ('Unknown') AND [SqlFinishedLocal] IS NULL)");
 
@@ -1945,6 +2105,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                                 .HasColumnName("BackupSetGuid");
                                         });
 
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "BeginsLogChain", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.BeginsLogChain#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .ValueGeneratedOnAdd()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasDefaultValue("Unknown")
+                                                .HasColumnName("BeginsLogChainState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("BeginsLogChain");
+                                        });
+
                                     b2.ComplexProperty(typeof(Dictionary<string, object>), "CheckpointLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.CheckpointLsn#BackupMetadataField<BackupLsn>", b3 =>
                                         {
                                             b3.IsRequired();
@@ -2095,6 +2272,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                                 .HasColumnName("HasBackupChecksums");
                                         });
 
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "HasBulkLoggedData", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.HasBulkLoggedData#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .ValueGeneratedOnAdd()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasDefaultValue("Unknown")
+                                                .HasColumnName("HasBulkLoggedDataState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("HasBulkLoggedData");
+                                        });
+
                                     b2.ComplexProperty(typeof(Dictionary<string, object>), "HasIncompleteMetadata", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.HasIncompleteMetadata#BackupMetadataField<bool>", b3 =>
                                         {
                                             b3.IsRequired();
@@ -2155,6 +2349,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                                 .HasColumnName("IsDamaged");
                                         });
 
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsForceOffline", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsForceOffline#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .ValueGeneratedOnAdd()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasDefaultValue("Unknown")
+                                                .HasColumnName("IsForceOfflineState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsForceOffline");
+                                        });
+
                                     b2.ComplexProperty(typeof(Dictionary<string, object>), "IsSnapshot", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsSnapshot#BackupMetadataField<bool>", b3 =>
                                         {
                                             b3.IsRequired();
@@ -2198,6 +2409,24 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                             b3.Property<Guid?>("Value")
                                                 .HasColumnType("uniqueidentifier")
                                                 .HasColumnName("RecoveryForkId");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "RecoveryModel", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.RecoveryModel#BackupMetadataField<DatabaseRecoveryModel>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .ValueGeneratedOnAdd()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasDefaultValue("Unknown")
+                                                .HasColumnName("RecoveryModelState");
+
+                                            b3.Property<string>("Value")
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("RecoveryModel");
                                         });
 
                                     b2.ComplexProperty(typeof(Dictionary<string, object>), "SqlFinishedLocal", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionObservation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.SqlFinishedLocal#BackupMetadataField<DateTime>", b3 =>
@@ -2261,6 +2490,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_BackupSetGuid", "([BackupSetGuidState] = 'Known' AND [BackupSetGuid] IS NOT NULL AND [BackupSetGuid] <> '00000000-0000-0000-0000-000000000000') OR ([BackupSetGuidState] IN ('Unknown') AND [BackupSetGuid] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_BeginsLogChain", "([BeginsLogChainState] = 'Known' AND [BeginsLogChain] IS NOT NULL) OR ([BeginsLogChainState] IN ('Unknown') AND [BeginsLogChain] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_CheckpointLsn", "([CheckpointLsnState] = 'Known' AND [CheckpointLsn] IS NOT NULL AND [CheckpointLsn] >= 0) OR ([CheckpointLsnState] IN ('Unknown') AND [CheckpointLsn] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_Completion", "([CompletionSource] = 'PlatformObserved' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.platform_observed') OR ([CompletionSource] = 'SqlLocalTime' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.sql_local_converted') OR ([CompletionSource] = 'Unknown' AND [CompletedAtUtc] IS NULL AND [CompletionReasonCode] IN ('completion.ambiguous_local_time','completion.conversion_out_of_range','completion.future_sql_time','completion.invalid_local_time','completion.older_than_24_hours','completion.server_offset_mismatch','completion.server_offset_unknown','completion.server_time_zone_unknown','completion.sql_finish_missing'))");
@@ -2289,6 +2520,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_HasBackupChecksums", "([HasBackupChecksumsState] = 'Known' AND [HasBackupChecksums] IS NOT NULL) OR ([HasBackupChecksumsState] IN ('Unknown') AND [HasBackupChecksums] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_HasBulkLoggedData", "([HasBulkLoggedDataState] = 'Known' AND [HasBulkLoggedData] IS NOT NULL) OR ([HasBulkLoggedDataState] IN ('Unknown') AND [HasBulkLoggedData] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_HasIncompleteMetadata", "([HasIncompleteMetadataState] = 'Known' AND [HasIncompleteMetadata] IS NOT NULL) OR ([HasIncompleteMetadataState] IN ('Unknown') AND [HasIncompleteMetadata] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsCompressed", "([IsCompressedState] = 'Known' AND [IsCompressed] IS NOT NULL) OR ([IsCompressedState] IN ('Unknown') AND [IsCompressed] IS NULL)");
@@ -2296,6 +2529,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsCopyOnly", "([IsCopyOnlyState] = 'Known' AND [IsCopyOnly] IS NOT NULL) OR ([IsCopyOnlyState] IN ('Unknown') AND [IsCopyOnly] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsDamaged", "([IsDamagedState] = 'Known' AND [IsDamaged] IS NOT NULL) OR ([IsDamagedState] IN ('Unknown') AND [IsDamaged] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsForceOffline", "([IsForceOfflineState] = 'Known' AND [IsForceOffline] IS NOT NULL) OR ([IsForceOfflineState] IN ('Unknown') AND [IsForceOffline] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_IsSnapshot", "([IsSnapshotState] = 'Known' AND [IsSnapshot] IS NOT NULL) OR ([IsSnapshotState] IN ('Unknown') AND [IsSnapshot] IS NULL)");
 
@@ -2306,6 +2541,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_PlatformCompletedAtUtc", "[PlatformCompletedAtUtc] IS NULL OR ([PlatformCompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[PlatformCompletedAtUtc]) = 0 AND [SqlOutcomeSource] = 'PlatformResponse' AND [SqlSuccessObserved] = 1)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_RecoveryForkId", "([RecoveryForkIdState] = 'Known' AND [RecoveryForkId] IS NOT NULL AND [RecoveryForkId] <> '00000000-0000-0000-0000-000000000000') OR ([RecoveryForkIdState] IN ('Unknown') AND [RecoveryForkId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionObservations_RecoveryModel", "([RecoveryModelState] = 'Known' AND [RecoveryModel] IS NOT NULL AND [RecoveryModel] IN ('Full','BulkLogged','Simple')) OR ([RecoveryModelState] IN ('Unknown') AND [RecoveryModel] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionObservations_Source", "[EntryNumber] >= 0 AND [Source] IN ('Comparison','BackupHeader','Msdb','Database','Registration','SourceFile','RemotePartial','RemoteFinal','Termination') AND [Kind] IN ('Backup','Dependency','ActiveBaseline')");
 
@@ -2541,6 +2778,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                                 .HasColumnName("BackupSetGuid");
                                         });
 
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "BeginsLogChain", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.BeginsLogChain#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .ValueGeneratedOnAdd()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasDefaultValue("Unknown")
+                                                .HasColumnName("BeginsLogChainState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("BeginsLogChain");
+                                        });
+
                                     b2.ComplexProperty(typeof(Dictionary<string, object>), "CheckpointLsn", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.CheckpointLsn#BackupMetadataField<BackupLsn>", b3 =>
                                         {
                                             b3.IsRequired();
@@ -2691,6 +2945,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                                 .HasColumnName("HasBackupChecksums");
                                         });
 
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "HasBulkLoggedData", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.HasBulkLoggedData#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .ValueGeneratedOnAdd()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasDefaultValue("Unknown")
+                                                .HasColumnName("HasBulkLoggedDataState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("HasBulkLoggedData");
+                                        });
+
                                     b2.ComplexProperty(typeof(Dictionary<string, object>), "HasIncompleteMetadata", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.HasIncompleteMetadata#BackupMetadataField<bool>", b3 =>
                                         {
                                             b3.IsRequired();
@@ -2751,6 +3022,23 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                                 .HasColumnName("IsDamaged");
                                         });
 
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "IsForceOffline", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsForceOffline#BackupMetadataField<bool>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .ValueGeneratedOnAdd()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasDefaultValue("Unknown")
+                                                .HasColumnName("IsForceOfflineState");
+
+                                            b3.Property<bool?>("Value")
+                                                .HasColumnType("bit")
+                                                .HasColumnName("IsForceOffline");
+                                        });
+
                                     b2.ComplexProperty(typeof(Dictionary<string, object>), "IsSnapshot", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.IsSnapshot#BackupMetadataField<bool>", b3 =>
                                         {
                                             b3.IsRequired();
@@ -2794,6 +3082,24 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                                             b3.Property<Guid?>("Value")
                                                 .HasColumnType("uniqueidentifier")
                                                 .HasColumnName("RecoveryForkId");
+                                        });
+
+                                    b2.ComplexProperty(typeof(Dictionary<string, object>), "RecoveryModel", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.RecoveryModel#BackupMetadataField<DatabaseRecoveryModel>", b3 =>
+                                        {
+                                            b3.IsRequired();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired()
+                                                .ValueGeneratedOnAdd()
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasDefaultValue("Unknown")
+                                                .HasColumnName("RecoveryModelState");
+
+                                            b3.Property<string>("Value")
+                                                .HasMaxLength(20)
+                                                .HasColumnType("nvarchar(20)")
+                                                .HasColumnName("RecoveryModel");
                                         });
 
                                     b2.ComplexProperty(typeof(Dictionary<string, object>), "SqlFinishedLocal", "DbBackupManager.Domain.BackupTasks.BackupPlanExecutionOperation.Facts#BackupExecutionFacts.Metadata#BackupSetMetadata.SqlFinishedLocal#BackupMetadataField<DateTime>", b3 =>
@@ -2857,6 +3163,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_BackupSetGuid", "([BackupSetGuidState] = 'Known' AND [BackupSetGuid] IS NOT NULL AND [BackupSetGuid] <> '00000000-0000-0000-0000-000000000000') OR ([BackupSetGuidState] IN ('Unknown') AND [BackupSetGuid] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_BeginsLogChain", "([BeginsLogChainState] = 'Known' AND [BeginsLogChain] IS NOT NULL) OR ([BeginsLogChainState] IN ('Unknown') AND [BeginsLogChain] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_CheckpointLsn", "([CheckpointLsnState] = 'Known' AND [CheckpointLsn] IS NOT NULL AND [CheckpointLsn] >= 0) OR ([CheckpointLsnState] IN ('Unknown') AND [CheckpointLsn] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_Completion", "([CompletionSource] = 'PlatformObserved' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.platform_observed') OR ([CompletionSource] = 'SqlLocalTime' AND [CompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[CompletedAtUtc]) = 0 AND [CompletionReasonCode] = 'completion.sql_local_converted') OR ([CompletionSource] = 'Unknown' AND [CompletedAtUtc] IS NULL AND [CompletionReasonCode] IN ('completion.ambiguous_local_time','completion.conversion_out_of_range','completion.future_sql_time','completion.invalid_local_time','completion.older_than_24_hours','completion.server_offset_mismatch','completion.server_offset_unknown','completion.server_time_zone_unknown','completion.sql_finish_missing'))");
@@ -2885,6 +3193,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_HasBackupChecksums", "([HasBackupChecksumsState] = 'Known' AND [HasBackupChecksums] IS NOT NULL) OR ([HasBackupChecksumsState] IN ('Unknown') AND [HasBackupChecksums] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_HasBulkLoggedData", "([HasBulkLoggedDataState] = 'Known' AND [HasBulkLoggedData] IS NOT NULL) OR ([HasBulkLoggedDataState] IN ('Unknown') AND [HasBulkLoggedData] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_HasIncompleteMetadata", "([HasIncompleteMetadataState] = 'Known' AND [HasIncompleteMetadata] IS NOT NULL) OR ([HasIncompleteMetadataState] IN ('Unknown') AND [HasIncompleteMetadata] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_Identity", "[Sequence] >= 1 AND [IntendedBackupSetId] <> '00000000-0000-0000-0000-000000000000' AND DATEPART(TZOFFSET,[ObservedAtUtc]) = 0");
@@ -2895,6 +3205,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_IsDamaged", "([IsDamagedState] = 'Known' AND [IsDamaged] IS NOT NULL) OR ([IsDamagedState] IN ('Unknown') AND [IsDamaged] IS NULL)");
 
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_IsForceOffline", "([IsForceOfflineState] = 'Known' AND [IsForceOffline] IS NOT NULL) OR ([IsForceOfflineState] IN ('Unknown') AND [IsForceOffline] IS NULL)");
+
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_IsSnapshot", "([IsSnapshotState] = 'Known' AND [IsSnapshot] IS NOT NULL) OR ([IsSnapshotState] IN ('Unknown') AND [IsSnapshot] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_LastLsn", "([LastLsnState] = 'Known' AND [LastLsn] IS NOT NULL AND [LastLsn] >= 0) OR ([LastLsnState] IN ('Unknown') AND [LastLsn] IS NULL)");
@@ -2904,6 +3216,8 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_PlatformCompletedAtUtc", "[PlatformCompletedAtUtc] IS NULL OR ([PlatformCompletedAtUtc] IS NOT NULL AND DATEPART(TZOFFSET,[PlatformCompletedAtUtc]) = 0 AND [SqlOutcomeSource] = 'PlatformResponse' AND [SqlSuccessObserved] = 1)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_RecoveryForkId", "([RecoveryForkIdState] = 'Known' AND [RecoveryForkId] IS NOT NULL AND [RecoveryForkId] <> '00000000-0000-0000-0000-000000000000') OR ([RecoveryForkIdState] IN ('Unknown') AND [RecoveryForkId] IS NULL)");
+
+                            t.HasCheckConstraint("CK_BackupPlanExecutionOperations_RecoveryModel", "([RecoveryModelState] = 'Known' AND [RecoveryModel] IS NOT NULL AND [RecoveryModel] IN ('Full','BulkLogged','Simple')) OR ([RecoveryModelState] IN ('Unknown') AND [RecoveryModel] IS NULL)");
 
                             t.HasCheckConstraint("CK_BackupPlanExecutionOperations_SqlFinishedLocal", "([SqlFinishedLocalState] = 'Known' AND [SqlFinishedLocal] IS NOT NULL) OR ([SqlFinishedLocalState] IN ('Unknown') AND [SqlFinishedLocal] IS NULL)");
 

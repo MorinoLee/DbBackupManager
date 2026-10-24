@@ -55,12 +55,15 @@ internal sealed class BackupSetEvidenceConfiguration : IEntityTypeConfiguration<
             table.HasCheckConstraint("CK_BackupSetEvidence_Source", "[Source] IN ('Comparison','BackupHeader','Msdb','Database','Registration')");
             table.HasCheckConstraint("CK_BackupSetEvidence_Kind", "[Kind] IN ('Backup','Dependency','ActiveBaseline')");
             table.HasCheckConstraint("CK_BackupSetEvidence_ObservedAtUtc", "DATEPART(TZOFFSET,[ObservedAtUtc]) = 0");
+            table.HasCheckConstraint("CK_BackupSetEvidence_SourceObservedAtUtc",
+                "[SourceObservedAtUtc] IS NULL OR DATEPART(TZOFFSET,[SourceObservedAtUtc]) = 0");
         });
         BackupSetMapping.Map(builder.ComplexProperty(x => x.Metadata));
         BackupSetMapping.MapCompletion(builder.ComplexProperty(x => x.Completion));
         BackupSetMapping.MapAssessment(builder.ComplexProperty(x => x.Assessment));
         builder.Property(x => x.Source).HasConversion<string>().HasMaxLength(20);
         builder.Property(x => x.Kind).HasConversion<string>().HasMaxLength(20);
+        builder.Property(x => x.SourceObservedAtUtc).HasColumnName("SourceObservedAtUtc");
         builder.HasIndex(x => new { x.AttemptId, x.ReconciliationNumber, x.EntryNumber }).IsUnique();
         builder.HasIndex(x => new { x.TaskId, x.AttemptId, x.MutationId, x.EntryNumber }).IsUnique();
         builder.HasOne<BackupAttempt>().WithMany()
@@ -97,13 +100,19 @@ internal static class BackupSetMapping
         Field(builder.ComplexProperty(x => x.IsDamaged), "IsDamaged");
         Field(builder.ComplexProperty(x => x.IsSnapshot), "IsSnapshot");
         Field(builder.ComplexProperty(x => x.HasIncompleteMetadata), "HasIncompleteMetadata");
+        Field(builder.ComplexProperty(x => x.RecoveryModel), "RecoveryModel", defaultUnknown: true);
+        Field(builder.ComplexProperty(x => x.BeginsLogChain), "BeginsLogChain", defaultUnknown: true);
+        Field(builder.ComplexProperty(x => x.HasBulkLoggedData), "HasBulkLoggedData", defaultUnknown: true);
+        Field(builder.ComplexProperty(x => x.IsForceOffline), "IsForceOffline", defaultUnknown: true);
         Field(builder.ComplexProperty(x => x.SqlStartedLocal), "SqlStartedLocal");
         Field(builder.ComplexProperty(x => x.SqlFinishedLocal), "SqlFinishedLocal");
     }
 
-    private static void Field<T>(ComplexPropertyBuilder<BackupMetadataField<T>> builder, string name) where T : struct
+    private static void Field<T>(ComplexPropertyBuilder<BackupMetadataField<T>> builder, string name,
+        bool defaultUnknown = false) where T : struct
     {
-        builder.Property(x => x.State).HasColumnName(name + "State").HasConversion<string>().HasMaxLength(20);
+        var state = builder.Property(x => x.State).HasColumnName(name + "State").HasConversion<string>().HasMaxLength(20);
+        if (defaultUnknown) state.HasDefaultValue(BackupMetadataState.Unknown);
         var value = builder.Property(x => x.Value).HasColumnName(name);
         if (typeof(T) == typeof(BackupLsn))
             value.HasConversion(
@@ -111,7 +120,8 @@ internal static class BackupSetMapping
                     lsn => lsn.HasValue ? lsn.Value.Value : null,
                     number => number.HasValue ? new BackupLsn(number.Value) : null))
                 .HasColumnType("numeric(25,0)");
-        else if (typeof(T) == typeof(BackupType)) value.HasConversion<string>().HasMaxLength(20);
+        else if (typeof(T) == typeof(BackupType) || typeof(T) == typeof(DatabaseRecoveryModel))
+            value.HasConversion<string>().HasMaxLength(20);
         else if (typeof(T) == typeof(DateTime)) value.HasColumnType("datetime2(7)");
     }
 
@@ -170,6 +180,15 @@ internal static class BackupSetMapping
             + "OR ([IsSnapshotState] IN ('Unknown') AND [IsSnapshot] IS NULL)");
         table.HasCheckConstraint($"CK_{name}_HasIncompleteMetadata", "([HasIncompleteMetadataState] = 'Known' AND [HasIncompleteMetadata] IS NOT NULL) "
             + "OR ([HasIncompleteMetadataState] IN ('Unknown') AND [HasIncompleteMetadata] IS NULL)");
+        table.HasCheckConstraint($"CK_{name}_RecoveryModel",
+            "([RecoveryModelState] = 'Known' AND [RecoveryModel] IS NOT NULL AND [RecoveryModel] IN ('Full','BulkLogged','Simple')) "
+            + "OR ([RecoveryModelState] IN ('Unknown') AND [RecoveryModel] IS NULL)");
+        table.HasCheckConstraint($"CK_{name}_BeginsLogChain", "([BeginsLogChainState] = 'Known' AND [BeginsLogChain] IS NOT NULL) "
+            + "OR ([BeginsLogChainState] IN ('Unknown') AND [BeginsLogChain] IS NULL)");
+        table.HasCheckConstraint($"CK_{name}_HasBulkLoggedData", "([HasBulkLoggedDataState] = 'Known' AND [HasBulkLoggedData] IS NOT NULL) "
+            + "OR ([HasBulkLoggedDataState] IN ('Unknown') AND [HasBulkLoggedData] IS NULL)");
+        table.HasCheckConstraint($"CK_{name}_IsForceOffline", "([IsForceOfflineState] = 'Known' AND [IsForceOffline] IS NOT NULL) "
+            + "OR ([IsForceOfflineState] IN ('Unknown') AND [IsForceOffline] IS NULL)");
         table.HasCheckConstraint($"CK_{name}_SqlStartedLocal", "([SqlStartedLocalState] = 'Known' AND [SqlStartedLocal] IS NOT NULL) "
             + "OR ([SqlStartedLocalState] IN ('Unknown') AND [SqlStartedLocal] IS NULL)");
         table.HasCheckConstraint($"CK_{name}_SqlFinishedLocal", "([SqlFinishedLocalState] = 'Known' AND [SqlFinishedLocal] IS NOT NULL) "

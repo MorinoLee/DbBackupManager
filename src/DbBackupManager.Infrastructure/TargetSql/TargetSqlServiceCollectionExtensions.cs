@@ -30,6 +30,7 @@ public static class TargetSqlServiceCollectionExtensions
         services.TryAddSingleton<ITargetSqlBackupCommandObserver, NoOpTargetSqlBackupCommandObserver>();
         services.TryAddScoped<SqlClientTargetSqlReadOnlyProbe>();
         services.TryAddScoped<ITargetSqlBackupMetadataReader, SqlClientTargetSqlBackupMetadataReader>();
+        services.TryAddScoped<ITargetSqlLogReadinessReader, SqlClientTargetSqlLogReadinessReader>();
         services.TryAddScoped<ITargetSqlReadOnlyProbe>(provider =>
             provider.GetRequiredService<SqlClientTargetSqlReadOnlyProbe>());
         services.TryAddScoped<ITargetSqlBackupEvidenceProbe>(provider =>

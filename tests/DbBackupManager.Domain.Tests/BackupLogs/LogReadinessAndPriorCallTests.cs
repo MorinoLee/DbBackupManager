@@ -8,6 +8,36 @@ namespace DbBackupManager.Domain.Tests.BackupLogs;
 public sealed class LogReadinessAndPriorCallTests
 {
     [Fact]
+    public void B06DiagnosticFirstForkMayBeMissingWhenCurrentForkIsKnown()
+    {
+        var decision = LogTechnicalReadinessRules.Evaluate(
+            LogTestData.ReadyFacts() with
+            {
+                CurrentBranch = new DbBackupManager.Domain.BackupSets.BackupRecoveryBranch(null, LogTestData.Id(4)),
+            });
+
+        Assert.True(decision.IsReady);
+    }
+
+    [Fact]
+    public void B06MissingCurrentForkDoesNotBecomeReady()
+    {
+        var missing = LogTechnicalReadinessRules.Evaluate(
+            LogTestData.ReadyFacts() with
+            {
+                CurrentBranch = new DbBackupManager.Domain.BackupSets.BackupRecoveryBranch(LogTestData.Id(4), null),
+            });
+        var empty = LogTechnicalReadinessRules.Evaluate(
+            LogTestData.ReadyFacts() with
+            {
+                CurrentBranch = new DbBackupManager.Domain.BackupSets.BackupRecoveryBranch(null, null),
+            });
+
+        Assert.Equal(LogTechnicalReadiness.Unknown, missing.Readiness);
+        Assert.Equal(LogTechnicalReadiness.Unknown, empty.Readiness);
+    }
+
+    [Fact]
     public void A05LastLogBackupLsnMissingIsNotReadyEvenWithHistoricalManagedFull()
     {
         var facts = LogTestData.ReadyFacts() with

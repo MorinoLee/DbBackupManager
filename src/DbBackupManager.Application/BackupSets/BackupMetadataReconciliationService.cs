@@ -102,7 +102,7 @@ public sealed class BackupMetadataReconciliationService(
         };
         foreach (var full in evidence.ReferencedFulls)
             observations.Add(Observation(full, BackupSetEvidenceKind.Dependency,
-                full.Status == BaselineEvidenceStatus.Complete ? BackupSetAssessment.NotApplicable : Unknown(full.Status)));
+                full.HasRequiredFields ? BackupSetAssessment.NotApplicable : Unknown(full.Status)));
         foreach (var source in new[] { evidence.Header, evidence.History }.Concat(evidence.ReferencedFulls))
             foreach (var record in source.AmbiguousRecords ?? [])
                 observations.Add(Observation(source with { Metadata = record },
@@ -119,7 +119,8 @@ public sealed class BackupMetadataReconciliationService(
                     RecoveryForkId = Field(current.CurrentRecoveryForkId),
                     DifferentialBaseGuid = Field(file?.BaseBackupSetGuid),
                     DifferentialBaseLsn = Field(file?.BaseLsn)
-                }, new(null, BackupCompletionTimeSource.Unknown, BackupCompletionTimeReason.SqlFinishMissing), active));
+                }, new(null, BackupCompletionTimeSource.Unknown, BackupCompletionTimeReason.SqlFinishMissing), active,
+                evidence.Active.ObservedAtUtc));
         }
         var command = new RegisterBackupSetCommand(request.Lease, request.BackupSetId, request.DatabaseId,
             request.MutationId, request.ObservedAtUtc, merged, completion, historical, baseId,
@@ -135,7 +136,7 @@ public sealed class BackupMetadataReconciliationService(
             if (matches.Length == 0) return null;
             var candidate = matches[0];
             var candidateMetadata = candidate.Metadata;
-            var candidateStatus = candidate.Status;
+            var candidateStatus = candidate.HasRequiredFields ? BaselineEvidenceStatus.Complete : candidate.Status;
             foreach (var other in matches.Skip(1))
             {
                 candidateMetadata = candidateMetadata.Merge(other.Metadata, out var different);
@@ -146,7 +147,8 @@ public sealed class BackupMetadataReconciliationService(
         BackupSetObservation Observation(BackupMetadataSourceEvidence source, BackupSetEvidenceKind kind,
             BackupSetAssessment assessment) => new(source.Source, kind, source.Metadata,
                 BackupCompletionTimeRules.Evaluate(kind == BackupSetEvidenceKind.Backup ? request.PlatformCompletedAtUtc : null,
-                    source.Metadata.SqlFinishedLocal.Value, request.ObservedAtUtc, evidence.CurrentServerOffset, evidence.ServerTimeZone), assessment);
+                    source.Metadata.SqlFinishedLocal.Value, request.ObservedAtUtc, evidence.CurrentServerOffset, evidence.ServerTimeZone),
+                assessment, source.ObservedAtUtc);
     }
 
     public Task<BackupTaskStoreResult<BackupSetRegistrationResult>> CommitAsync(
@@ -175,9 +177,11 @@ public sealed class BackupMetadataReconciliationService(
     private static BaselineEvidenceStatus ProblemStatus(params BackupMetadataSourceEvidence[] sources)
     {
         foreach (var status in new[] { BaselineEvidenceStatus.SourceConflict, BaselineEvidenceStatus.PermissionDenied,
-            BaselineEvidenceStatus.HistoryNotFound, BaselineEvidenceStatus.MultipleBases, BaselineEvidenceStatus.MissingFields })
+            BaselineEvidenceStatus.HistoryNotFound, BaselineEvidenceStatus.MultipleBases })
             if (sources.Any(x => x.Status == status)) return status;
-        return BaselineEvidenceStatus.Complete;
+        return sources.Any(x => !x.HasRequiredFields)
+            ? BaselineEvidenceStatus.MissingFields
+            : BaselineEvidenceStatus.Complete;
     }
     private static BackupSetAssessment Unknown(BaselineEvidenceStatus status) => new(BackupMetadataState.Known,
         status == BaselineEvidenceStatus.SourceConflict ? DifferentialBaselineConclusion.Mismatch : DifferentialBaselineConclusion.Unknown,

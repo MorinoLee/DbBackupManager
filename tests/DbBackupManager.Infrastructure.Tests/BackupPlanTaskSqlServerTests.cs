@@ -284,7 +284,28 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
     }
 
     [Fact]
-    public async Task RemoveBackupPoliciesDownRestoresSchemaAndMigratesUpAgain()
+    public async Task EmptyDatabaseCanRollDownToPreRemovalShapeAndBack()
+    {
+        var temporary = new PlatformDatabaseSqlServerFixture();
+        try
+        {
+            await temporary.InitializeAsync();
+            await using var db = temporary.CreateContext();
+            var beforeRemoval = db.Database.GetMigrations().Single(x =>
+                x.EndsWith("_AddRemoteGapProjectionPendings", StringComparison.Ordinal));
+            var migrator = db.GetService<IMigrator>();
+            await migrator.MigrateAsync(beforeRemoval);
+            Assert.Equal(18, await RestoredPolicyShapeCountAsync(db));
+            Assert.Contains("[PolicyId] IS NOT NULL", await CheckDefinitionAsync(db, "CK_BackupTasks_Identity"), StringComparison.Ordinal);
+            await migrator.MigrateAsync();
+            Assert.Equal(0, await TableCountAsync(db, "BackupPolicies"));
+            Assert.Equal(0, await ColumnCountAsync(db, "BackupTasks", "PolicyId"));
+        }
+        finally { await temporary.DisposeAsync(); }
+    }
+
+    [Fact]
+    public async Task LogMetadataDownGuardBlocksOldPolicyMigrationWithoutDataLoss()
     {
         var temporary = new PlatformDatabaseSqlServerFixture();
         try
@@ -297,20 +318,13 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
             var migrator = db.GetService<IMigrator>();
             var beforeRemoval = db.Database.GetMigrations().Single(x =>
                 x.EndsWith("_AddRemoteGapProjectionPendings", StringComparison.Ordinal));
-            await migrator.MigrateAsync(beforeRemoval);
-            Assert.Equal(18, await RestoredPolicyShapeCountAsync(db));
-            Assert.Contains("[PolicyId] IS NOT NULL", await CheckDefinitionAsync(db, "CK_BackupTasks_Identity"), StringComparison.Ordinal);
+            // 最新 LOG 元数据迁移先保护已有任务/历史；旧策略迁移的 Down 不在有数据时执行。
+            var blocked = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(beforeRemoval));
+            Assert.Equal(51014, blocked.Number);
+            Assert.Equal(BackupType.Differential, (await db.BackupTasks.SingleAsync(x => x.Id == task.Id)).BackupType);
             Assert.Equal(task.PlanId, await db.Database.SqlQueryRaw<Guid?>("""
                 SELECT [PlanId] AS [Value] FROM [BackupTasks] WHERE [Id] = {0}
                 """, task.Id).SingleAsync());
-            Assert.Equal(1, await db.Database.SqlQueryRaw<int>("""
-                SELECT COUNT(*) AS [Value] FROM [BackupTasks]
-                WHERE [Id] = {0} AND [PolicyId] IS NULL AND [PlanVersionId] IS NOT NULL
-                """, task.Id).SingleAsync());
-            await migrator.MigrateAsync();
-            Assert.Equal(0, await TableCountAsync(db, "BackupPolicies"));
-            Assert.Equal(0, await ColumnCountAsync(db, "BackupTasks", "PolicyId"));
-            Assert.Equal(BackupType.Differential, (await db.BackupTasks.SingleAsync(x => x.Id == task.Id)).BackupType);
         }
         finally { await temporary.DisposeAsync(); }
     }

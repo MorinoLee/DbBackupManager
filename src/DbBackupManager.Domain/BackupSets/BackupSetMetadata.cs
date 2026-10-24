@@ -46,6 +46,10 @@ public sealed record BackupSetMetadata
     public BackupMetadataField<bool> IsDamaged { get; init; }
     public BackupMetadataField<bool> IsSnapshot { get; init; }
     public BackupMetadataField<bool> HasIncompleteMetadata { get; init; }
+    public BackupMetadataField<DatabaseRecoveryModel> RecoveryModel { get; init; }
+    public BackupMetadataField<bool> BeginsLogChain { get; init; }
+    public BackupMetadataField<bool> HasBulkLoggedData { get; init; }
+    public BackupMetadataField<bool> IsForceOffline { get; init; }
     public BackupMetadataField<DateTime> SqlStartedLocal { get; init; }
     public BackupMetadataField<DateTime> SqlFinishedLocal { get; init; }
 
@@ -70,8 +74,15 @@ public sealed record BackupSetMetadata
         ValidateField(IsDamaged);
         ValidateField(IsSnapshot);
         ValidateField(HasIncompleteMetadata);
+        ValidateField(RecoveryModel);
+        ValidateField(BeginsLogChain);
+        ValidateField(HasBulkLoggedData);
+        ValidateField(IsForceOffline);
         ValidateField(SqlStartedLocal);
         ValidateField(SqlFinishedLocal);
+        if (RecoveryModel.Value is { } recoveryModel
+            && recoveryModel is not (DatabaseRecoveryModel.Full or DatabaseRecoveryModel.BulkLogged or DatabaseRecoveryModel.Simple))
+            throw new ArgumentException("实际恢复模式只能记录 FULL、BULK_LOGGED 或 SIMPLE。");
         if (Type.Value is BackupType.Full or BackupType.Log
             && (DifferentialBaseLsn.State != BackupMetadataState.NotApplicable
                 || DifferentialBaseGuid.State != BackupMetadataState.NotApplicable))
@@ -125,6 +136,10 @@ public sealed record BackupSetMetadata
             IsDamaged = IsDamaged.Merge(incoming.IsDamaged, ref conflict),
             IsSnapshot = IsSnapshot.Merge(incoming.IsSnapshot, ref conflict),
             HasIncompleteMetadata = HasIncompleteMetadata.Merge(incoming.HasIncompleteMetadata, ref conflict),
+            RecoveryModel = RecoveryModel.Merge(incoming.RecoveryModel, ref conflict),
+            BeginsLogChain = BeginsLogChain.Merge(incoming.BeginsLogChain, ref conflict),
+            HasBulkLoggedData = HasBulkLoggedData.Merge(incoming.HasBulkLoggedData, ref conflict),
+            IsForceOffline = IsForceOffline.Merge(incoming.IsForceOffline, ref conflict),
             SqlStartedLocal = SqlStartedLocal.Merge(incoming.SqlStartedLocal, ref conflict),
             SqlFinishedLocal = SqlFinishedLocal.Merge(incoming.SqlFinishedLocal, ref conflict),
         };

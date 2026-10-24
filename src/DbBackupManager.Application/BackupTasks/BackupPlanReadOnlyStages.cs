@@ -67,7 +67,14 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
                 };
                 operation = await _flow.FreezeAsync(session, operation, facts, command.Observations.Select((x, i) => new BackupExecutionObservationInput(i,
                     Enum.Parse<BackupExecutionObservationSource>(x.Source.ToString()), x.Kind,
-                    new() { Metadata = x.Metadata, Completion = x.Completion, Assessment = x.Assessment, SqlSuccessObserved = true })).ToArray(), token);
+                    new()
+                    {
+                        Metadata = x.Metadata,
+                        Completion = x.Completion,
+                        Assessment = x.Assessment,
+                        SqlSuccessObserved = true,
+                        EvidenceAtUtc = x.SourceObservedAtUtc,
+                    })).ToArray(), token);
             }
             if (operation.State != BackupExecutionOperationState.Applied)
             {
@@ -209,7 +216,14 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
                 }
                 observations.AddRange(command.Observations.Select((x, i) => new BackupExecutionObservationInput(i,
                     Enum.Parse<BackupExecutionObservationSource>(x.Source.ToString()), x.Kind,
-                    new() { Metadata = x.Metadata, Completion = x.Completion, Assessment = x.Assessment, SqlSuccessObserved = complete })));
+                    new()
+                    {
+                        Metadata = x.Metadata,
+                        Completion = x.Completion,
+                        Assessment = x.Assessment,
+                        SqlSuccessObserved = complete,
+                        EvidenceAtUtc = x.SourceObservedAtUtc,
+                    })));
             }
             var ended = await termination.ReadAsync(Connection(work), authorization.PermitId, authorization.Binding,
                 Math.Min(work.Snapshot.Policy.VerifyTimeoutMinutes * 60, 3600), token);
@@ -270,9 +284,7 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
             };
 
     private static string MetadataFailureReason(TargetSqlBackupMetadataEvidence? evidence) =>
-        evidence is not null && evidence.Header.Status == BaselineEvidenceStatus.Complete
-            && evidence.History.Status == BaselineEvidenceStatus.Complete
-            && evidence.Header.Issues.Count == 0 && evidence.History.Issues.Count == 0
+        evidence is not null && evidence.Header.HasRequiredFields && evidence.History.HasRequiredFields
             ? "sql.recovery_metadata_conflict"
             : "sql.recovery_metadata_insufficient";
 
@@ -365,8 +377,7 @@ public sealed class BackupPlanReadOnlyStages(IBackupPlanExecutionStore store, IB
     }
     private static bool MetadataMatches(BackupExecutionWorkItem work, BackupSetMetadata m, BackupSetAssessment assessment,
         Guid? baseId, TargetSqlBackupMetadataEvidence? evidence, bool requireManagedDependency = true) => evidence is not null
-        && evidence.Header.Status == BaselineEvidenceStatus.Complete && evidence.History.Status == BaselineEvidenceStatus.Complete
-        && evidence.Header.Issues.Count == 0 && evidence.History.Issues.Count == 0
+        && evidence.Header.HasRequiredFields && evidence.History.HasRequiredFields
         && BackupPlanExecutionFactRules.CompleteBackup(m, work.Snapshot.BackupType,
             BackupPlanExecutionFactRules.ExpectedCopyOnly(work.Snapshot.BackupType, work.Snapshot.Purpose!.Value))
         && m.DatabaseGuid.Value == work.Attempt.ExpectedDatabaseGuid && m.FamilyGuid.Value == work.Attempt.ExpectedFamilyGuid

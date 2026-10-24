@@ -314,8 +314,8 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
             var contract = migrations.Single(name => name.EndsWith("_AddBackupExecutionContracts", StringComparison.Ordinal));
             var previous = migrations[Array.IndexOf(migrations, contract) - 1];
             var migrator = db.Database.GetService<IMigrator>();
-            // 通知迁移本身没有执行回执。先退到执行契约迁移，再检验它自己的 Down 守卫。
-            await migrator.MigrateAsync(contract);
+            // 通知迁移本身没有执行回执。先升到最新模型，再检验最新迁移保护数据后拒绝回退。
+            await migrator.MigrateAsync();
             if (dataKind != "empty")
             {
                 var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
@@ -327,7 +327,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
                 if (dataKind == "binding")
                     Assert.NotNull(work.Attempt.ExpectedDatabaseGuid);
                 var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
-                Assert.Equal(51004, error.Number);
+                Assert.Equal(51014, error.Number);
                 Assert.Equal(history, await db.Database.GetAppliedMigrationsAsync());
                 Assert.Equal(3, await ContractTableCountAsync(db));
             }

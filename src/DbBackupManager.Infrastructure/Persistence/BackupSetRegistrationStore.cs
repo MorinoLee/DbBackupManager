@@ -138,7 +138,8 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
         {
             var observation = command.Observations[i];
             AddEvidence(db, command, setId, check, i + 2, observation.Source,
-                observation.Kind, observation.Metadata, observation.Completion, observation.Assessment);
+                observation.Kind, observation.Metadata, observation.Completion, observation.Assessment,
+                observation.SourceObservedAtUtc);
         }
         await db.SaveChangesAsync(token);
         await PlanLocationRetentionWork.ReleaseSupersededAsync(db, command.DatabaseId, nowUtc, token);
@@ -148,10 +149,11 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
 
     private static void AddEvidence(PlatformDbContext db, RegisterBackupSetCommand command, Guid? setId,
         int check, int entry, BackupSetEvidenceSource source, BackupSetEvidenceKind kind,
-        BackupSetMetadata metadata, BackupCompletionTimeDecision completion, BackupSetAssessment assessment) =>
+        BackupSetMetadata metadata, BackupCompletionTimeDecision completion, BackupSetAssessment assessment,
+        DateTimeOffset? sourceObservedAtUtc = null) =>
         db.BackupSetEvidence.Add(new(Guid.NewGuid(), command.Lease.TaskId, command.Lease.BackupAttemptId,
             setId, command.MutationId, check, entry, source, kind, metadata, completion, assessment,
-            command.ObservedAtUtc, command.SqlSuccessObserved, command.BaseBackupSetId));
+            command.ObservedAtUtc, command.SqlSuccessObserved, command.BaseBackupSetId, sourceObservedAtUtc));
 
     private static bool Matches(BackupSetEvidence[] rows, RegisterBackupSetCommand command)
     {
@@ -167,7 +169,8 @@ internal sealed class BackupSetRegistrationStore(IDbContextFactory<PlatformDbCon
             var row = rows[i + 2];
             var input = command.Observations[i];
             if (row.Source != input.Source || row.Kind != input.Kind || row.Metadata != input.Metadata
-                || row.Completion != input.Completion || row.Assessment != input.Assessment) return false;
+                || row.Completion != input.Completion || row.Assessment != input.Assessment
+                || row.SourceObservedAtUtc != input.SourceObservedAtUtc) return false;
         }
         return true;
     }
