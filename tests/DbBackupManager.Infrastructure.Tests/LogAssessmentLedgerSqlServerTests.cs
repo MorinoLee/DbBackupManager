@@ -208,6 +208,26 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     [Fact]
+    public async Task R32o3bConcurrentDifferentAssessmentsShareGenerationFact()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var first = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var second = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var a = await PrepareAsync(first, Guid.NewGuid());
+        var b = await PrepareAsync(second, Guid.NewGuid());
+
+        var results = await Task.WhenAll(first.CommitAsync(a), second.CommitAsync(b));
+
+        Assert.All(results, x => Assert.Equal(LogAssessmentCommitCode.Succeeded, x.Code));
+        await using var db = fixture.CreateContext();
+        Assert.Equal(1, await db.LogGenerationFacts.CountAsync());
+        Assert.Equal(1, await db.LogGenerationEvidence.CountAsync());
+        Assert.Equal(2, await db.LogAssessmentCommits.CountAsync());
+    }
+
+    [Fact]
     public async Task C17ConcurrentSamePayloadOneRowAndSameGenerationOneIdentity()
     {
         await using var fixture = new PlatformDatabaseSqlServerFixture();

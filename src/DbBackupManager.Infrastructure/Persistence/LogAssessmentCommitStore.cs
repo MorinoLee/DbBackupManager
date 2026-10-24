@@ -17,8 +17,12 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
         return row is null ? new(LogAssessmentReadCode.NotFound) : Reconstruct(row);
     }
 
-    public async Task<LogAssessmentCommitResult> CommitAsync(PreparedLogAssessment prepared,
-        CancellationToken cancellationToken = default)
+    public Task<LogAssessmentCommitResult> CommitAsync(PreparedLogAssessment prepared,
+        CancellationToken cancellationToken = default) =>
+        CommitCoreAsync(prepared, 1, cancellationToken);
+
+    private async Task<LogAssessmentCommitResult> CommitCoreAsync(PreparedLogAssessment prepared,
+        int attempt, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(prepared);
         if (!string.Equals(prepared.RequestFingerprint,
@@ -141,7 +145,14 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
             var existing = await db.LogAssessmentCommits.AsNoTracking()
                 .SingleOrDefaultAsync(x => x.DatabaseId == prepared.Input.DatabaseId
                     && x.MutationId == prepared.Input.MutationId, cancellationToken);
-            return existing is null ? new(LogAssessmentCommitCode.Conflict) : Compare(existing, prepared);
+            if (existing is not null) return Compare(existing, prepared);
+            if (attempt < 2)
+            {
+                await Task.Delay(50, cancellationToken);
+                return await CommitCoreAsync(prepared, attempt + 1, cancellationToken);
+            }
+
+            return new(LogAssessmentCommitCode.Conflict);
         }
     }
 
