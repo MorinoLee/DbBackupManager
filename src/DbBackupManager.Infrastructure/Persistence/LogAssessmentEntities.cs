@@ -58,6 +58,11 @@ public sealed class LogGenerationFact
 {
     public Guid Id { get; set; }
     public Guid DatabaseId { get; set; }
+    public string BoundaryKey { get; set; } = string.Empty;
+    public Guid? SourceDatabaseGuid { get; set; }
+    public Guid? FamilyGuid { get; set; }
+    public Guid? FirstRecoveryForkId { get; set; }
+    public Guid? RecoveryForkId { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
 }
 

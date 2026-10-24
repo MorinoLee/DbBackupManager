@@ -30,26 +30,28 @@ internal sealed class LogAssessmentCandidateReader(IDbContextFactory<PlatformDbC
             .Where(x => taskIds.Contains(x.TaskId))
             .ToDictionaryAsync(x => x.TaskId, cancellationToken);
         var evidenceRows = await db.BackupSetEvidence.AsNoTracking()
-            .Where(x => x.BackupSetId != null && ids.Contains(x.BackupSetId.Value)
-                && x.SourceObservedAtUtc != null)
-            .Select(x => new { BackupSetId = x.BackupSetId!.Value, x.Source, x.SourceObservedAtUtc })
+            .Where(x => x.BackupSetId != null && ids.Contains(x.BackupSetId.Value))
             .ToArrayAsync(cancellationToken);
         var candidates = new List<LogAssessmentCandidate>();
         foreach (var set in rows)
         {
             var setFiles = files.Where(file => file.BackupSetId == set.Id).ToArray();
-            var sources = evidenceRows.Where(x => x.BackupSetId == set.Id)
+            var observed = evidenceRows.Where(x => x.BackupSetId == set.Id)
                 .GroupBy(x => x.Source)
-                .Select(x => new { Source = MapSource(x.Key), ObservedAt = x.Max(y => y.SourceObservedAtUtc) })
+                .Select(group => group.OrderByDescending(x => x.ObservedAtUtc)
+                    .ThenByDescending(x => x.EntryNumber).First())
                 .ToArray();
-            if (sources.Length == 0)
+            if (observed.Length == 0)
             {
-                candidates.Add(ToCandidate(set, request.Scope, setFiles, snapshots,
-                    LogObservationSource.Platform, null));
+                candidates.Add(ToCandidate(set.Id, set.Metadata, set.Completion, request.Scope,
+                    setFiles, snapshots, LogObservationSource.Platform, null, null,
+                    set.BaseBackupSetId, set.Assessment));
                 continue;
             }
-            foreach (var source in sources)
-                candidates.Add(ToCandidate(set, request.Scope, setFiles, snapshots, source.Source, source.ObservedAt));
+            foreach (var evidence in observed)
+                candidates.Add(ToCandidate(set.Id, evidence.Metadata, evidence.Completion, request.Scope,
+                    setFiles, snapshots, MapSource(evidence.Source), evidence.SourceObservedAtUtc, evidence.Id,
+                    set.BaseBackupSetId, set.Assessment));
         }
         return new(true, candidates, []);
     }
@@ -61,37 +63,38 @@ internal sealed class LogAssessmentCandidateReader(IDbContextFactory<PlatformDbC
         _ => LogObservationSource.Platform,
     };
 
-    private static LogAssessmentCandidate ToCandidate(BackupSet set, LogLocationScope scope,
+    private static LogAssessmentCandidate ToCandidate(Guid backupSetId, BackupSetMetadata metadata,
+        BackupCompletionTimeDecision completion, LogLocationScope scope,
         IReadOnlyList<Domain.BackupTasks.BackupFile> files,
         IReadOnlyDictionary<Guid, Domain.BackupTasks.BackupTaskSnapshot> snapshots,
-        LogObservationSource source, DateTimeOffset? sourceObservedAt)
+        LogObservationSource source, DateTimeOffset? sourceObservedAt, Guid? evidenceId,
+        Guid? baseBackupSetId, BackupSetAssessment assessment)
     {
         var actual = new LogBackupActualMetadata
         {
-            Type = set.Metadata.Type.Value,
-            IsCopyOnly = set.Metadata.IsCopyOnly.Value,
-            RecoveryModel = set.Metadata.RecoveryModel.Value,
-            BeginsLogChain = set.Metadata.BeginsLogChain.Value,
-            HasBulkLoggedData = set.Metadata.HasBulkLoggedData.Value,
-            IsForceOffline = set.Metadata.IsForceOffline.Value,
-            UseChecksum = set.Metadata.HasBackupChecksums.Value,
-            UseCompression = set.Metadata.IsCompressed.Value,
-            IsDamaged = set.Metadata.IsDamaged.Value,
-            IsSnapshot = set.Metadata.IsSnapshot.Value,
-            IsIncomplete = set.Metadata.HasIncompleteMetadata.Value,
-            FirstLsn = set.Metadata.FirstLsn.Value,
-            LastLsn = set.Metadata.LastLsn.Value,
-            DatabaseBackupLsn = set.Metadata.DatabaseBackupLsn.Value,
-            ForkPointLsn = set.Metadata.ForkPointLsn.Value,
-            Database = set.Metadata.DatabaseGuid.Value is { } databaseGuid
-                && set.Metadata.FamilyGuid.Value is { } familyGuid ? new(databaseGuid, familyGuid) : null,
-            Branch = set.Metadata.FirstRecoveryForkId.Value is { } firstFork
-                && set.Metadata.RecoveryForkId.Value is { } recoveryFork ? new(firstFork, recoveryFork) : null,
-            CompletedAtUtc = set.Completion.CompletedAtUtc,
+            Type = metadata.Type.Value,
+            IsCopyOnly = metadata.IsCopyOnly.Value,
+            RecoveryModel = metadata.RecoveryModel.Value,
+            BeginsLogChain = metadata.BeginsLogChain.Value,
+            HasBulkLoggedData = metadata.HasBulkLoggedData.Value,
+            IsForceOffline = metadata.IsForceOffline.Value,
+            UseChecksum = metadata.HasBackupChecksums.Value,
+            UseCompression = metadata.IsCompressed.Value,
+            IsDamaged = metadata.IsDamaged.Value,
+            IsSnapshot = metadata.IsSnapshot.Value,
+            IsIncomplete = metadata.HasIncompleteMetadata.Value,
+            FirstLsn = metadata.FirstLsn.Value,
+            LastLsn = metadata.LastLsn.Value,
+            DatabaseBackupLsn = metadata.DatabaseBackupLsn.Value,
+            ForkPointLsn = metadata.ForkPointLsn.Value,
+            Database = metadata.DatabaseGuid.Value is { } databaseGuid
+                && metadata.FamilyGuid.Value is { } familyGuid ? new(databaseGuid, familyGuid) : null,
+            Branch = metadata.FirstRecoveryForkId.Value is { } firstFork
+                && metadata.RecoveryForkId.Value is { } recoveryFork ? new(firstFork, recoveryFork) : null,
+            CompletedAtUtc = completion.CompletedAtUtc,
             ObservedAtUtc = sourceObservedAt,
             Source = source,
-            Status = set.HasMetadataConflict ? LogEvidenceStatus.SourceConflict
-                : set.Metadata.HasIncompleteMetadata.Value == true ? LogEvidenceStatus.MissingFields
+            Status = metadata.HasIncompleteMetadata.Value == true ? LogEvidenceStatus.MissingFields
                 : LogEvidenceStatus.Complete,
         };
         var matching = files.Where(file => file.Location == Domain.BackupTasks.BackupFileLocation.Local
@@ -114,16 +117,17 @@ internal sealed class LogAssessmentCandidateReader(IDbContextFactory<PlatformDbC
         var protection = copyState == LogLocationCopyState.Available && snapshot is not null
             ? new LogProtectionExpectation(snapshot.UseChecksum, snapshot.UseCompression)
             : null;
-        var hasRequired = set.Metadata.Type.Value is not BackupType.Log
-            || set.Metadata.RecoveryModel.State == BackupMetadataState.Known
-                && set.Metadata.BeginsLogChain.State == BackupMetadataState.Known
-                && set.Metadata.HasBulkLoggedData.State == BackupMetadataState.Known
-                && set.Metadata.IsForceOffline.State == BackupMetadataState.Known;
-        var sourceRevision = LogAssessmentCanonicalizer.CandidateSourceRevision(set.Id,
-            available?.RowVersion ?? Array.Empty<byte>(), actual, scope, copyState, protection, sourceObservedAt);
-        return new(set.Id, actual, scope, copyState, true, protection,
-            set.Metadata.Type.Value == BackupType.Differential ? set.Assessment.Conclusion : null,
-            set.BaseBackupSetId,
+        var hasRequired = metadata.Type.Value is not BackupType.Log
+            || metadata.RecoveryModel.State == BackupMetadataState.Known
+                && metadata.BeginsLogChain.State == BackupMetadataState.Known
+                && metadata.HasBulkLoggedData.State == BackupMetadataState.Known
+                && metadata.IsForceOffline.State == BackupMetadataState.Known;
+        var sourceRevision = LogAssessmentCanonicalizer.CandidateSourceRevision(backupSetId,
+            available?.RowVersion ?? Array.Empty<byte>(), actual, scope, copyState, protection, sourceObservedAt,
+            evidenceId);
+        return new(backupSetId, actual, scope, copyState, true, protection,
+            metadata.Type.Value == BackupType.Differential ? assessment.Conclusion : null,
+            baseBackupSetId,
             sourceRevision,
             actual.Status, hasRequired);
     }

@@ -102,10 +102,20 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
                         {
                             Id = generationId,
                             DatabaseId = prepared.Input.DatabaseId,
+                            BoundaryKey = generation.BoundaryKey,
+                            SourceDatabaseGuid = generation.SourceDatabaseGuid,
+                            FamilyGuid = generation.FamilyGuid,
+                            FirstRecoveryForkId = generation.FirstRecoveryForkId,
+                            RecoveryForkId = generation.RecoveryForkId,
                             CreatedAtUtc = committedAt,
                         });
                     }
-                    else if (fact.DatabaseId != prepared.Input.DatabaseId)
+                    else if (fact.DatabaseId != prepared.Input.DatabaseId
+                        || fact.BoundaryKey != generation.BoundaryKey
+                        || fact.SourceDatabaseGuid != generation.SourceDatabaseGuid
+                        || fact.FamilyGuid != generation.FamilyGuid
+                        || fact.FirstRecoveryForkId != generation.FirstRecoveryForkId
+                        || fact.RecoveryForkId != generation.RecoveryForkId)
                     {
                         return new(LogAssessmentCommitCode.Conflict);
                     }
@@ -174,10 +184,19 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
         }
 
         var ids = resolved.Select(x => x.BackupSetId).ToHashSet();
+        var used = prepared.Coverage.UsedBackupSetIds.ToHashSet();
+        var rejected = prepared.Coverage.RejectedBackupSetIds.ToHashSet();
+        if (prepared.Coverage.ScopeKind != prepared.Input.ScopeKind
+            || prepared.Coverage.StorageTargetId != prepared.Input.StorageTargetId
+            || prepared.DataStart.ScopeKind != prepared.Input.ScopeKind
+            || prepared.DataStart.StorageTargetId != prepared.Input.StorageTargetId)
+            return false;
+        if (prepared.Candidates.Any(x => x.Used != used.Contains(x.BackupSetId)
+                || x.Rejected != rejected.Contains(x.BackupSetId)))
+            return false;
         foreach (var id in new[] { prepared.DataStart.FullBackupSetId, prepared.DataStart.DifferentialBackupSetId })
             if (id is { } value && !ids.Contains(value)) return false;
-        if (prepared.Coverage.UsedBackupSetIds.Any(x => !ids.Contains(x))
-            || prepared.Coverage.RejectedBackupSetIds.Any(x => !ids.Contains(x)))
+        if (used.Any(x => !ids.Contains(x)) || rejected.Any(x => !ids.Contains(x)))
             return false;
         foreach (var generation in prepared.Generations.Where(x => x.GenerationId is { }))
             if (!resolved.Any(x => x.Actual.Generation?.GenerationId == generation.GenerationId

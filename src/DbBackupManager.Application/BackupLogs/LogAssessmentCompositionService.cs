@@ -271,6 +271,8 @@ public sealed class LogAssessmentCompositionService(
                 && databaseGuid != Guid.Empty && familyGuid != Guid.Empty
                 && actual.Branch is { FirstRecoveryForkId: { } firstFork, RecoveryForkId: { } recoveryFork }
                 && firstFork != Guid.Empty && recoveryFork != Guid.Empty;
+            var boundaryKey = LogAssessmentCanonicalizer.GenerationBoundaryKey(databaseId,
+                candidate.BackupSetId, actual);
             Guid? generationId = null;
             var evidenceKind = actual.Generation?.Evidence ?? LogGenerationEvidenceKind.Unspecified;
             if (valid && actual.Generation is { IsKnown: true } known
@@ -281,9 +283,7 @@ public sealed class LogAssessmentCompositionService(
             else if (valid && actual.BeginsLogChain == true)
             {
                 evidenceKind = LogGenerationEvidenceKind.BeginsLogChain;
-                generationId = LogAssessmentCanonicalizer.DeterministicId("generation",
-                    LogAssessmentCanonicalizer.EvidenceKey(databaseId,
-                        actual, evidenceKind, candidate.SourceRevision));
+                generationId = LogAssessmentCanonicalizer.DeterministicId("generation", boundaryKey);
             }
 
             var resolvedActual = actual with
@@ -297,7 +297,7 @@ public sealed class LogAssessmentCompositionService(
             var key = LogAssessmentCanonicalizer.EvidenceKey(databaseId,
                 actual, evidenceKind, candidate.SourceRevision);
             if (keys.Add(key))
-                drafts.Add(new(generationId, key, evidenceKind, actual.Database?.DatabaseGuid,
+                drafts.Add(new(generationId, key, boundaryKey, evidenceKind, actual.Database?.DatabaseGuid,
                     actual.Database?.FamilyGuid, actual.Branch?.FirstRecoveryForkId,
                     actual.Branch?.RecoveryForkId, actual.ObservedAtUtc, candidate.Status));
         }

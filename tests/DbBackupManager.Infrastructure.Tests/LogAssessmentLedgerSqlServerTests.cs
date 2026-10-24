@@ -81,39 +81,26 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     [Fact]
-    public async Task R32o3SameGenerationFullAndLogKeepSeparateEvidenceRows()
+    public async Task R32o3SameGenerationMultipleSourceObservationsKeepSeparateEvidenceRows()
     {
         await using var fixture = new PlatformDatabaseSqlServerFixture();
         await fixture.InitializeAsync();
         var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
         var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
-        var log = new LogAssessmentCandidate(Guid.NewGuid(), new()
+        var first = FullCandidate();
+        var header = first with
         {
-            Type = BackupType.Log,
-            IsCopyOnly = false,
-            RecoveryModel = DatabaseRecoveryModel.Full,
-            BeginsLogChain = false,
-            HasBulkLoggedData = false,
-            IsForceOffline = false,
-            UseChecksum = true,
-            UseCompression = false,
-            IsDamaged = false,
-            IsSnapshot = false,
-            IsIncomplete = false,
-            FirstLsn = new(100),
-            LastLsn = new(200),
-            DatabaseBackupLsn = new(0),
-            ForkPointLsn = new(100),
-            Database = new(DatabaseGuid, FamilyGuid),
-            Branch = new(Fork, Fork),
-            Generation = new(GenerationId, LogGenerationEvidenceKind.RecoveryFork),
-            ObservedAtUtc = At.AddMinutes(-1),
-            Source = LogObservationSource.BackupHeader,
-            Status = LogEvidenceStatus.Complete,
-        }, LogLocationScope.Local, LogLocationCopyState.Available, false, new(true, false), null, null, Guid.NewGuid());
-        var prepared = await PrepareAsync(store, Guid.NewGuid(), log);
+            Actual = first.Actual with { Source = LogObservationSource.BackupHeader, ObservedAtUtc = At },
+            SourceRevision = Guid.NewGuid(),
+        };
+        var msdb = first with
+        {
+            Actual = first.Actual with { Source = LogObservationSource.Msdb, ObservedAtUtc = At.AddSeconds(1) },
+            SourceRevision = Guid.NewGuid(),
+        };
+        var prepared = await PrepareCandidatesAsync(store, Guid.NewGuid(), header, msdb);
         Assert.Equal(2, prepared.Generations.Count);
-        Assert.All(prepared.Generations, x => Assert.Equal(GenerationId, x.GenerationId));
+        Assert.All(prepared.Generations, x => Assert.Equal(first.Actual.Generation!.GenerationId, x.GenerationId));
         Assert.Equal(LogAssessmentCommitCode.Succeeded, (await store.CommitAsync(prepared)).Code);
         await using var db = fixture.CreateContext();
         Assert.Equal(1, await db.LogGenerationFacts.CountAsync());
@@ -172,9 +159,12 @@ public sealed class LogAssessmentLedgerSqlServerTests
             LogResourceAvailability.Available, new(10, 1000, 100), new(0, 0, 1000),
             new(10, 1000, 100), new(0, 0, 1000), true, null, []));
 
-        var candidate = Assert.Single(snapshot.Candidates);
-        Assert.Equal(LogLocationCopyState.Missing, candidate.CopyState);
-        Assert.Null(candidate.ProtectionExpectation);
+        Assert.NotEmpty(snapshot.Candidates);
+        Assert.All(snapshot.Candidates, candidate =>
+        {
+            Assert.Equal(LogLocationCopyState.Missing, candidate.CopyState);
+            Assert.Null(candidate.ProtectionExpectation);
+        });
         Assert.True(snapshot.EnumerationComplete);
     }
 
@@ -215,8 +205,9 @@ public sealed class LogAssessmentLedgerSqlServerTests
         var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
         var first = new LogAssessmentCommitStore(factory, TimeProvider.System);
         var second = new LogAssessmentCommitStore(factory, TimeProvider.System);
-        var a = await PrepareAsync(first, Guid.NewGuid());
-        var b = await PrepareAsync(second, Guid.NewGuid());
+        var shared = FullCandidate();
+        var a = await PrepareCandidatesAsync(first, Guid.NewGuid(), shared);
+        var b = await PrepareCandidatesAsync(second, Guid.NewGuid(), shared);
 
         var results = await Task.WhenAll(first.CommitAsync(a), second.CommitAsync(b));
 
@@ -250,6 +241,91 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     [Fact]
+    public async Task W05CoverageScopeAndUsedFlagsMustMatchFixedInput()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var prepared = await PrepareAsync(store, Guid.NewGuid());
+        var wrongScope = Rebind(prepared with
+        {
+            Coverage = prepared.Coverage with { ScopeKind = "Remote", StorageTargetId = Guid.NewGuid() },
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(wrongScope)).Code);
+
+        var usedFull = prepared.ResolvedCandidates[0].BackupSetId;
+        var usedMismatch = Rebind(prepared with
+        {
+            Coverage = prepared.Coverage with { UsedBackupSetIds = [usedFull] },
+            Candidates =
+            [
+                prepared.Candidates[0] with { Used = false, Rejected = false },
+            ],
+        });
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(usedMismatch)).Code);
+        await using var db = fixture.CreateContext();
+        Assert.False(await db.LogAssessmentCommits.AnyAsync(x => x.Id == prepared.AssessmentId));
+    }
+
+    [Fact]
+    public async Task W01SourceCandidatesKeepTheirOwnMetadataAndTime()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var work = await BackupSetTestData.WorkAsync(fixture);
+        var header = BackupSetTestData.Full() with { IsCompressed = new BackupMetadataField<bool>() };
+        var msdb = BackupSetTestData.Full() with { IsCompressed = BackupMetadata.Known(true) };
+        var command = BackupSetTestData.Command(work, header) with
+        {
+            Observations =
+            [
+                new(BackupSetEvidenceSource.BackupHeader, BackupSetEvidenceKind.Backup, header,
+                    BackupSetTestData.Command(work, header).Completion, BackupSetAssessment.NotApplicable, At),
+                new(BackupSetEvidenceSource.Msdb, BackupSetEvidenceKind.Backup, msdb,
+                    BackupSetTestData.Command(work, header).Completion, BackupSetAssessment.NotApplicable, At.AddSeconds(1)),
+            ],
+        };
+        Assert.Equal(BackupTaskStoreResultCode.Succeeded, (await BackupSetTestData.RegisterAsync(fixture, command)).Code);
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var reader = new LogAssessmentCandidateReader(factory);
+        var snapshot = await reader.ReadAsync(new LogAssessmentRequest(
+            work.Snapshot.Identity.DatabaseId, Guid.NewGuid(), "synthetic", PlanId, VersionId, ConfigId,
+            new(header.DatabaseGuid.Value, header.FamilyGuid.Value), LogLocationScope.Local,
+            LogRequestIntent.Manual, At, 60, new("synthetic-sql", Guid.NewGuid(), true, false, null, 30),
+            new(), LogCapabilityState.Supported, LogResourceAvailability.Available,
+            new(10, 1000, 100), new(0, 0, 1000), new(10, 1000, 100), new(0, 0, 1000),
+            true, null, []));
+
+        var headerCandidate = snapshot.Candidates.Single(x => x.Actual.Source == LogObservationSource.BackupHeader);
+        var msdbCandidate = snapshot.Candidates.Single(x => x.Actual.Source == LogObservationSource.Msdb);
+        Assert.Null(headerCandidate.Actual.UseCompression);
+        Assert.True(msdbCandidate.Actual.UseCompression);
+        Assert.Equal(At, headerCandidate.Actual.ObservedAtUtc);
+        Assert.Equal(At.AddSeconds(1), msdbCandidate.Actual.ObservedAtUtc);
+    }
+
+    [Fact]
+    public async Task W04ExistingGenerationCannotBeReusedForDifferentSourceIdentity()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var original = FullCandidate();
+        var prepared = await PrepareCandidatesAsync(store, Guid.NewGuid(), original);
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await store.CommitAsync(prepared)).Code);
+
+        var otherIdentity = new BackupDatabaseIdentity(Guid.NewGuid(), Guid.NewGuid());
+        var changedCandidate = original with
+        {
+            Actual = original.Actual with { Database = otherIdentity },
+        };
+        var changed = await PrepareCandidatesAsync(store, Guid.NewGuid(), changedCandidate);
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(changed)).Code);
+    }
+
+    [Fact]
     public async Task C17ConcurrentSamePayloadOneRowAndSameGenerationOneIdentity()
     {
         await using var fixture = new PlatformDatabaseSqlServerFixture();
@@ -257,8 +333,9 @@ public sealed class LogAssessmentLedgerSqlServerTests
         var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
         var first = new LogAssessmentCommitStore(factory, TimeProvider.System);
         var second = new LogAssessmentCommitStore(factory, TimeProvider.System);
-        var prepared = await PrepareAsync(first, Guid.NewGuid());
-        var other = await PrepareAsync(second, Guid.NewGuid());
+        var shared = FullCandidate();
+        var prepared = await PrepareCandidatesAsync(first, Guid.NewGuid(), shared);
+        var other = await PrepareCandidatesAsync(second, Guid.NewGuid(), shared);
 
         var results = await Task.WhenAll(first.CommitAsync(prepared), second.CommitAsync(prepared));
         Assert.Single(results, x => x.Code == LogAssessmentCommitCode.Succeeded);
@@ -324,41 +401,46 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     private static async Task<PreparedLogAssessment> PrepareAsync(ILogAssessmentCommitStore store, Guid mutationId,
-        LogAssessmentCandidate? extra = null)
+        LogAssessmentCandidate? extra = null) =>
+        await PrepareCandidatesAsync(store, mutationId,
+            extra is null ? [FullCandidate()] : [FullCandidate(), extra]);
+
+    private static async Task<PreparedLogAssessment> PrepareCandidatesAsync(ILogAssessmentCommitStore store,
+        Guid mutationId, params LogAssessmentCandidate[] candidates)
     {
-        var candidate = new LogAssessmentCandidate(Guid.NewGuid(), new()
-        {
-            Type = BackupType.Full,
-            IsCopyOnly = false,
-            RecoveryModel = DatabaseRecoveryModel.Full,
-            BeginsLogChain = false,
-            HasBulkLoggedData = false,
-            IsForceOffline = false,
-            UseChecksum = true,
-            UseCompression = false,
-            IsDamaged = false,
-            IsSnapshot = false,
-            IsIncomplete = false,
-            FirstLsn = new(10),
-            LastLsn = new(100),
-            DatabaseBackupLsn = new(0),
-            ForkPointLsn = new(10),
-            Database = new(DatabaseGuid, FamilyGuid),
-            Branch = new(Fork, Fork),
-            Generation = new(GenerationId, LogGenerationEvidenceKind.RecoveryFork),
-            ObservedAtUtc = At.AddMinutes(-1),
-            Source = LogObservationSource.Platform,
-            Status = LogEvidenceStatus.Complete,
-        }, LogLocationScope.Local, LogLocationCopyState.Available, false, new(true, false), null, null, SourceRevision);
         var request = new LogAssessmentRequest(DatabaseId, mutationId, "synthetic", PlanId, VersionId, ConfigId,
             new(DatabaseGuid, FamilyGuid), LogLocationScope.Local, LogRequestIntent.Manual, At, 60,
             new("synthetic-sql", Guid.NewGuid(), true, false, null, 30), new(), LogCapabilityState.Supported,
             LogResourceAvailability.Available, new(10, 1000, 100), new(0, 0, 1000),
-            new(10, 1000, 100), new(0, 0, 1000), true, null,
-            extra is null ? [candidate] : [candidate, extra]);
+            new(10, 1000, 100), new(0, 0, 1000), true, null, candidates);
         var service = new LogAssessmentCompositionService(new Reader(), store);
         return await service.PrepareAsync(request);
     }
+
+    private static LogAssessmentCandidate FullCandidate(Guid? generationId = null) => new(Guid.NewGuid(), new()
+    {
+        Type = BackupType.Full,
+        IsCopyOnly = false,
+        RecoveryModel = DatabaseRecoveryModel.Full,
+        BeginsLogChain = false,
+        HasBulkLoggedData = false,
+        IsForceOffline = false,
+        UseChecksum = true,
+        UseCompression = false,
+        IsDamaged = false,
+        IsSnapshot = false,
+        IsIncomplete = false,
+        FirstLsn = new(10),
+        LastLsn = new(100),
+        DatabaseBackupLsn = new(0),
+        ForkPointLsn = new(10),
+        Database = new(DatabaseGuid, FamilyGuid),
+        Branch = new(Fork, Fork),
+        Generation = new(generationId ?? Guid.NewGuid(), LogGenerationEvidenceKind.RecoveryFork),
+        ObservedAtUtc = At.AddMinutes(-1),
+        Source = LogObservationSource.Platform,
+        Status = LogEvidenceStatus.Complete,
+    }, LogLocationScope.Local, LogLocationCopyState.Available, false, new(true, false), null, null, Guid.NewGuid());
 
     private static PreparedLogAssessment Rebind(PreparedLogAssessment prepared)
     {

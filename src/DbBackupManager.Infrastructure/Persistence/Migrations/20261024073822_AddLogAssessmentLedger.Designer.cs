@@ -13,7 +13,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace DbBackupManager.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(PlatformDbContext))]
-    [Migration("20261024043021_AddLogAssessmentLedger")]
+    [Migration("20261024073822_AddLogAssessmentLedger")]
     partial class AddLogAssessmentLedger
     {
         /// <inheritdoc />
@@ -4892,10 +4892,28 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("BoundaryKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nchar(64)")
+                        .IsFixedLength();
+
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("datetimeoffset");
 
                     b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("FamilyGuid")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("FirstRecoveryForkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("RecoveryForkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceDatabaseGuid")
                         .HasColumnType("uniqueidentifier");
 
                     b.HasKey("Id");

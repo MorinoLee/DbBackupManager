@@ -80,6 +80,7 @@ internal sealed class LogAssessmentModelConfiguration : IEntityTypeConfiguration
     {
         builder.ToTable("LogGenerationFacts");
         builder.HasKey(x => x.Id);
+        builder.Property(x => x.BoundaryKey).HasMaxLength(64).IsFixedLength();
         builder.Property(x => x.CreatedAtUtc).IsRequired();
     }
 }

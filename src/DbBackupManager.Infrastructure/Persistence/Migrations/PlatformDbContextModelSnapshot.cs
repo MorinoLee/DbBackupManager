@@ -4889,10 +4889,28 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("BoundaryKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nchar(64)")
+                        .IsFixedLength();
+
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("datetimeoffset");
 
                     b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("FamilyGuid")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("FirstRecoveryForkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("RecoveryForkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceDatabaseGuid")
                         .HasColumnType("uniqueidentifier");
 
                     b.HasKey("Id");

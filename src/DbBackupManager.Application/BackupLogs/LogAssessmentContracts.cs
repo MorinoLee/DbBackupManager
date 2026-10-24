@@ -211,6 +211,7 @@ public sealed record LogObservationDraft(
 public sealed record LogGenerationDraft(
     Guid? GenerationId,
     string EvidenceKey,
+    string BoundaryKey,
     LogGenerationEvidenceKind EvidenceKind,
     Guid? SourceDatabaseGuid,
     Guid? FamilyGuid,
@@ -298,10 +299,11 @@ public static class LogAssessmentCanonicalizer
     public static string CandidateSetRevision(IReadOnlyList<LogAssessmentCandidate> candidates) => Hash(candidates);
     public static Guid CandidateSourceRevision(Guid backupSetId, byte[] rowVersion,
         LogBackupActualMetadata actual, LogLocationScope scope, LogLocationCopyState copyState,
-        LogProtectionExpectation? protection, DateTimeOffset? observedAt) =>
+        LogProtectionExpectation? protection, DateTimeOffset? observedAt, Guid? evidenceId = null) =>
         DeterministicId("candidate-source", Hash(new
         {
             BackupSetId = backupSetId,
+            EvidenceId = evidenceId,
             RowVersion = Convert.ToHexString(rowVersion),
             Actual = actual,
             ScopeKind = scope.Kind,
@@ -310,6 +312,19 @@ public static class LogAssessmentCanonicalizer
             Protection = protection,
             ObservedAt = observedAt,
         }));
+
+    public static string GenerationBoundaryKey(Guid databaseId, Guid backupSetId,
+        LogBackupActualMetadata actual) => Hash(new
+        {
+            DatabaseId = databaseId,
+            BackupSetId = backupSetId,
+            actual.Database,
+            actual.Branch,
+            actual.Type,
+            actual.BeginsLogChain,
+            FirstLsn = actual.FirstLsn?.Value,
+            LastLsn = actual.LastLsn?.Value,
+        });
     public static string PayloadFingerprint(PreparedLogAssessment prepared) =>
         Hash(prepared with { RequestFingerprint = string.Empty, PayloadFingerprint = string.Empty });
 

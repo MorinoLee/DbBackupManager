@@ -58,6 +58,11 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                 {
                     Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
                     DatabaseId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    BoundaryKey = table.Column<string>(type: "nchar(64)", fixedLength: true, maxLength: 64, nullable: false),
+                    SourceDatabaseGuid = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    FamilyGuid = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    FirstRecoveryForkId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    RecoveryForkId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
                     CreatedAtUtc = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false)
                 },
                 constraints: table =>
