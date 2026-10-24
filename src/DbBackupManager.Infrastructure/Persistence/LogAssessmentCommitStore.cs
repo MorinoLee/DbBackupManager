@@ -32,6 +32,7 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
             || prepared.PayloadFingerprint.Length != 64
             || prepared.Observations.Select(x => x.EntryNumber).Distinct().Count() != prepared.Observations.Count)
             return new(LogAssessmentCommitCode.Conflict);
+        if (!ReferencesAreClosed(prepared)) return new(LogAssessmentCommitCode.Conflict);
         try
         {
             await using var strategy = await factory.CreateDbContextAsync(cancellationToken);
@@ -154,6 +155,35 @@ internal sealed class LogAssessmentCommitStore(IDbContextFactory<PlatformDbConte
 
             return new(LogAssessmentCommitCode.Conflict);
         }
+    }
+
+    private static bool ReferencesAreClosed(PreparedLogAssessment prepared)
+    {
+        var resolved = prepared.ResolvedCandidates;
+        if (prepared.Candidates.Count != resolved.Count) return false;
+        for (var index = 0; index < resolved.Count; index++)
+        {
+            var candidate = resolved[index];
+            var reference = prepared.Candidates[index];
+            if (reference.BackupSetId != candidate.BackupSetId
+                || reference.SourceRevision != candidate.SourceRevision
+                || reference.ScopeKind != candidate.Scope.Kind.ToString()
+                || reference.StorageTargetId != candidate.Scope.StorageTargetId
+                || reference.GenerationId != candidate.Actual.Generation?.GenerationId)
+                return false;
+        }
+
+        var ids = resolved.Select(x => x.BackupSetId).ToHashSet();
+        foreach (var id in new[] { prepared.DataStart.FullBackupSetId, prepared.DataStart.DifferentialBackupSetId })
+            if (id is { } value && !ids.Contains(value)) return false;
+        if (prepared.Coverage.UsedBackupSetIds.Any(x => !ids.Contains(x))
+            || prepared.Coverage.RejectedBackupSetIds.Any(x => !ids.Contains(x)))
+            return false;
+        foreach (var generation in prepared.Generations.Where(x => x.GenerationId is { }))
+            if (!resolved.Any(x => x.Actual.Generation?.GenerationId == generation.GenerationId
+                && x.Actual.Generation?.Evidence == generation.EvidenceKind))
+                return false;
+        return true;
     }
 
     private static LogAssessmentCommitResult Compare(LogAssessmentCommit existing,

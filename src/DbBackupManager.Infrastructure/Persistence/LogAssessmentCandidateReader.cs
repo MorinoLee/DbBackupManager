@@ -29,22 +29,42 @@ internal sealed class LogAssessmentCandidateReader(IDbContextFactory<PlatformDbC
         var snapshots = await db.BackupTaskSnapshots.AsNoTracking()
             .Where(x => taskIds.Contains(x.TaskId))
             .ToDictionaryAsync(x => x.TaskId, cancellationToken);
-        var sourceTimes = await db.BackupSetEvidence.AsNoTracking()
+        var evidenceRows = await db.BackupSetEvidence.AsNoTracking()
             .Where(x => x.BackupSetId != null && ids.Contains(x.BackupSetId.Value)
                 && x.SourceObservedAtUtc != null)
-            .GroupBy(x => x.BackupSetId!.Value)
-            .Select(x => new { Id = x.Key, At = x.Max(y => y.SourceObservedAtUtc) })
-            .ToDictionaryAsync(x => x.Id, x => x.At, cancellationToken);
-        var candidates = rows.Select(x => ToCandidate(x, request.Scope,
-            files.Where(file => file.BackupSetId == x.Id).ToArray(),
-            snapshots, sourceTimes.GetValueOrDefault(x.Id))).ToArray();
+            .Select(x => new { BackupSetId = x.BackupSetId!.Value, x.Source, x.SourceObservedAtUtc })
+            .ToArrayAsync(cancellationToken);
+        var candidates = new List<LogAssessmentCandidate>();
+        foreach (var set in rows)
+        {
+            var setFiles = files.Where(file => file.BackupSetId == set.Id).ToArray();
+            var sources = evidenceRows.Where(x => x.BackupSetId == set.Id)
+                .GroupBy(x => x.Source)
+                .Select(x => new { Source = MapSource(x.Key), ObservedAt = x.Max(y => y.SourceObservedAtUtc) })
+                .ToArray();
+            if (sources.Length == 0)
+            {
+                candidates.Add(ToCandidate(set, request.Scope, setFiles, snapshots,
+                    LogObservationSource.Platform, null));
+                continue;
+            }
+            foreach (var source in sources)
+                candidates.Add(ToCandidate(set, request.Scope, setFiles, snapshots, source.Source, source.ObservedAt));
+        }
         return new(true, candidates, []);
     }
+
+    private static LogObservationSource MapSource(Domain.BackupSets.BackupSetEvidenceSource source) => source switch
+    {
+        Domain.BackupSets.BackupSetEvidenceSource.BackupHeader => LogObservationSource.BackupHeader,
+        Domain.BackupSets.BackupSetEvidenceSource.Msdb => LogObservationSource.Msdb,
+        _ => LogObservationSource.Platform,
+    };
 
     private static LogAssessmentCandidate ToCandidate(BackupSet set, LogLocationScope scope,
         IReadOnlyList<Domain.BackupTasks.BackupFile> files,
         IReadOnlyDictionary<Guid, Domain.BackupTasks.BackupTaskSnapshot> snapshots,
-        DateTimeOffset? sourceObservedAt)
+        LogObservationSource source, DateTimeOffset? sourceObservedAt)
     {
         var actual = new LogBackupActualMetadata
         {
@@ -69,7 +89,7 @@ internal sealed class LogAssessmentCandidateReader(IDbContextFactory<PlatformDbC
                 && set.Metadata.RecoveryForkId.Value is { } recoveryFork ? new(firstFork, recoveryFork) : null,
             CompletedAtUtc = set.Completion.CompletedAtUtc,
             ObservedAtUtc = sourceObservedAt,
-            Source = LogObservationSource.Platform,
+            Source = source,
             Status = set.HasMetadataConflict ? LogEvidenceStatus.SourceConflict
                 : set.Metadata.HasIncompleteMetadata.Value == true ? LogEvidenceStatus.MissingFields
                 : LogEvidenceStatus.Complete,
@@ -80,11 +100,17 @@ internal sealed class LogAssessmentCandidateReader(IDbContextFactory<PlatformDbC
         var available = matching.FirstOrDefault(file => file.Status == Domain.BackupTasks.BackupFileStatus.Available);
         var snapshot = available is null ? null : snapshots.GetValueOrDefault(available.TaskId);
         var storageMode = snapshot?.StorageMode;
-        var copyState = available is null
-            ? LogLocationCopyState.Missing
-            : storageMode == BackupStorageMode.RemoteOnly && scope.Kind == LogStorageLocation.Local
+        var copyState = storageMode == BackupStorageMode.RemoteOnly
+            && scope.Kind == LogStorageLocation.Local
                 ? LogLocationCopyState.Unknown
-                : LogLocationCopyState.Available;
+            : matching.Length == 0
+                ? LogLocationCopyState.Missing
+            : available is not null
+                ? LogLocationCopyState.Available
+            : matching.Any(file => file.Status is Domain.BackupTasks.BackupFileStatus.DeletePending
+                or Domain.BackupTasks.BackupFileStatus.DeleteFailed)
+                ? LogLocationCopyState.Unknown
+                : LogLocationCopyState.Missing;
         var protection = copyState == LogLocationCopyState.Available && snapshot is not null
             ? new LogProtectionExpectation(snapshot.UseChecksum, snapshot.UseCompression)
             : null;
@@ -93,11 +119,12 @@ internal sealed class LogAssessmentCandidateReader(IDbContextFactory<PlatformDbC
                 && set.Metadata.BeginsLogChain.State == BackupMetadataState.Known
                 && set.Metadata.HasBulkLoggedData.State == BackupMetadataState.Known
                 && set.Metadata.IsForceOffline.State == BackupMetadataState.Known;
+        var sourceRevision = LogAssessmentCanonicalizer.CandidateSourceRevision(set.Id,
+            available?.RowVersion ?? Array.Empty<byte>(), actual, scope, copyState, protection, sourceObservedAt);
         return new(set.Id, actual, scope, copyState, true, protection,
             set.Metadata.Type.Value == BackupType.Differential ? set.Assessment.Conclusion : null,
             set.BaseBackupSetId,
-            LogAssessmentCanonicalizer.DeterministicId("candidate", set.Id,
-                available?.RowVersion ?? Array.Empty<byte>()),
+            sourceRevision,
             actual.Status, hasRequired);
     }
 }

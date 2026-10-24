@@ -183,7 +183,8 @@ public sealed record LogAssessmentInput(
         request.Candidates.OrderBy(x => x.BackupSetId).ThenBy(x => x.SourceRevision)
             .ThenBy(x => x.Scope.Kind).ThenBy(x => x.Scope.StorageTargetId)
             .ThenBy(x => x.Actual.Type).ThenBy(x => x.Actual.FirstLsn?.Value)
-            .ThenBy(x => x.Actual.LastLsn?.Value).ToArray());
+            .ThenBy(x => x.Actual.LastLsn?.Value)
+            .ThenBy(LogAssessmentCanonicalizer.CandidateSortKey, StringComparer.Ordinal).ToArray());
 
     public LogLocationScope Scope => new(
         Enum.Parse<LogStorageLocation>(ScopeKind, false), StorageTargetId);
@@ -293,7 +294,22 @@ public static class LogAssessmentCanonicalizer
     };
 
     public static string RequestFingerprint(LogAssessmentInput input) => Hash(input);
+    public static string CandidateSortKey(LogAssessmentCandidate candidate) => Hash(candidate);
     public static string CandidateSetRevision(IReadOnlyList<LogAssessmentCandidate> candidates) => Hash(candidates);
+    public static Guid CandidateSourceRevision(Guid backupSetId, byte[] rowVersion,
+        LogBackupActualMetadata actual, LogLocationScope scope, LogLocationCopyState copyState,
+        LogProtectionExpectation? protection, DateTimeOffset? observedAt) =>
+        DeterministicId("candidate-source", Hash(new
+        {
+            BackupSetId = backupSetId,
+            RowVersion = Convert.ToHexString(rowVersion),
+            Actual = actual,
+            ScopeKind = scope.Kind,
+            StorageTargetId = scope.StorageTargetId,
+            CopyState = copyState,
+            Protection = protection,
+            ObservedAt = observedAt,
+        }));
     public static string PayloadFingerprint(PreparedLogAssessment prepared) =>
         Hash(prepared with { RequestFingerprint = string.Empty, PayloadFingerprint = string.Empty });
 
@@ -327,6 +343,7 @@ public static class LogAssessmentCanonicalizer
     private static string ValueText(object? value) => value switch
     {
         null => string.Empty,
+        byte[] bytes => Convert.ToHexString(bytes),
         DateTimeOffset time => time.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
         _ => value.ToString() ?? string.Empty,
     };

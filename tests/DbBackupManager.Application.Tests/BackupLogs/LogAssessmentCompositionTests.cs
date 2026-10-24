@@ -226,6 +226,58 @@ public sealed class LogAssessmentCompositionTests
     }
 
     [Fact]
+    public async Task R32o4InnerConflictOrUnspecifiedEvidenceCannotProveGeneration()
+    {
+        var innerConflict = FullCandidate() with
+        {
+            Actual = FullCandidate().Actual with
+            {
+                Status = LogEvidenceStatus.SourceConflict,
+                BeginsLogChain = true,
+            },
+        };
+        var blocked = await PrepareAsync(Request(candidates: [innerConflict]));
+        Assert.Empty(blocked.Generations);
+        Assert.Null(blocked.Candidates[0].GenerationId);
+
+        var unspecified = FullCandidate() with
+        {
+            Actual = FullCandidate().Actual with
+            {
+                Generation = new(Guid.NewGuid(), LogGenerationEvidenceKind.Unspecified),
+            },
+        };
+        var unknown = await PrepareAsync(Request(candidates: [unspecified]));
+        Assert.Empty(unknown.Generations);
+        Assert.Null(unknown.Candidates[0].GenerationId);
+    }
+
+    [Fact]
+    public async Task R32o6SameBackupMultipleSourceOrderIsCanonical()
+    {
+        var store = new FakeCommitStore();
+        var service = new LogAssessmentCompositionService(new FakeReader(ReadyEvidence()), store);
+        var first = FullCandidate();
+        var header = first with
+        {
+            Actual = first.Actual with { Source = LogObservationSource.BackupHeader, ObservedAtUtc = At },
+        };
+        var msdb = first with
+        {
+            Actual = first.Actual with { Source = LogObservationSource.Msdb, ObservedAtUtc = At.AddSeconds(1) },
+        };
+        var prepared = await service.PrepareAsync(Request(candidates: [header, msdb]));
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await service.CommitAsync(prepared)).Code);
+
+        var replay = await service.PrepareAsync(Request(candidates: [msdb, header]) with
+        {
+            MutationId = prepared.Input.MutationId,
+        });
+
+        Assert.Equal(prepared.PayloadFingerprint, replay.PayloadFingerprint);
+    }
+
+    [Fact]
     public async Task C21PriorCallStateRemainsIndependent()
     {
         var request = Request(candidates: [FullCandidate()]) with

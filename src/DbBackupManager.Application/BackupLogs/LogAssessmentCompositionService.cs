@@ -74,7 +74,11 @@ public sealed class LogAssessmentCompositionService(
                 || c.Actual.Database.DatabaseGuid is not { } databaseGuid
                 || c.Actual.Database.FamilyGuid is not { } familyGuid
                 || databaseGuid == request.ExpectedDatabase.DatabaseGuid && familyGuid == request.ExpectedDatabase.FamilyGuid)
-            .OrderBy(c => c.BackupSetId).ThenBy(c => c.SourceRevision).ToArray();
+            .OrderBy(c => c.BackupSetId).ThenBy(c => c.SourceRevision)
+            .ThenBy(c => c.Scope.Kind).ThenBy(c => c.Scope.StorageTargetId)
+            .ThenBy(c => c.Actual.Type).ThenBy(c => c.Actual.FirstLsn?.Value)
+            .ThenBy(c => c.Actual.LastLsn?.Value)
+            .ThenBy(LogAssessmentCanonicalizer.CandidateSortKey, StringComparer.Ordinal).ToArray();
         var issues = new List<LogAssessmentIssueDraft>();
         if (snapshot.Candidates.Any(c => c.Scope != request.Scope))
             issues.Add(new("log.candidate_scope_mismatch"));
@@ -260,16 +264,19 @@ public sealed class LogAssessmentCompositionService(
         foreach (var candidate in candidates)
         {
             var actual = candidate.Actual;
-            var valid = candidate.Status == LogEvidenceStatus.Complete && candidate.HasRequiredFields
+            var valid = candidate.Status == LogEvidenceStatus.Complete
+                && actual.Status == LogEvidenceStatus.Complete
+                && candidate.HasRequiredFields
                 && actual.Type is not null && actual.Database is { DatabaseGuid: { } databaseGuid, FamilyGuid: { } familyGuid }
                 && databaseGuid != Guid.Empty && familyGuid != Guid.Empty
                 && actual.Branch is { FirstRecoveryForkId: { } firstFork, RecoveryForkId: { } recoveryFork }
                 && firstFork != Guid.Empty && recoveryFork != Guid.Empty;
             Guid? generationId = null;
             var evidenceKind = actual.Generation?.Evidence ?? LogGenerationEvidenceKind.Unspecified;
-            if (valid && actual.Generation?.IsKnown == true)
+            if (valid && actual.Generation is { IsKnown: true } known
+                && known.Evidence != LogGenerationEvidenceKind.Unspecified)
             {
-                generationId = actual.Generation.GenerationId;
+                generationId = known.GenerationId;
             }
             else if (valid && actual.BeginsLogChain == true)
             {

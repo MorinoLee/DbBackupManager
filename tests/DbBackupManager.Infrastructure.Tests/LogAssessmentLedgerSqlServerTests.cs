@@ -228,6 +228,28 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     [Fact]
+    public async Task E05ReferenceOutsideResolvedCandidatesIsRejected()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var prepared = await PrepareAsync(store, Guid.NewGuid());
+        var other = Guid.NewGuid();
+        var changed = Rebind(prepared with
+        {
+            Candidates =
+            [
+                prepared.Candidates[0] with { BackupSetId = other },
+            ],
+        });
+
+        Assert.Equal(LogAssessmentCommitCode.Conflict, (await store.CommitAsync(changed)).Code);
+        await using var db = fixture.CreateContext();
+        Assert.False(await db.LogAssessmentCommits.AnyAsync(x => x.Id == changed.AssessmentId));
+    }
+
+    [Fact]
     public async Task C17ConcurrentSamePayloadOneRowAndSameGenerationOneIdentity()
     {
         await using var fixture = new PlatformDatabaseSqlServerFixture();
