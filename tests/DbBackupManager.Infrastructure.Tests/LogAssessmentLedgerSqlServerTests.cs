@@ -58,6 +58,28 @@ public sealed class LogAssessmentLedgerSqlServerTests
     }
 
     [Fact]
+    public async Task C27AssessmentResultsAreReadByStableAssessmentIdNotLatestRow()
+    {
+        await using var fixture = new PlatformDatabaseSqlServerFixture();
+        await fixture.InitializeAsync();
+        var factory = new BackupExecutionContractSqlServerTests.Factory(fixture);
+        var store = new LogAssessmentCommitStore(factory, TimeProvider.System);
+        var first = await PrepareAsync(store, Guid.NewGuid());
+        var second = await PrepareAsync(store, Guid.NewGuid());
+        Assert.NotEqual(first.AssessmentId, second.AssessmentId);
+
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await store.CommitAsync(first)).Code);
+        Assert.Equal(LogAssessmentCommitCode.Succeeded, (await store.CommitAsync(second)).Code);
+        var firstRead = await store.ReadAsync(first.Input.DatabaseId, first.Input.MutationId);
+        var secondRead = await store.ReadAsync(second.Input.DatabaseId, second.Input.MutationId);
+        Assert.Equal(first.PayloadFingerprint, firstRead.Value!.PayloadFingerprint);
+        Assert.Equal(second.PayloadFingerprint, secondRead.Value!.PayloadFingerprint);
+        Assert.NotEqual(firstRead.Value.PayloadFingerprint, secondRead.Value.PayloadFingerprint);
+        await using var db = fixture.CreateContext();
+        Assert.Equal(2, await db.LogAssessmentCommits.CountAsync());
+    }
+
+    [Fact]
     public async Task C17ConcurrentSamePayloadOneRowAndSameGenerationOneIdentity()
     {
         await using var fixture = new PlatformDatabaseSqlServerFixture();
