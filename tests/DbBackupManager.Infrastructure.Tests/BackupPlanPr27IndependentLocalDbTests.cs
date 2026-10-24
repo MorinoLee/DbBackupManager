@@ -84,7 +84,7 @@ public sealed class BackupPlanPr27IndependentLocalDbTests
                 var migrations = db.Database.GetMigrations().ToArray();
                 last = migrations[^1];
                 previous = migrations[^2];
-                Assert.EndsWith("AddLogMetadataFields", last, StringComparison.Ordinal);
+                Assert.EndsWith("AddLogAssessmentLedger", last, StringComparison.Ordinal);
                 await db.GetService<IMigrator>().MigrateAsync(previous);
             }
             await using (var db = platform.CreateContext())
@@ -103,7 +103,7 @@ public sealed class BackupPlanPr27IndependentLocalDbTests
             {
                 Assert.Equal(BackupTaskStatus.ClosedUnknown, (await db.BackupTasks.SingleAsync(x => x.Id == taskId)).Status);
                 var error = await Assert.ThrowsAsync<SqlException>(() => db.GetService<IMigrator>().MigrateAsync(previous));
-                Assert.Equal(51014, error.Number);
+                Assert.Equal(51015, error.Number);
             }
             await using var final = platform.CreateContext();
             Assert.Contains(last, await final.Database.GetAppliedMigrationsAsync());

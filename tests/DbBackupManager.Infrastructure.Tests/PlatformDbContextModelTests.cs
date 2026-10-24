@@ -10,6 +10,21 @@ namespace DbBackupManager.Infrastructure.Tests;
 public sealed class PlatformDbContextModelTests
 {
     [Fact]
+    public void C18GeneratedModelMapsLogAssessmentLedgerKeysAndChecks()
+    {
+        using var context = CreateContext();
+        var script = context.Database.GenerateCreateScript();
+        Assert.Contains("CREATE TABLE [LogAssessmentCommits]", script, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE [LogObservationEntries]", script, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE [LogCoverageEntries]", script, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE [LogGenerationEvidence]", script, StringComparison.Ordinal);
+        Assert.Contains("AK_LogAssessmentCommits_DatabaseId_MutationId", script, StringComparison.Ordinal);
+        Assert.Contains("IX_LogObservationEntries_AssessmentId_EntryNumber", script, StringComparison.Ordinal);
+        Assert.Contains("IX_LogGenerationEvidence_EvidenceKey", script, StringComparison.Ordinal);
+        Assert.Contains("CK_LogCoverageEntries_Scope", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void B13GeneratedModelMapsLogMetadataOnAllFourHosts()
     {
         using var context = CreateContext();

@@ -327,7 +327,7 @@ public sealed class BackupExecutionContractSqlServerTests(PlatformDatabaseSqlSer
                 if (dataKind == "binding")
                     Assert.NotNull(work.Attempt.ExpectedDatabaseGuid);
                 var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
-                Assert.Equal(51014, error.Number);
+                Assert.Equal(51015, error.Number);
                 Assert.Equal(history, await db.Database.GetAppliedMigrationsAsync());
                 Assert.Equal(3, await ContractTableCountAsync(db));
             }
