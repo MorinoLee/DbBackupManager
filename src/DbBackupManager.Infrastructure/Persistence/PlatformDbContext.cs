@@ -1,3 +1,4 @@
+using System.Linq;
 using DbBackupManager.Domain.BackupPlans;
 using DbBackupManager.Domain.BackupSets;
 using DbBackupManager.Domain.BackupTasks;
@@ -64,6 +65,14 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
     public DbSet<RemoteGapEpisode> RemoteGapEpisodes => Set<RemoteGapEpisode>();
 
     public DbSet<RemoteGapProjectionPending> RemoteGapProjectionPendings => Set<RemoteGapProjectionPending>();
+
+    public DbSet<LogAssessmentCommit> LogAssessmentCommits => Set<LogAssessmentCommit>();
+
+    public DbSet<LogObservationEntry> LogObservationEntries => Set<LogObservationEntry>();
+
+    public DbSet<LogCoverageEntry> LogCoverageEntries => Set<LogCoverageEntry>();
+
+    public DbSet<LogGenerationEvidence> LogGenerationEvidence => Set<LogGenerationEvidence>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -169,6 +178,19 @@ public sealed partial class PlatformDbContext(DbContextOptions<PlatformDbContext
         foreach (var entry in ChangeTracker.Entries<BackupSetEvidence>())
             if (entry.State is EntityState.Modified or EntityState.Deleted)
                 throw new InvalidOperationException("备份集证据只能追加，不能修改或删除。");
+
+        foreach (var entry in ChangeTracker.Entries<LogAssessmentCommit>())
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+                throw new InvalidOperationException("LOG 评估账本只能追加，不能修改或删除。");
+        foreach (var entry in ChangeTracker.Entries<LogObservationEntry>())
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+                throw new InvalidOperationException("LOG 评估账本只能追加，不能修改或删除。");
+        foreach (var entry in ChangeTracker.Entries<LogCoverageEntry>())
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+                throw new InvalidOperationException("LOG 评估账本只能追加，不能修改或删除。");
+        foreach (var entry in ChangeTracker.Entries<LogGenerationEvidence>())
+            if (entry.State is EntityState.Modified or EntityState.Deleted)
+                throw new InvalidOperationException("LOG 评估账本只能追加，不能修改或删除。");
 
         foreach (var entry in ChangeTracker.Entries<BackupSet>().Where(x => x.State == EntityState.Modified))
             ValidateBackupSetChange(entry);

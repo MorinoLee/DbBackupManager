@@ -18,9 +18,8 @@ public sealed class LogMetadataMigrationSqlServerTests
         await fixture.InitializeAsync();
         await using var db = fixture.CreateContext();
         var migrations = db.Database.GetMigrations().ToArray();
-        var latest = migrations[^1];
-        var previous = migrations[^2];
-        Assert.EndsWith("AddLogMetadataFields", latest, StringComparison.Ordinal);
+        var latest = migrations.Single(x => x.EndsWith("_AddLogMetadataFields", StringComparison.Ordinal));
+        var previous = migrations[Array.IndexOf(migrations, latest) - 1];
         var migrator = db.GetService<IMigrator>();
 
         await migrator.MigrateAsync(previous);
@@ -41,8 +40,8 @@ public sealed class LogMetadataMigrationSqlServerTests
         await fixture.InitializeAsync();
         await using var db = fixture.CreateContext();
         var migrations = db.Database.GetMigrations().ToArray();
-        var latest = migrations[^1];
-        var previous = migrations[^2];
+        var latest = migrations.Single(x => x.EndsWith("_AddLogMetadataFields", StringComparison.Ordinal));
+        var previous = migrations[Array.IndexOf(migrations, latest) - 1];
         var migrator = db.GetService<IMigrator>();
         await migrator.MigrateAsync(previous);
         await db.Database.ExecuteSqlRawAsync(
@@ -101,8 +100,8 @@ public sealed class LogMetadataMigrationSqlServerTests
         await fixture.InitializeAsync();
         await using var db = fixture.CreateContext();
         var migrations = db.Database.GetMigrations().ToArray();
-        var latest = migrations[^1];
-        var previous = migrations[^2];
+        var latest = migrations.Single(x => x.EndsWith("_AddLogMetadataFields", StringComparison.Ordinal));
+        var previous = migrations[Array.IndexOf(migrations, latest) - 1];
         var migrator = db.GetService<IMigrator>();
         await migrator.MigrateAsync(previous);
         await db.Database.ExecuteSqlRawAsync(
@@ -240,8 +239,9 @@ public sealed class LogMetadataMigrationSqlServerTests
             await db.Database.ExecuteSqlRawAsync(
                 "UPDATE [BackupPlanExecutionOperations] SET [State] = 'Applied' WHERE [Id] = {0};", identity.MutationId);
             var migrations = db.Database.GetMigrations().ToArray();
-            var latest = migrations[^1];
+            var latest = migrations.Single(x => x.EndsWith("_AddLogMetadataFields", StringComparison.Ordinal));
             await DropLogMetadataColumnsAsync(db);
+            await DropLogAssessmentLedgerAsync(db);
             await db.GetService<IMigrator>().MigrateAsync(latest);
 
             var upgraded = await operations.ReadAsync(identity);
@@ -261,6 +261,15 @@ public sealed class LogMetadataMigrationSqlServerTests
             Assert.Single(stillFrozen.Value.Observations);
         }
     }
+
+    private static async Task DropLogAssessmentLedgerAsync(PlatformDbContext db) =>
+        await db.Database.ExecuteSqlRawAsync("""
+            DROP TABLE IF EXISTS [LogCoverageEntries];
+            DROP TABLE IF EXISTS [LogObservationEntries];
+            DROP TABLE IF EXISTS [LogGenerationEvidence];
+            DROP TABLE IF EXISTS [LogAssessmentCommits];
+            DELETE FROM [__EFMigrationsHistory] WHERE [MigrationId] LIKE '%_AddLogAssessmentLedger';
+            """);
 
     internal static async Task DropLogMetadataColumnsAsync(PlatformDbContext db)
     {
@@ -338,8 +347,8 @@ public sealed class LogMetadataMigrationSqlServerTests
         await fixture.InitializeAsync();
         await using var db = fixture.CreateContext();
         var migrations = db.Database.GetMigrations().ToArray();
-        var latest = migrations[^1];
-        var previous = migrations[^2];
+        var latest = migrations.Single(x => x.EndsWith("_AddLogMetadataFields", StringComparison.Ordinal));
+        var previous = migrations[Array.IndexOf(migrations, latest) - 1];
         var migrator = db.GetService<IMigrator>();
         await migrator.MigrateAsync(previous);
         var id = Guid.NewGuid();

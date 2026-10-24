@@ -4665,6 +4665,268 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogAssessmentCommit", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CommittedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("CoverageConclusion")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("DataStartAvailability")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("DataStartReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<bool>("DatabaseBudgetAllows")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("DatabaseBudgetReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("GlobalBudgetAllows")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("GlobalBudgetReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<Guid>("MutationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("ObservedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("PayloadFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nchar(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("PlanVersionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("PreparedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<bool>("PriorCallMayEnterAdmission")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("PriorCallReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("RequestFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nchar(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("SchemaVersion")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ScopeKind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid?>("StorageTargetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TechnicalReadiness")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("TechnicalReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("DatabaseId", "MutationId");
+
+                    b.ToTable("LogAssessmentCommits", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_LogAssessmentCommits_CommittedAtUtc", "DATEPART(TZOFFSET,[CommittedAtUtc]) = 0");
+
+                            t.HasCheckConstraint("CK_LogAssessmentCommits_ObservedAtUtc", "DATEPART(TZOFFSET,[ObservedAtUtc]) = 0");
+
+                            t.HasCheckConstraint("CK_LogAssessmentCommits_PreparedAtUtc", "DATEPART(TZOFFSET,[PreparedAtUtc]) = 0");
+
+                            t.HasCheckConstraint("CK_LogAssessmentCommits_SchemaVersion", "[SchemaVersion] >= 1");
+
+                            t.HasCheckConstraint("CK_LogAssessmentCommits_Scope", "([ScopeKind] = 'Local' AND [StorageTargetId] IS NULL) OR ([ScopeKind] = 'Remote' AND [StorageTargetId] IS NOT NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogCoverageEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AssessmentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Conclusion")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<decimal?>("FrontierLsn")
+                        .HasPrecision(25)
+                        .HasColumnType("decimal(25,0)");
+
+                    b.Property<decimal?>("RestorePointLsn")
+                        .HasPrecision(25)
+                        .HasColumnType("decimal(25,0)");
+
+                    b.Property<string>("ScopeKind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid?>("StorageTargetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AssessmentId")
+                        .IsUnique();
+
+                    b.ToTable("LogCoverageEntries", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_LogCoverageEntries_Scope", "([ScopeKind] = 'Local' AND [StorageTargetId] IS NULL) OR ([ScopeKind] = 'Remote' AND [StorageTargetId] IS NOT NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogGenerationEvidence", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("DatabaseId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("EvidenceKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nchar(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("EvidenceKind")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<Guid?>("FamilyGuid")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("FirstRecoveryForkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("ObservedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset>("RecordedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid?>("RecoveryForkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceDatabaseGuid")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EvidenceKey")
+                        .IsUnique();
+
+                    b.ToTable("LogGenerationEvidence", (string)null);
+                });
+
+            modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogObservationEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AssessmentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("EntryNumber")
+                        .HasColumnType("int");
+
+                    b.Property<string>("FailureCode")
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("FailurePhase")
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<bool>("HasRequiredFields")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTimeOffset?>("ObservedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AssessmentId", "EntryNumber")
+                        .IsUnique();
+
+                    b.ToTable("LogObservationEntries", (string)null);
+                });
+
             modelBuilder.Entity("DbBackupManager.Domain.BackupPlans.BackupPlan", b =>
                 {
                     b.HasOne("DbBackupManager.Domain.Configuration.ManagedDatabase", null)
@@ -5072,6 +5334,24 @@ namespace DbBackupManager.Infrastructure.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("CredentialReferenceId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogCoverageEntry", b =>
+                {
+                    b.HasOne("DbBackupManager.Infrastructure.Persistence.LogAssessmentCommit", null)
+                        .WithMany()
+                        .HasForeignKey("AssessmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DbBackupManager.Infrastructure.Persistence.LogObservationEntry", b =>
+                {
+                    b.HasOne("DbBackupManager.Infrastructure.Persistence.LogAssessmentCommit", null)
+                        .WithMany()
+                        .HasForeignKey("AssessmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("DbBackupManager.Domain.BackupPlans.BackupPlan", b =>

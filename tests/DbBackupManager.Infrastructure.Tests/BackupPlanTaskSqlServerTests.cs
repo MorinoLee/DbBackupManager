@@ -320,7 +320,7 @@ public sealed class BackupPlanTaskSqlServerTests(PlatformDatabaseSqlServerFixtur
                 x.EndsWith("_AddRemoteGapProjectionPendings", StringComparison.Ordinal));
             // 最新 LOG 元数据迁移先保护已有任务/历史；旧策略迁移的 Down 不在有数据时执行。
             var blocked = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(beforeRemoval));
-            Assert.Equal(51014, blocked.Number);
+            Assert.Equal(51015, blocked.Number);
             Assert.Equal(BackupType.Differential, (await db.BackupTasks.SingleAsync(x => x.Id == task.Id)).BackupType);
             Assert.Equal(task.PlanId, await db.Database.SqlQueryRaw<Guid?>("""
                 SELECT [PlanId] AS [Value] FROM [BackupTasks] WHERE [Id] = {0}

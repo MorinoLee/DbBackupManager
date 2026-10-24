@@ -415,7 +415,7 @@ public sealed class BackupSetSqlServerTests(PlatformDatabaseSqlServerFixture dat
             await db.SaveChangesAsync();
             var setHistory = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(previous));
-            Assert.Equal(51014, error.Number);
+            Assert.Equal(51015, error.Number);
             Assert.Equal(2, await TableCountAsync(db));
             Assert.True(await HasAssociationColumnAsync(db));
             Assert.Equal(setHistory, (await db.Database.GetAppliedMigrationsAsync()).ToArray());

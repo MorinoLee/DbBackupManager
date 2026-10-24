@@ -395,7 +395,7 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
 
             var historyAtLatest = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var blocked = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(current));
-            Assert.Equal(51014, blocked.Number);
+            Assert.Equal(51015, blocked.Number);
             Assert.Equal(historyAtLatest, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
             Assert.Equal(1, await db.BackupPlanBaselineEnablements.CountAsync());
         }
@@ -422,7 +422,7 @@ public sealed class BackupPlanBaselineEnablementSqlServerTests(PlatformDatabaseS
 
             var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
             var error = await Assert.ThrowsAsync<SqlException>(() => migrator.MigrateAsync(current));
-            Assert.Equal(51014, error.Number);
+            Assert.Equal(51015, error.Number);
             Assert.Equal(history, (await db.Database.GetAppliedMigrationsAsync()).ToArray());
             Assert.Equal(1, await db.BackupPlanBaselineEnablements.CountAsync());
         }

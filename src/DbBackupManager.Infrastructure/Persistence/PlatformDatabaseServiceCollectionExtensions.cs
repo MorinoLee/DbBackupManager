@@ -1,3 +1,4 @@
+using DbBackupManager.Application.BackupLogs;
 using DbBackupManager.Application.BackupSets;
 using DbBackupManager.Application.BackupTasks;
 using DbBackupManager.Application.Identity;
@@ -66,6 +67,10 @@ public static class PlatformDatabaseServiceCollectionExtensions
         services.TryAddScoped<BackupSetRegistrationService>();
         services.TryAddScoped<IBackupMetadataReconciliationLookup, BackupMetadataReconciliationLookup>();
         services.TryAddScoped<BackupMetadataReconciliationService>();
+        services.TryAddScoped<ILogAssessmentCandidateReader, LogAssessmentCandidateReader>();
+        services.TryAddScoped<ILogAssessmentCommitStore, LogAssessmentCommitStore>();
+        services.TryAddScoped<LogAssessmentCompositionService>();
+        services.TryAddSingleton<ILogBudgetReservationStore, UnavailableLogBudgetReservationStore>();
         services.TryAddScoped<IWorkerHeartbeatStore, BackupManagement.WorkerHeartbeatStore>();
 
         return services;
